@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dongvan Ville du H'mong Hotel — Quản Lý Đặt Phòng</title>
+  <meta name="description" content="Ứng dụng nhập tay quản lý đặt phòng khách sạn 26 phòng + 1 phòng Dorm nội bộ 8 chỗ theo lịch tháng dành cho nhân viên lễ tân." />
+  <meta name="theme-color" content="#1e40af" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" type="image/png" href="icon-192.png" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Header -->
+    <header class="topbar">
+      <div class="brand-group">
+        <img src="logo.jpg" alt="Dongvan Ville du H'mong Hotel" class="brand-logo" />
+        <div>
+          <h1 class="brand-title">Dongvan Ville du H'mong Hotel</h1>
+          <div class="brand-sub">Lịch Đặt Phòng • 26 phòng (4 tầng ngủ) • 1 Dorm nội bộ (8 chỗ) • Tầng 5 Buffet sáng</div>
+        </div>
+      </div>
+
+      <nav class="month-nav" aria-label="Điều hướng ngày và tháng">
+        <button id="btn-prev-month" class="btn btn-icon" type="button" title="Tháng trước">◀</button>
+        <span id="month-label" class="month-label">Tháng 11 / 2026</span>
+        <button id="btn-next-month" class="btn btn-icon" type="button" title="Tháng sau">▶</button>
+        <button id="btn-today" class="btn btn-sm" type="button" title="Nhấn để về ngày hôm nay">
+          <span>📅</span>
+          <span id="today-date-label">Hôm nay: 21/11/2026</span>
+        </button>
+      </nav>
+
+      <div class="header-actions">
+        <button id="btn-new-booking" class="btn btn-primary" type="button">+ Đặt phòng</button>
+        <button id="btn-open-dorm-today" class="btn btn-sm" type="button">🛏️ Đặt slot Dorm</button>
+        <button id="btn-open-history" class="btn btn-sm btn-history" type="button" title="Xem lịch sử chỉnh sửa & cấu hình sao lưu tự động">
+          <span>🕒 Lịch sử</span>
+          <span id="autobackup-status-pill" class="autobackup-pill">Auto</span>
+        </button>
+        <button id="btn-export-csv" class="btn btn-sm" type="button" title="Xuất file Excel (CSV)">Xuất Excel</button>
+        <button id="btn-backup-json" class="btn btn-sm" type="button" title="Sao lưu dữ liệu JSON">Sao lưu</button>
+        <label class="btn btn-sm" for="input-restore-json" title="Khôi phục từ file JSON">
+          Khôi phục
+          <input id="input-restore-json" type="file" accept=".json" hidden />
+        </label>
+        <button id="btn-theme-toggle" class="btn btn-sm" type="button" title="Đổi giao diện Sáng / Tối">🌙</button>
+      </div>
+    </header>
+
+    <!-- Live Summary KPI Strip -->
+    <section class="summary-strip" aria-label="Thống kê nhanh">
+      <div class="kpi-item">
+        <span class="kpi-label">Hôm nay đang ở:</span>
+        <span id="kpi-today-occ" class="kpi-value">0 / 26 phòng</span>
+      </div>
+      <div class="kpi-item">
+        <span class="kpi-label">Dorm nội bộ hôm nay:</span>
+        <span id="kpi-today-dorm" class="kpi-value">Còn 8/8 chỗ</span>
+      </div>
+      <div class="kpi-item">
+        <span class="kpi-label">Ghép giường / Extra bed hôm nay:</span>
+        <span id="kpi-today-hk" class="kpi-value">0 ghép • 0 EB</span>
+      </div>
+      <div class="kpi-item">
+        <span class="kpi-label">Buffet sáng T5 (dự kiến hôm nay):</span>
+        <span id="kpi-today-buffet" class="kpi-value">0 khách</span>
+      </div>
+      <div class="kpi-item">
+        <span class="kpi-label">Đã thu tháng này:</span>
+        <span id="kpi-month-paid" class="kpi-value ok">0 đ</span>
+      </div>
+      <div class="kpi-item">
+        <span class="kpi-label">Còn phải thu tháng này:</span>
+        <span id="kpi-month-debt" class="kpi-value warn">0 đ</span>
+      </div>
+    </section>
+
+    <!-- Filters & Platform Legend -->
+    <section class="toolbar" aria-label="Bộ lọc và chú thích nền tảng">
+      <div class="filters-row">
+        <input id="filter-search" class="search-input" type="search" placeholder="Tìm khách, SĐT, mã ĐP, tour..." />
+        <select id="filter-floor" class="filter-select" aria-label="Lọc theo tầng">
+          <option value="all">Tất cả tầng</option>
+          <option value="1">Tầng 1 (5 phòng + Dorm nội bộ)</option>
+          <option value="2">Tầng 2 (7 phòng)</option>
+          <option value="3">Tầng 3 (7 phòng)</option>
+          <option value="4">Tầng 4 (7 phòng)</option>
+        </select>
+        <select id="filter-type" class="filter-select" aria-label="Lọc theo hạng phòng">
+          <option value="all">Tất cả hạng phòng</option>
+          <option value="Double">Double (1 giường đôi)</option>
+          <option value="Twins">Twins (2 giường đơn)</option>
+          <option value="Triple">Triple (3 giường đơn)</option>
+          <option value="Family">Family (1 đôi + 1 đơn)</option>
+          <option value="Dorm">Dorm nội bộ (8 chỗ ngủ)</option>
+        </select>
+        <select id="filter-view" class="filter-select" aria-label="Lọc theo view">
+          <option value="all">Tất cả view</option>
+          <option value="View núi">View núi</option>
+          <option value="View thung lũng">View thung lũng</option>
+        </select>
+        <select id="filter-payment" class="filter-select" aria-label="Lọc theo thanh toán">
+          <option value="all">Mọi thanh toán</option>
+          <option value="debt">Còn nợ / Chưa trả hết</option>
+          <option value="paid">Đã thanh toán hết</option>
+        </select>
+        <button id="btn-reset-filters" class="btn btn-sm" type="button">Đặt lại</button>
+      </div>
+
+      <div id="legend-strip" class="legend-strip" role="group" aria-label="Lọc nhanh theo nguồn book"></div>
+    </section>
+
+    <!-- Active Filter Notice Banner -->
+    <div id="active-filter-bar" class="active-filter-bar">
+      <span id="active-filter-text"></span>
+      <button id="btn-clear-filter-bar" class="btn btn-primary btn-sm" type="button">Hiện tất cả</button>
+    </div>
+
+    <!-- Monthly Calendar Matrix -->
+    <main id="cal-scroll-wrap" class="calendar-wrap">
+      <table id="calendar-table" class="calendar-table">
+        <thead id="calendar-thead"></thead>
+        <tbody id="calendar-tbody"></tbody>
+        <tfoot id="calendar-tfoot"></tfoot>
+      </table>
+    </main>
+  </div>
+
+  <!-- Hover Tooltip -->
+  <div id="cell-tooltip" class="cell-tooltip" role="tooltip"></div>
+
+  <!-- Regular Room Booking Create / Edit Modal (26 Guest Rooms) -->
+  <div id="booking-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-heading">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="modal-heading" class="modal-title">Đặt phòng mới</h2>
+          <div id="modal-room-info" class="modal-subtitle">Phòng 101 • Double • View thung lũng</div>
+        </div>
+        <button id="btn-close-modal" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+
+      <form id="booking-form" class="modal-body" novalidate>
+        <input type="hidden" id="field-booking-id" />
+        <div id="form-error" class="form-error"></div>
+
+        <!-- Room & Dates -->
+        <div class="form-grid-3">
+          <div class="field">
+            <label for="field-room">Phòng</label>
+            <select id="field-room" class="select" required></select>
+          </div>
+          <div class="field">
+            <label for="field-checkin">Nhận phòng (Check-in)</label>
+            <input id="field-checkin" class="input" type="date" required />
+          </div>
+          <div class="field">
+            <label for="field-checkout">Trả phòng (Check-out)</label>
+            <input id="field-checkout" class="input" type="date" required />
+          </div>
+        </div>
+
+        <!-- Platform / Source -->
+        <div class="field">
+          <label>Tên đơn vị book / Nền tảng *</label>
+          <div id="platform-chips" class="platform-chips"></div>
+        </div>
+
+        <div class="form-grid" id="channel-extra-grid">
+          <div class="field" id="wrap-source-custom" style="display: none;">
+            <label for="field-source-custom">Nhập tên nền tảng / đơn vị book *</label>
+            <input id="field-source-custom" class="input" type="text" placeholder="VD: Traveloka, Facebook, Expedia..." />
+          </div>
+          <div class="field" id="wrap-tour-name" style="display: none;">
+            <label for="field-tour-name">Tên tour / Công ty tour</label>
+            <input id="field-tour-name" class="input" type="text" placeholder="VD: Vietravel, Saigontourist, Đoàn công ty..." />
+          </div>
+          <div class="field full" id="wrap-booking-code">
+            <label for="field-booking-code">Mã đặt phòng</label>
+            <input id="field-booking-code" class="input" type="text" placeholder="VD: 4829103847" />
+          </div>
+        </div>
+
+        <!-- Guest Info -->
+        <div class="form-grid">
+          <div class="field">
+            <label for="field-guest-name">Tên khách hàng *</label>
+            <input id="field-guest-name" class="input" type="text" placeholder="VD: Nguyễn Văn An" required />
+          </div>
+          <div class="field">
+            <label for="field-phone">Số điện thoại</label>
+            <input id="field-phone" class="input" type="tel" placeholder="VD: 0912 345 678" />
+          </div>
+        </div>
+
+        <!-- Guest Count & Nights -->
+        <div class="form-grid">
+          <div class="field">
+            <label for="field-guest-count">Số khách lưu trú (tính buffet sáng T5)</label>
+            <input id="field-guest-count" class="input" type="number" min="1" max="12" value="2" />
+          </div>
+          <div class="field">
+            <label>Số đêm lưu trú</label>
+            <input id="field-nights-readonly" class="input" type="text" readonly value="1 đêm" />
+          </div>
+        </div>
+
+        <!-- Payment Section -->
+        <div class="payment-box">
+          <div class="field">
+            <label>Trạng thái thanh toán</label>
+            <div class="payment-tabs">
+              <button type="button" class="pay-tab" data-pay="paid">Đã thanh toán hết</button>
+              <button type="button" class="pay-tab" data-pay="deposit">Đã đặt cọc</button>
+              <button type="button" class="pay-tab" data-pay="unpaid">Chưa thanh toán</button>
+            </div>
+          </div>
+
+          <div class="form-grid">
+            <div class="field">
+              <label for="field-total-amount">Tổng tiền phòng (VNĐ)</label>
+              <input id="field-total-amount" class="input" type="text" inputmode="numeric" placeholder="0" />
+            </div>
+            <div class="field">
+              <label for="field-paid-amount">Đã thanh toán / Đã cọc (VNĐ)</label>
+              <input id="field-paid-amount" class="input" type="text" inputmode="numeric" placeholder="0" />
+            </div>
+          </div>
+
+          <div class="balance-banner">
+            <span>Còn lại chưa thanh toán:</span>
+            <span id="display-remaining" class="balance-amount settled">0 đ</span>
+          </div>
+        </div>
+
+        <!-- Room Options: Ghép giường & Extra bed -->
+        <div class="options-row">
+          <label id="card-merge-bed" class="toggle-card">
+            <div class="toggle-info">
+              <strong>Ghép giường (Twins → Double)</strong>
+              <span id="merge-bed-hint">Chỉ áp dụng cho phòng Twins</span>
+            </div>
+            <input id="field-merge-bed" type="checkbox" />
+          </label>
+
+          <div class="toggle-card" style="cursor: default;">
+            <div class="toggle-info">
+              <strong>Extra bed (Giường phụ)</strong>
+              <span>Chọn số giường kê thêm</span>
+            </div>
+            <select id="field-extra-bed" class="select" style="width: 92px; padding: 5px 8px;">
+              <option value="0">Không</option>
+              <option value="1">1 giường</option>
+              <option value="2">2 giường</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Booking Confirmer -->
+        <div class="field">
+          <label for="field-confirmed-by">Người xác nhận đơn đặt phòng</label>
+          <select id="field-confirmed-by" class="select">
+            <option value="">-- Chọn người xác nhận --</option>
+            <option value="Ngọc">Ngọc</option>
+            <option value="Tường Vi">Tường Vi</option>
+            <option value="Trần Bình">Trần Bình</option>
+            <option value="Lan Anh">Lan Anh</option>
+            <option value="Trần Minh">Trần Minh</option>
+          </select>
+        </div>
+
+        <!-- Guest Notes -->
+        <div class="field">
+          <label for="field-notes">Ghi chú của khách / Lễ tân</label>
+          <textarea id="field-notes" class="textarea" placeholder="VD: Nhận phòng muộn 21h, yêu cầu tầng yên tĩnh, khách ăn chay buffet sáng..."></textarea>
+        </div>
+      </form>
+
+      <div class="modal-footer">
+        <div>
+          <button id="btn-delete-booking" class="btn btn-danger" type="button" style="display: none;">Xóa đặt phòng</button>
+        </div>
+        <div class="modal-footer-right">
+          <button id="btn-mark-paid" class="btn btn-success" type="button" style="display: none;">✓ Đã thu đủ</button>
+          <button id="btn-cancel-modal" class="btn" type="button">Hủy</button>
+          <button id="btn-save-booking" class="btn btn-primary" type="submit" form="booking-form">Lưu thông tin</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DEDICATED Dorm 8-Slot Board & Inline Booking Modal -->
+  <div id="dorm-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="dorm-modal-title">
+    <div class="modal-card wide">
+      <div class="modal-header">
+        <div>
+          <h2 id="dorm-modal-title" class="modal-title">Bảng Đặt Slot Dorm Nội Bộ (Tầng 1)</h2>
+          <div class="modal-subtitle">4 giường tầng • 8 chỗ ngủ dành cho Hướng dẫn viên &amp; Lái xe</div>
+        </div>
+        <button id="btn-close-dorm" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+
+      <!-- Date switcher + Live Slot Availability Bar -->
+      <div id="dorm-date-bar" class="dorm-date-bar">
+        <div class="dorm-date-nav">
+          <button id="btn-dorm-prev-day" class="btn btn-sm" type="button">◀ Ngày trước</button>
+          <strong id="dorm-current-date-label" style="padding: 0 8px; font-size: 13px;">21/11/2026</strong>
+          <button id="btn-dorm-next-day" class="btn btn-sm" type="button">Ngày sau ▶</button>
+        </div>
+        <span id="dorm-modal-remain" class="dorm-remain-pill">Còn trống 8/8 chỗ</span>
+      </div>
+
+      <!-- VIEW 1: 8-Slot Visual Bunk Map -->
+      <div id="dorm-board-view" class="modal-body">
+        <div style="font-size: 12px; color: var(--text-muted);">
+          Nhấn vào <strong>Slot trống</strong> để đặt nhanh, hoặc nhấn vào <strong>Slot đã đặt</strong> để xem / chỉnh sửa / thanh toán.
+        </div>
+        <div id="dorm-slot-grid" class="dorm-slot-grid"></div>
+      </div>
+
+      <!-- VIEW 2: Inline Dedicated Dorm Slot Booking Form -->
+      <form id="dorm-slot-form" class="modal-body" style="display: none;" novalidate>
+        <div style="display:flex; align-items:center; justify-content:space-between; padding-bottom:8px; border-bottom:1px solid var(--border-subtle);">
+          <button id="btn-dorm-back" class="btn btn-sm" type="button">← Quay lại sơ đồ 8 slot</button>
+          <strong id="dorm-form-mode-label" style="font-size:12.5px; color:var(--accent-primary);">Đặt slot Dorm mới</strong>
+        </div>
+
+        <input type="hidden" id="dorm-field-id" />
+        <div id="dorm-form-error" class="form-error"></div>
+
+        <div class="form-grid-3">
+          <div class="field">
+            <label for="dorm-checkin">Ngày nhận chỗ</label>
+            <input id="dorm-checkin" class="input" type="date" required />
+          </div>
+          <div class="field">
+            <label for="dorm-checkout">Ngày trả chỗ</label>
+            <input id="dorm-checkout" class="input" type="date" required />
+          </div>
+          <div class="field">
+            <label>Số đêm</label>
+            <input id="dorm-nights-readonly" class="input" type="text" readonly value="1 đêm" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Chọn slot giường tầng (có thể chọn nhiều chỗ cùng lúc) *</label>
+          <div id="dorm-slot-picker" class="dorm-slot-picker"></div>
+        </div>
+
+        <div class="form-grid-3">
+          <div class="field">
+            <label for="dorm-source-type">Đơn vị / Nguồn</label>
+            <select id="dorm-source-type" class="select">
+              <option value="tour">Tour / Công ty du lịch</option>
+              <option value="walkin">Nội bộ / Khách lẻ</option>
+              <option value="zalo">Zalo</option>
+              <option value="other">Nguồn khác</option>
+            </select>
+          </div>
+          <div class="field" id="dorm-wrap-tour">
+            <label for="dorm-tour-name">Tên tour / Công ty</label>
+            <input id="dorm-tour-name" class="input" type="text" placeholder="VD: Vietravel, Saigontourist..." />
+          </div>
+          <div class="field">
+            <label for="dorm-booking-code">Mã đặt phòng</label>
+            <input id="dorm-booking-code" class="input" type="text" placeholder="VD: VR-2026-204" />
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="field">
+            <label for="dorm-guest-name">Tên HDV / Lái xe *</label>
+            <input id="dorm-guest-name" class="input" type="text" placeholder="VD: Anh Hùng (HDV) / Anh Tuấn (Lái xe)" required />
+          </div>
+          <div class="field">
+            <label for="dorm-phone">Số điện thoại</label>
+            <input id="dorm-phone" class="input" type="tel" placeholder="VD: 0915 667 432" />
+          </div>
+        </div>
+
+        <div class="payment-box">
+          <div class="form-grid">
+            <div class="field">
+              <label for="dorm-total-amount">Tổng tiền Dorm (VNĐ — để 0 nếu miễn phí nội bộ)</label>
+              <input id="dorm-total-amount" class="input" type="text" inputmode="numeric" placeholder="0" />
+            </div>
+            <div class="field">
+              <label for="dorm-paid-amount">Đã thanh toán / Đã cọc (VNĐ)</label>
+              <input id="dorm-paid-amount" class="input" type="text" inputmode="numeric" placeholder="0" />
+            </div>
+          </div>
+          <div class="balance-banner">
+            <span>Còn lại chưa thanh toán:</span>
+            <span id="dorm-display-remaining" class="balance-amount settled">0 đ</span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="dorm-confirmed-by">Người xác nhận đơn đặt phòng</label>
+          <select id="dorm-confirmed-by" class="select">
+            <option value="">-- Chọn người xác nhận --</option>
+            <option value="Ngọc">Ngọc</option>
+            <option value="Tường Vi">Tường Vi</option>
+            <option value="Trần Bình">Trần Bình</option>
+            <option value="Lan Anh">Lan Anh</option>
+            <option value="Trần Minh">Trần Minh</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="dorm-notes">Ghi chú (xe, đoàn phòng nào...)</label>
+          <textarea id="dorm-notes" class="textarea" placeholder="VD: Lái xe 45 chỗ đi cùng đoàn P.204..."></textarea>
+        </div>
+      </form>
+
+      <!-- Footers -->
+      <div id="dorm-footer-board" class="modal-footer">
+        <span style="font-size: 12px; color: var(--text-muted);">Tối đa 8 chỗ / đêm (4 giường tầng)</span>
+        <div class="modal-footer-right">
+          <button id="btn-close-dorm-2" class="btn" type="button">Đóng</button>
+          <button id="btn-add-dorm-slot" class="btn btn-primary" type="button">+ Đặt slot mới</button>
+        </div>
+      </div>
+
+      <div id="dorm-footer-form" class="modal-footer" style="display: none;">
+        <div>
+          <button id="btn-dorm-delete" class="btn btn-danger" type="button" style="display: none;">Xóa lượt đặt</button>
+        </div>
+        <div class="modal-footer-right">
+          <button id="btn-dorm-mark-paid" class="btn btn-success" type="button" style="display: none;">✓ Đã thu đủ</button>
+          <button id="btn-dorm-cancel-form" class="btn" type="button">Hủy</button>
+          <button id="btn-dorm-save" class="btn btn-primary" type="submit" form="dorm-slot-form">Lưu slot Dorm</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Daily Report Modal -->
+  <div id="day-report-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="day-report-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="day-report-title" class="modal-title">Báo cáo trong ngày</h2>
+          <div id="day-report-sub" class="modal-subtitle">Tổng hợp lễ tân, buồng phòng và buffet sáng Tầng 5</div>
+        </div>
+        <button id="btn-close-report" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+      <div id="day-report-body" class="modal-body"></div>
+      <div class="modal-footer">
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <button id="btn-rollback-last" class="btn btn-sm" type="button" title="Hoàn tác thay đổi dữ liệu gần nhất">↩ Hoàn tác gần nhất</button>
+          <button id="btn-reset-sample" class="btn btn-sm" type="button">Khôi phục mẫu</button>
+        </div>
+        <button id="btn-close-report-2" class="btn btn-primary" type="button">Đóng</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit History & Auto-Backup Modal -->
+  <div id="history-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="history-modal-title">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <div>
+          <h2 id="history-modal-title" class="modal-title">🕒 Lịch sử chỉnh sửa &amp; Sao lưu tự động</h2>
+          <div id="history-modal-sub" class="modal-subtitle">Ghi nhận mọi thao tác tạo, sửa, xóa kèm chi tiết trước/sau và tự động lưu mốc khôi phục</div>
+        </div>
+        <button id="btn-close-history" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Auto-Backup Control Panel -->
+        <div class="autobackup-panel">
+          <div class="autobackup-top">
+            <div>
+              <strong style="font-size:13px; color:var(--status-paid);">🛡️ Sao lưu tự động mỗi lần chỉnh sửa: ĐANG BẬT</strong>
+              <div id="autobackup-info-text" style="font-size:12px; color:var(--text-secondary); margin-top:2px;">
+                Tự động chụp bản sao lưu an toàn sau mọi thao tác (lưu tối đa 30 mốc gần nhất).
+              </div>
+            </div>
+            <div class="autobackup-controls">
+              <button id="btn-link-backup-file" class="btn btn-sm btn-primary" type="button" title="Chọn 1 file trên ổ cứng hoặc thư mục Google Drive để tự động ghi đè sau mỗi lần sửa (Chrome/Edge)">
+                💾 Tự động lưu ra file máy tính
+              </button>
+              <button id="btn-export-audit-csv" class="btn btn-sm" type="button" title="Xuất toàn bộ lịch sử chỉnh sửa ra Excel (CSV)">
+                Xuất lịch sử Excel
+              </button>
+            </div>
+          </div>
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+            <label class="autobackup-toggle">
+              <input id="chk-auto-download-backup" type="checkbox" />
+              <span>Tự động tải file backup JSON về thư mục Downloads sau mỗi lần lưu (dành cho trình duyệt không hỗ trợ ghi trực tiếp ra file)</span>
+            </label>
+            <span id="autobackup-file-status" style="font-size:11.5px; font-weight:600; color:var(--text-muted);">Chưa liên kết file ổ cứng</span>
+          </div>
+        </div>
+
+        <!-- History Filters -->
+        <div class="history-filters">
+          <input id="history-search" class="search-input" type="search" placeholder="Tìm theo tên khách, số phòng, chi tiết..." style="flex:1; min-width:180px;" />
+          <select id="history-filter-action" class="filter-select" aria-label="Lọc thao tác">
+            <option value="all">Tất cả thao tác</option>
+            <option value="CREATE">Đặt mới</option>
+            <option value="UPDATE">Chỉnh sửa</option>
+            <option value="DELETE">Xóa đơn</option>
+            <option value="RESTORE_GROUP">Khôi phục / Hoàn tác</option>
+          </select>
+          <select id="history-filter-confirmer" class="filter-select" aria-label="Lọc người xác nhận">
+            <option value="all">Tất cả người xác nhận</option>
+          </select>
+        </div>
+
+        <!-- History Timeline List -->
+        <div id="history-list" class="history-list"></div>
+      </div>
+
+      <div class="modal-footer">
+        <span id="history-count-label" style="font-size:12px; color:var(--text-muted);">0 thao tác</span>
+        <div class="modal-footer-right">
+          <button id="btn-history-rollback-last" class="btn btn-sm" type="button">↩ Hoàn tác thao tác gần nhất</button>
+          <button id="btn-close-history-2" class="btn btn-primary" type="button">Đóng</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="pms-core.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

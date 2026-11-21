@@ -1,0 +1,25 @@
+{
+  "name": "Dongvan Ville du H'mong Hotel — Quản Lý Đặt Phòng",
+  "short_name": "Dongvan PMS",
+  "description": "Ứng dụng quản lý đặt phòng thủ công 26 phòng + 1 Dorm nội bộ 8 chỗ cho lễ tân Dongvan Ville du H'mong Hotel.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#f8fafc",
+  "theme_color": "#1e40af",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
