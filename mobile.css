@@ -1094,3 +1094,73 @@ body[data-view-mode="mobile"] #mobile-shell {
   border-bottom: 1px dashed var(--border-subtle);
 }
 .m-kv-row:last-child { border-bottom: none; }
+
+/* ==========================================================================
+   iOS Native App Polish (Standalone Home Screen Mode & iOS Safari)
+   ========================================================================== */
+@media (max-width: 768px) {
+  html,
+  body {
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+    touch-action: manipulation;
+  }
+
+  body:not([data-view-mode="pc"]) #mobile-shell {
+    position: fixed;
+    inset: 0;
+    height: 100dvh;
+    overscroll-behavior: none;
+  }
+}
+
+#mobile-shell button,
+#mobile-shell .m-nav-item,
+#mobile-shell .m-room-card,
+#mobile-shell .m-dorm-slot,
+#mobile-shell .m-menu-item,
+#mobile-shell .m-chip {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;
+  touch-action: manipulation;
+  transition: transform 0.1s ease, opacity 0.1s ease, background-color 0.15s ease;
+}
+
+#mobile-shell .m-btn:active,
+#mobile-shell .m-nav-item:active,
+#mobile-shell .m-dorm-slot:active,
+#mobile-shell .m-menu-item:active,
+#mobile-shell .m-date-btn:active,
+#mobile-shell .m-today-btn:active {
+  transform: scale(0.97);
+  opacity: 0.86;
+}
+
+.m-topbar,
+.m-bottom-nav,
+.m-sheet-head,
+.m-sheet-footer {
+  -webkit-backdrop-filter: saturate(180%) blur(16px);
+  backdrop-filter: saturate(180%) blur(16px);
+}
+
+.m-main,
+.m-sheet-body {
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.m-ios-install-card {
+  background: linear-gradient(135deg, rgba(30, 64, 175, 0.08), rgba(16, 185, 129, 0.08));
+  border: 1px solid rgba(30, 64, 175, 0.25);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+

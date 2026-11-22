@@ -6,7 +6,7 @@
      so existing home-screen icons ALWAYS load the newest deployed version.
    ========================================================================== */
 
-const CACHE_NAME = "dongvan-hotel-shell-v5";
+const CACHE_NAME = "dongvan-hotel-shell-v6";
 const PRECACHE_URLS = [
   "./",
   "./index.html",
@@ -19,6 +19,7 @@ const PRECACHE_URLS = [
   "./app.js",
   "./mobile.js",
   "./logo.jpg",
+  "./apple-touch-icon.png",
   "./icon-192.png",
   "./icon-512.png",
   "./manifest.json"
