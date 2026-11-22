@@ -1,10 +1,16 @@
 /* ==========================================================================
-   Dongvan Ville du H'mong Hotel — Supabase Cloud Realtime Adapter
+   Dongvan Ville du H'mong Hotel — Supabase Cloud Realtime Adapter (v2)
    Zero external CDN dependencies. Uses standard Supabase Auth REST,
-   Transactional PostgreSQL RPCs (with RLS), and Realtime WebSocket (Phoenix).
+   Transactional PostgreSQL RPCs (with RLS), and Triple-Layer Realtime Sync:
+     Layer 1 (<80ms):  Phoenix WebSocket Broadcast + same-device BroadcastChannel
+     Layer 2 (DB WAL): Supabase Realtime postgres_changes on pms_meta
+     Layer 3 (Guard):  15s Heartbeat ACK Watchdog (detects silent half-open iOS/Wi-Fi
+                       sockets in 5s) + lightweight 120B store_version probe
+   - Instant local commit application (uses RPC response directly — zero redundant
+     multi-MB full-state pulls on every save/delete).
+   - Single-flight token refresh lock + coalesced pulls + monotonic storeVersion guard.
    - STRICT cloud-only mode: NEVER silently falls back to localStorage ledger
      and NEVER claims "Đã lưu" before PostgreSQL commits.
-   - Works on static HTTPS hosts (GitHub Pages) across iPhone 4G/5G & PC.
    ========================================================================== */
 
 (function (root) {
@@ -16,6 +22,12 @@
   }
 
   const SESSION_STORAGE_KEY = "ks_pms_supabase_session_v1";
+  const BROADCAST_CHANNEL_NAME = "dongvan_pms_sync_v1";
+  const HEARTBEAT_INTERVAL_MS = 15000;
+  const HEARTBEAT_TIMEOUT_MS = 5000;
+  const DEGRADED_PROBE_MS = 3500;
+  const HEALTHY_PROBE_MS = 12000;
+  const MAX_BROADCAST_PDF_CHARS = 32000;
 
   function normalizeBaseUrl(rawUrl) {
     return String(rawUrl || "")
@@ -29,6 +41,7 @@
     const anonKey = String((config && config.anonKey) || "").trim();
     const hotelEmail = String((config && config.hotelEmail) || "letan@dongvanhotel.vn").trim();
     const staffList = [...(Core.CONFIRMERS || []), "Quản lý"];
+    const clientId = `cli_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
     const listeners = new Set();
     const busyChecks = new Set();
@@ -38,16 +51,28 @@
     let storeVersion = 0;
 
     let session = null; // { access_token, refresh_token, expires_at, staffName }
+    let refreshInFlight = null;
+    let inFlightPull = null;
+    let queuedPullMeta = null;
+    let inFlightVersionProbe = null;
+    let watchersBound = false;
+
     let ws = null;
     let wsJoined = false;
+    let wsConnecting = false;
     let wsRef = 1;
+    let wsJoinRef = null;
     let wsHeartbeatTimer = null;
+    let wsHeartbeatWatchdog = null;
+    let pendingHeartbeatRef = null;
     let wsReconnectTimer = null;
     let wsReconnectAttempt = 0;
-    let fallbackPollTimer = null;
+    let syncProbeTimer = null;
+    let lastProbeAt = 0;
     let versionCheckTimer = null;
     let idleUpdateTimer = null;
     let applyingUpdate = false;
+    let bc = null;
 
     let runningVersion = { appVersion: null, buildId: null };
     let pendingUpdate = null;
@@ -123,6 +148,7 @@
         mode: "server",
         backend: "supabase",
         connectionStatus,
+        realtimeConnected: wsJoined,
         lastSyncedAt,
         storeVersion,
         isOnline: connectionStatus === "connected",
@@ -227,7 +253,7 @@
       return null;
     }
 
-    /* -------------------- HTTP & Supabase Auth Helpers -------------------- */
+    /* -------------------- HTTP & Single-Flight Supabase Auth -------------------- */
 
     async function rawFetchJson(url, options = {}) {
       const controller = typeof AbortController === "function" ? new AbortController() : null;
@@ -266,37 +292,47 @@
       });
     }
 
-    async function ensureValidAccessToken() {
+    // Single-flight token refresh prevents concurrent RPCs from racing refresh-token rotation!
+    async function ensureValidAccessToken(forceRefresh = false) {
       if (!session || !session.access_token) return null;
       const nowSec = Math.floor(Date.now() / 1000);
-      // Refresh 2 minutes before expiry
-      if (session.expires_at && session.expires_at - nowSec > 120) {
+      if (!forceRefresh && session.expires_at && session.expires_at - nowSec > 120) {
         return session.access_token;
       }
       if (!session.refresh_token) return session.access_token;
-      try {
-        const res = await rawFetchJson(`${baseUrl}/auth/v1/token?grant_type=refresh_token`, {
-          method: "POST",
-          body: { refresh_token: session.refresh_token },
-          timeoutMs: 8000
-        });
-        if (res.httpOk && res.data && res.data.access_token) {
-          const next = {
-            access_token: res.data.access_token,
-            refresh_token: res.data.refresh_token || session.refresh_token,
-            expires_at: Math.floor(Date.now() / 1000) + (Number(res.data.expires_in) || 3600),
-            staffName: session.staffName || "Lễ tân"
-          };
-          saveStoredSession(next);
-          pushAccessTokenToRealtime(next.access_token);
-          return next.access_token;
-        }
-        if (res.status === 400 || res.status === 401) {
-          handleAuthExpired("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
-          return null;
-        }
-      } catch {}
-      return session.access_token;
+      if (refreshInFlight) return refreshInFlight;
+
+      const refreshTok = session.refresh_token;
+      const staffName = session.staffName || "Lễ tân";
+      refreshInFlight = (async () => {
+        try {
+          const res = await rawFetchJson(`${baseUrl}/auth/v1/token?grant_type=refresh_token`, {
+            method: "POST",
+            body: { refresh_token: refreshTok },
+            timeoutMs: 8000
+          });
+          if (res.httpOk && res.data && res.data.access_token) {
+            const next = {
+              access_token: res.data.access_token,
+              refresh_token: res.data.refresh_token || refreshTok,
+              expires_at: Math.floor(Date.now() / 1000) + (Number(res.data.expires_in) || 3600),
+              staffName
+            };
+            saveStoredSession(next);
+            pushAccessTokenToRealtime(next.access_token);
+            return next.access_token;
+          }
+          if (res.status === 400 || res.status === 401) {
+            handleAuthExpired("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
+            return null;
+          }
+        } catch {}
+        return session ? session.access_token : null;
+      })().finally(() => {
+        refreshInFlight = null;
+      });
+
+      return refreshInFlight;
     }
 
     async function callRpc(rpcName, params = {}, allowRetry = true) {
@@ -310,7 +346,7 @@
           error: "Đang mất kết nối mạng — dữ liệu CHƯA được lưu lên máy chủ. Nội dung bạn đang nhập vẫn được giữ nguyên."
         };
       }
-      const token = await ensureValidAccessToken();
+      const token = await ensureValidAccessToken(false);
       if (!token) {
         return { ok: false, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập tài khoản lễ tân." };
       }
@@ -323,8 +359,7 @@
         });
         if (res.status === 401 || (res.data && String(res.data.message || "").includes("AUTH_REQUIRED"))) {
           if (allowRetry && session && session.refresh_token) {
-            session.expires_at = 0;
-            const refreshed = await ensureValidAccessToken();
+            const refreshed = await ensureValidAccessToken(true);
             if (refreshed) return callRpc(rpcName, params, false);
           }
           handleAuthExpired("Phiên đăng nhập đã hết hạn — nội dung đang nhập vẫn được giữ nguyên.");
@@ -350,44 +385,288 @@
       }
     }
 
+    /* -------------------- Monotonic State Application & Coalesced Pulls -------------------- */
+
     function applyCloudState(data, meta = {}) {
-      if (!data || !Array.isArray(data.bookings)) return;
+      if (!data || !Array.isArray(data.bookings)) return false;
+      const incomingVer = typeof data.storeVersion === "number" ? data.storeVersion : null;
+      const allowReset = meta.type === "init" || meta.type === "auth_login" || meta.force === true;
+      // Prevent out-of-order stale responses from overwriting a newer committed version
+      if (!allowReset && incomingVer !== null && incomingVer < storeVersion) {
+        return false;
+      }
+
       Core.normalizeDormSlots(data.bookings);
       stateCache.bookings = data.bookings;
       if (Array.isArray(data.auditLogs)) stateCache.auditLogs = data.auditLogs;
       if (Array.isArray(data.autoBackups)) stateCache.autoBackups = data.autoBackups;
       if (typeof data.hasRollbackBackup === "boolean") stateCache.hasRollbackBackup = data.hasRollbackBackup;
-      if (typeof data.storeVersion === "number") storeVersion = data.storeVersion;
+      if (incomingVer !== null) storeVersion = incomingVer;
       lastSyncedAt = new Date().toISOString();
+      connectionStatus = "connected";
       emit({
         type: meta.type || "state",
         remoteEvent: meta.remoteEvent || null,
         state: getSnapshot(),
         status: getStatus()
       });
+      return true;
+    }
+
+    function applyMutationCommit(rpcRes, broadcastMeta = {}) {
+      if (!rpcRes || !rpcRes.ok) return false;
+      const incomingVer = typeof rpcRes.storeVersion === "number" ? rpcRes.storeVersion : storeVersion;
+      if (Array.isArray(rpcRes.bookings)) {
+        Core.normalizeDormSlots(rpcRes.bookings);
+        stateCache.bookings = rpcRes.bookings;
+      }
+      if (rpcRes.auditEntry && typeof rpcRes.auditEntry === "object") {
+        stateCache.auditLogs = [
+          rpcRes.auditEntry,
+          ...stateCache.auditLogs.filter((l) => l && l.id !== rpcRes.auditEntry.id)
+        ].slice(0, 300);
+      }
+      stateCache.hasRollbackBackup = true;
+      if (incomingVer > storeVersion) storeVersion = incomingVer;
+      lastSyncedAt = new Date().toISOString();
+      connectionStatus = "connected";
+
+      emit({
+        type: "local_commit",
+        remoteEvent: null,
+        state: getSnapshot(),
+        status: getStatus()
+      });
+
+      // Push instant <80ms delta to all peer devices (WebSocket Broadcast) & local tabs (BroadcastChannel)
+      if (!rpcRes.idempotentHit) {
+        broadcastDeltaToPeers({
+          senderId: clientId,
+          storeVersion,
+          action: broadcastMeta.action || "UPDATE",
+          booking: rpcRes.booking || null,
+          deletedId: broadcastMeta.deletedId || null,
+          roomId: (rpcRes.booking && rpcRes.booking.roomId) || broadcastMeta.roomId || "",
+          guestName: (rpcRes.booking && rpcRes.booking.guestName) || broadcastMeta.guestName || "",
+          auditEntry: rpcRes.auditEntry || null,
+          actor: (session && session.staffName) || "",
+          ts: lastSyncedAt,
+          bulkReplace: Boolean(broadcastMeta.bulkReplace)
+        });
+      }
+      return true;
+    }
+
+    function prepareBroadcastPayload(delta) {
+      const copy = { ...delta };
+      // Keep Realtime broadcast frame compact (<32KB); if a huge base64 PDF is attached, strip dataUrl
+      // so peers paint the booking cell in <80ms and fetch the full PDF cleanly in the background.
+      if (copy.booking && copy.booking.confirmationPdf && copy.booking.confirmationPdf.dataUrl) {
+        if (String(copy.booking.confirmationPdf.dataUrl).length > MAX_BROADCAST_PDF_CHARS) {
+          copy.booking = {
+            ...copy.booking,
+            confirmationPdf: {
+              name: copy.booking.confirmationPdf.name,
+              size: copy.booking.confirmationPdf.size,
+              uploadedAt: copy.booking.confirmationPdf.uploadedAt
+            }
+          };
+          copy.needsFullPull = true;
+        }
+      }
+      return copy;
+    }
+
+    function broadcastDeltaToPeers(delta) {
+      const payload = prepareBroadcastPayload(delta);
+      // 1. Sub-100ms cross-device push via Supabase Realtime Phoenix Broadcast
+      if (ws && ws.readyState === 1 && wsJoined) {
+        try {
+          ws.send(JSON.stringify({
+            topic: "realtime:pms-sync",
+            event: "broadcast",
+            payload: {
+              type: "broadcast",
+              event: "pms_sync",
+              payload
+            },
+            ref: String(++wsRef)
+          }));
+        } catch {}
+      }
+      // 2. Sub-5ms same-device multi-tab push via BroadcastChannel
+      if (bc) {
+        try { bc.postMessage({ type: "pms_sync", payload }); } catch {}
+      }
+    }
+
+    function applyIncomingPeerDelta(delta) {
+      if (!delta || typeof delta !== "object") return;
+      if (delta.senderId && delta.senderId === clientId) return;
+
+      const remoteVer = typeof delta.storeVersion === "number" ? delta.storeVersion : null;
+      if (remoteVer !== null && remoteVer <= storeVersion) return;
+
+      const remoteEvent = {
+        action: delta.action || "REMOTE_CHANGE",
+        roomId: delta.roomId || (delta.booking && delta.booking.roomId) || "",
+        guestName: delta.guestName || (delta.booking && delta.booking.guestName) || "",
+        actor: delta.actor || "",
+        storeVersion: remoteVer,
+        ts: delta.ts || new Date().toISOString()
+      };
+
+      // Bulk replace (restore/rollback/reset) or skipped version gap -> authoritative coalesced full pull
+      const isSequentialNext = remoteVer !== null && remoteVer === storeVersion + 1;
+      const canPatchDirectly = !delta.bulkReplace && isSequentialNext && (delta.booking || delta.deletedId);
+
+      if (canPatchDirectly) {
+        let nextBookings;
+        if (delta.deletedId) {
+          nextBookings = stateCache.bookings.filter((b) => b.id !== delta.deletedId);
+        } else {
+          const bk = delta.booking;
+          const idx = stateCache.bookings.findIndex((b) => b.id === bk.id);
+          if (idx >= 0) {
+            nextBookings = stateCache.bookings.slice();
+            nextBookings[idx] = bk;
+          } else {
+            nextBookings = [...stateCache.bookings, bk];
+          }
+        }
+        Core.normalizeDormSlots(nextBookings);
+        stateCache.bookings = nextBookings;
+        if (delta.auditEntry && typeof delta.auditEntry === "object") {
+          stateCache.auditLogs = [
+            delta.auditEntry,
+            ...stateCache.auditLogs.filter((l) => l && l.id !== delta.auditEntry.id)
+          ].slice(0, 300);
+        }
+        storeVersion = remoteVer;
+        lastSyncedAt = new Date().toISOString();
+        connectionStatus = "connected";
+        emit({
+          type: "remote_change",
+          remoteEvent,
+          state: getSnapshot(),
+          status: getStatus()
+        });
+        // If PDF dataUrl was stripped from broadcast frame, pull full state seamlessly in background
+        if (delta.needsFullPull) {
+          pullLatestFromCloud({ type: "remote_change", remoteEvent, force: true });
+        }
+        return;
+      }
+
+      // Version gap or bulk change -> immediate coalesced authoritative pull
+      pullLatestFromCloud({ type: "remote_change", remoteEvent });
     }
 
     async function pullLatestFromCloud(meta = {}) {
       if (!session || !session.access_token) {
         return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
       }
-      const res = await callRpc("pms_get_state", {});
-      if (!res || !res.ok) {
-        return res || { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Không thể tải dữ liệu." };
+
+      // Coalesce concurrent pulls so rapid bursts never cause out-of-order overwrites or N duplicate RPCs
+      if (inFlightPull) {
+        queuedPullMeta = meta;
+        return inFlightPull;
       }
-      connectionStatus = "connected";
-      applyCloudState(res, meta);
-      return { ok: true, bookings: stateCache.bookings, storeVersion };
+
+      const runOnePull = async (currentMeta) => {
+        const res = await callRpc("pms_get_state", {});
+        if (!res || !res.ok) {
+          return res || { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Không thể tải dữ liệu." };
+        }
+        connectionStatus = "connected";
+        applyCloudState(res, currentMeta);
+        return { ok: true, bookings: stateCache.bookings, storeVersion };
+      };
+
+      inFlightPull = (async () => {
+        let lastResult = await runOnePull(meta);
+        while (queuedPullMeta && session && session.access_token) {
+          const nextMeta = queuedPullMeta;
+          queuedPullMeta = null;
+          lastResult = await runOnePull(nextMeta);
+        }
+        return lastResult;
+      })().finally(() => {
+        inFlightPull = null;
+      });
+
+      return inFlightPull;
     }
 
-    /* -------------------- Supabase Realtime WebSocket -------------------- */
+    // Ultra-lightweight ~120-byte version probe (reads ONLY 1 row from pms_meta).
+    // Triggers full pms_get_state() ONLY when remote storeVersion > local storeVersion.
+    async function checkRemoteVersionAndSync(reason = "VERSION_PROBE") {
+      if (!session || !session.access_token || navigator.onLine === false) return false;
+      if (inFlightPull || inFlightVersionProbe) return false;
+
+      inFlightVersionProbe = (async () => {
+        const token = await ensureValidAccessToken(false);
+        if (!token) return false;
+        lastProbeAt = Date.now();
+        try {
+          const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=eq.store_version&select=value`, {
+            method: "GET",
+            headers: { "Authorization": `Bearer ${token}` },
+            timeoutMs: 6000
+          });
+          if (res.status === 401) {
+            const refreshed = await ensureValidAccessToken(true);
+            if (!refreshed) return false;
+            return false;
+          }
+          if (!res.httpOk || !Array.isArray(res.data) || res.data.length === 0) return false;
+          const val = res.data[0] && res.data[0].value;
+          const remoteVer = val && typeof val.version === "number" ? val.version : null;
+          if (remoteVer !== null && remoteVer > storeVersion) {
+            await pullLatestFromCloud({
+              type: "remote_change",
+              remoteEvent: { ...(val || {}), action: (val && val.action) || reason }
+            });
+            return true;
+          }
+          if (connectionStatus !== "connected") {
+            connectionStatus = "connected";
+            lastSyncedAt = new Date().toISOString();
+            emit({ type: "status", status: getStatus() });
+          }
+          return false;
+        } catch {
+          return false;
+        }
+      })().finally(() => {
+        inFlightVersionProbe = null;
+      });
+
+      return inFlightVersionProbe;
+    }
+
+    /* -------------------- Supabase Realtime WebSocket + Watchdog -------------------- */
+
+    function clearHeartbeatTimers() {
+      if (wsHeartbeatTimer) { clearInterval(wsHeartbeatTimer); wsHeartbeatTimer = null; }
+      if (wsHeartbeatWatchdog) { clearTimeout(wsHeartbeatWatchdog); wsHeartbeatWatchdog = null; }
+      pendingHeartbeatRef = null;
+    }
 
     function closeRealtime() {
       wsJoined = false;
-      if (wsHeartbeatTimer) { clearInterval(wsHeartbeatTimer); wsHeartbeatTimer = null; }
+      wsConnecting = false;
+      wsJoinRef = null;
+      clearHeartbeatTimers();
       if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
       if (ws) {
-        try { ws.onclose = null; ws.onerror = null; ws.close(); } catch {}
+        try {
+          ws.onopen = null;
+          ws.onmessage = null;
+          ws.onclose = null;
+          ws.onerror = null;
+          ws.close();
+        } catch {}
         ws = null;
       }
     }
@@ -405,8 +684,8 @@
     }
 
     function scheduleRealtimeReconnect() {
-      if (wsReconnectTimer || !session || !session.access_token) return;
-      const delay = Math.min(5000, 700 * Math.pow(1.6, wsReconnectAttempt));
+      if (wsReconnectTimer || !session || !session.access_token || navigator.onLine === false) return;
+      const delay = Math.min(4000, 450 * Math.pow(1.5, wsReconnectAttempt));
       wsReconnectAttempt += 1;
       wsReconnectTimer = setTimeout(() => {
         wsReconnectTimer = null;
@@ -414,8 +693,19 @@
       }, delay);
     }
 
-    function connectRealtime() {
-      if (!session || !session.access_token || typeof root.WebSocket !== "function") return;
+    async function connectRealtime() {
+      if (!session || !session.access_token || typeof root.WebSocket !== "function" || navigator.onLine === false) return;
+      if (wsConnecting) return;
+      wsConnecting = true;
+
+      let accessToken = null;
+      try {
+        accessToken = await ensureValidAccessToken(false);
+      } finally {
+        wsConnecting = false;
+      }
+      if (!accessToken || !session || navigator.onLine === false) return;
+
       closeRealtime();
       const wsBase = baseUrl.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
       const wsUrl = `${wsBase}/realtime/v1/websocket?apikey=${encodeURIComponent(anonKey)}&vsn=1.0.0`;
@@ -425,7 +715,9 @@
         ws = socket;
 
         socket.onopen = () => {
+          if (ws !== socket) return;
           wsReconnectAttempt = 0;
+          wsJoinRef = String(++wsRef);
           socket.send(JSON.stringify({
             topic: "realtime:pms-sync",
             event: "phx_join",
@@ -437,38 +729,77 @@
                   { event: "*", schema: "public", table: "pms_meta" }
                 ]
               },
-              access_token: session.access_token
+              access_token: (session && session.access_token) || accessToken
             },
-            ref: String(++wsRef)
+            ref: wsJoinRef
           }));
 
+          // Heartbeat + 5s ACK Watchdog detects silently dropped iOS / Wi-Fi sockets!
           wsHeartbeatTimer = setInterval(() => {
-            if (socket.readyState === 1) {
-              try {
-                socket.send(JSON.stringify({ topic: "phoenix", event: "heartbeat", payload: {}, ref: String(++wsRef) }));
-              } catch {}
+            if (ws !== socket || socket.readyState !== 1) return;
+            const hbRef = String(++wsRef);
+            pendingHeartbeatRef = hbRef;
+            try {
+              socket.send(JSON.stringify({ topic: "phoenix", event: "heartbeat", payload: {}, ref: hbRef }));
+            } catch {
+              forceReconnectRealtime("HEARTBEAT_SEND_FAIL");
+              return;
             }
-          }, 25000);
+            if (wsHeartbeatWatchdog) clearTimeout(wsHeartbeatWatchdog);
+            wsHeartbeatWatchdog = setTimeout(() => {
+              if (pendingHeartbeatRef === hbRef && ws === socket) {
+                forceReconnectRealtime("HEARTBEAT_TIMEOUT");
+              }
+            }, HEARTBEAT_TIMEOUT_MS);
+          }, HEARTBEAT_INTERVAL_MS);
         };
 
         socket.onmessage = (ev) => {
+          if (ws !== socket) return;
           let msg;
           try { msg = JSON.parse(ev.data); } catch { return; }
+
+          // Heartbeat ACK received -> connection is genuinely alive!
+          if (msg.event === "phx_reply" && msg.topic === "phoenix") {
+            if (pendingHeartbeatRef && String(msg.ref) === pendingHeartbeatRef) {
+              pendingHeartbeatRef = null;
+              if (wsHeartbeatWatchdog) { clearTimeout(wsHeartbeatWatchdog); wsHeartbeatWatchdog = null; }
+            }
+            return;
+          }
+
           if (msg.event === "phx_reply" && msg.topic === "realtime:pms-sync") {
             if (msg.payload && msg.payload.status === "ok") {
               wsJoined = true;
               connectionStatus = "connected";
               emit({ type: "status", status: getStatus() });
               // Catch up immediately on (re)join in case events happened during disconnect
-              pullLatestFromCloud({ type: "remote_change", remoteEvent: { action: "SYNC_CATCHUP" } });
+              checkRemoteVersionAndSync("SYNC_CATCHUP");
+            } else if (wsJoinRef && String(msg.ref) === wsJoinRef) {
+              // Join failed (often stale JWT after sleep) -> refresh token & reconnect!
+              wsJoined = false;
+              ensureValidAccessToken(true).then((tok) => {
+                if (tok) forceReconnectRealtime("REJOIN_AFTER_REFRESH");
+              });
             }
             return;
           }
+
+          // Layer 1 (<80ms): Instant Broadcast delta from peer device
+          if (msg.event === "broadcast") {
+            const p = msg.payload && (msg.payload.event === "pms_sync" ? msg.payload.payload : msg.payload);
+            if (p && typeof p === "object") {
+              applyIncomingPeerDelta(p);
+            }
+            return;
+          }
+
+          // Layer 2 (Authoritative DB WAL): postgres_changes on pms_meta
           if (msg.event === "postgres_changes") {
             const rec = msg.payload && msg.payload.data && msg.payload.data.record;
             const metaVal = rec && rec.key === "store_version" ? rec.value : null;
             const remoteVer = metaVal && typeof metaVal.version === "number" ? metaVal.version : null;
-            if (remoteVer === null || remoteVer !== storeVersion) {
+            if (remoteVer === null || remoteVer > storeVersion) {
               pullLatestFromCloud({
                 type: "remote_change",
                 remoteEvent: metaVal || { action: "REMOTE_CHANGE" }
@@ -478,12 +809,14 @@
         };
 
         socket.onerror = () => {
+          if (ws !== socket) return;
           wsJoined = false;
         };
 
         socket.onclose = () => {
+          if (ws !== socket) return;
           wsJoined = false;
-          if (wsHeartbeatTimer) { clearInterval(wsHeartbeatTimer); wsHeartbeatTimer = null; }
+          clearHeartbeatTimers();
           if (navigator.onLine === false) {
             connectionStatus = "offline";
           } else if (session && session.access_token) {
@@ -499,7 +832,42 @@
       }
     }
 
+    function forceReconnectRealtime(reason) {
+      closeRealtime();
+      if (!session || !session.access_token || navigator.onLine === false) return;
+      connectionStatus = "reconnecting";
+      emit({ type: "status", status: getStatus() });
+      checkRemoteVersionAndSync(reason || "RECONNECT_SYNC");
+      connectRealtime();
+    }
+
+    function handleAppResume(reason) {
+      checkAppVersion();
+      if (!session || !session.access_token || navigator.onLine === false) return;
+      checkRemoteVersionAndSync(reason);
+      if (!ws || ws.readyState !== 1 || !wsJoined) {
+        connectRealtime();
+      }
+    }
+
     function bindWatchers() {
+      if (watchersBound) return;
+      watchersBound = true;
+
+      // Same-device multi-tab instant sync (<5ms)
+      if (typeof root.BroadcastChannel === "function") {
+        try {
+          bc = new root.BroadcastChannel(BROADCAST_CHANNEL_NAME);
+          bc.onmessage = (ev) => {
+            if (ev && ev.data && ev.data.type === "pms_sync" && ev.data.payload) {
+              applyIncomingPeerDelta(ev.data.payload);
+            }
+          };
+        } catch {
+          bc = null;
+        }
+      }
+
       root.addEventListener("offline", () => {
         closeRealtime();
         connectionStatus = "offline";
@@ -511,25 +879,32 @@
         if (!session || !session.access_token) return;
         connectionStatus = "reconnecting";
         emit({ type: "status", status: getStatus() });
-        pullLatestFromCloud({ type: "remote_change", remoteEvent: { action: "RECONNECT_SYNC" } });
+        checkRemoteVersionAndSync("RECONNECT_SYNC");
         connectRealtime();
       });
 
       root.document.addEventListener("visibilitychange", () => {
-        if (root.document.hidden) return;
-        checkAppVersion();
-        if (!session || !session.access_token) return;
-        pullLatestFromCloud({ type: "remote_change", remoteEvent: { action: "RESUME_SYNC" } });
-        if (!ws || ws.readyState !== 1) connectRealtime();
+        if (!root.document.hidden) handleAppResume("RESUME_SYNC");
       });
 
-      // Fallback safety catch-up ONLY when WebSocket is not currently joined
-      if (!fallbackPollTimer) {
-        fallbackPollTimer = setInterval(() => {
-          if (!root.document.hidden && navigator.onLine !== false && session && session.access_token && !wsJoined) {
-            pullLatestFromCloud({ type: "remote_change", remoteEvent: { action: "FALLBACK_SYNC" } });
+      // Critical for iOS Safari standalone PWA bfcache & app-switcher resume!
+      root.addEventListener("pageshow", () => handleAppResume("PAGESHOW_SYNC"));
+      root.addEventListener("focus", () => {
+        if (Date.now() - lastProbeAt > 2000) handleAppResume("FOCUS_SYNC");
+      });
+
+      // Layer 3 adaptive lightweight probe: 3.5s when WS degraded, 12s safety check when WS healthy
+      if (!syncProbeTimer) {
+        syncProbeTimer = setInterval(() => {
+          if (root.document.hidden || navigator.onLine === false || !session || !session.access_token) return;
+          const intervalNeeded = wsJoined ? HEALTHY_PROBE_MS : DEGRADED_PROBE_MS;
+          if (Date.now() - lastProbeAt >= intervalNeeded) {
+            checkRemoteVersionAndSync(wsJoined ? "SAFETY_PROBE" : "DEGRADED_PROBE");
           }
-        }, 12000);
+          if (!wsJoined && !wsConnecting && !wsReconnectTimer) {
+            connectRealtime();
+          }
+        }, 2000);
       }
 
       if (!versionCheckTimer) {
@@ -554,7 +929,7 @@
       }
 
       session = stored;
-      const pulled = await pullLatestFromCloud({ type: "init" });
+      const pulled = await pullLatestFromCloud({ type: "init", force: true });
       if (pulled.ok) {
         connectRealtime();
         return { ok: true, mode: "server", bookings: stateCache.bookings, recoveredFromBackup: false };
@@ -590,7 +965,7 @@
           expires_at: Math.floor(Date.now() / 1000) + (Number(res.data.expires_in) || 3600),
           staffName: cleanStaff
         });
-        const pulled = await pullLatestFromCloud({ type: "auth_login" });
+        const pulled = await pullLatestFromCloud({ type: "auth_login", force: true });
         if (!pulled.ok) {
           return { ok: false, code: pulled.code, error: pulled.error };
         }
@@ -650,7 +1025,12 @@
         }
         return rpcRes || { ok: false, code: "SERVER_ERROR", error: "Lưu thất bại." };
       }
-      await pullLatestFromCloud({ type: "local_commit" });
+      // Instant local commit application + <80ms peer broadcast (ZERO extra pms_get_state round-trip!)
+      if (Array.isArray(rpcRes.bookings)) {
+        applyMutationCommit(rpcRes, { action: rpcRes.isUpdate ? "UPDATE" : "CREATE" });
+      } else {
+        await pullLatestFromCloud({ type: "local_commit" });
+      }
       return { ...rpcRes, bookings: stateCache.bookings };
     }
 
@@ -668,12 +1048,21 @@
         p_audit_summary: summary
       });
       if (!rpcRes || !rpcRes.ok) {
-        if (rpcRes && rpcRes.code === "CONFLICT_STALE_EDIT") {
+        if (rpcRes && (rpcRes.code === "CONFLICT_STALE_EDIT" || rpcRes.code === "NOT_FOUND")) {
           await pullLatestFromCloud({ type: "conflict_refresh" });
         }
         return rpcRes || { ok: false, code: "SERVER_ERROR", error: "Xóa thất bại." };
       }
-      await pullLatestFromCloud({ type: "local_commit" });
+      if (Array.isArray(rpcRes.bookings)) {
+        applyMutationCommit(rpcRes, {
+          action: "DELETE",
+          deletedId: bookingId,
+          roomId: target ? target.roomId : "",
+          guestName: target ? target.guestName : ""
+        });
+      } else {
+        await pullLatestFromCloud({ type: "local_commit" });
+      }
       return { ...rpcRes, bookings: stateCache.bookings };
     }
 
@@ -690,7 +1079,8 @@
         p_actor_name: (session && session.staffName) || ""
       });
       if (!rpcRes || !rpcRes.ok) return rpcRes || { ok: false, code: "SERVER_ERROR", error: "Khôi phục thất bại." };
-      await pullLatestFromCloud({ type: "local_commit" });
+      applyMutationCommit(rpcRes, { action: "RESTORE", bulkReplace: true });
+      pullLatestFromCloud({ type: "local_commit" }); // refresh backup snapshots asynchronously
       return { ...rpcRes, bookings: stateCache.bookings };
     }
 
@@ -699,7 +1089,8 @@
         p_actor_name: (session && session.staffName) || ""
       });
       if (!rpcRes || !rpcRes.ok) return rpcRes || { ok: false, code: "SERVER_ERROR", error: "Hoàn tác thất bại." };
-      await pullLatestFromCloud({ type: "local_commit" });
+      applyMutationCommit(rpcRes, { action: "ROLLBACK", bulkReplace: true });
+      pullLatestFromCloud({ type: "local_commit" });
       return { ...rpcRes, bookings: stateCache.bookings };
     }
 
@@ -709,7 +1100,8 @@
         p_actor_name: (session && session.staffName) || ""
       });
       if (!rpcRes || !rpcRes.ok) return rpcRes || { ok: false, code: "SERVER_ERROR", error: "Khôi phục mốc sao lưu thất bại." };
-      await pullLatestFromCloud({ type: "local_commit" });
+      applyMutationCommit(rpcRes, { action: "AUTOBACKUP_RESTORE", bulkReplace: true });
+      pullLatestFromCloud({ type: "local_commit" });
       return { ...rpcRes, bookings: stateCache.bookings };
     }
 
@@ -723,7 +1115,8 @@
         p_actor_name: (session && session.staffName) || ""
       });
       if (!rpcRes || !rpcRes.ok) return rpcRes || { ok: false, code: "SERVER_ERROR", error: "Khôi phục mẫu thất bại." };
-      await pullLatestFromCloud({ type: "local_commit" });
+      applyMutationCommit(rpcRes, { action: "RESET_SAMPLE", bulkReplace: true });
+      pullLatestFromCloud({ type: "local_commit" });
       return { ...rpcRes, bookings: stateCache.bookings };
     }
 
@@ -732,6 +1125,7 @@
       return {
         ok: consistency.ok && connectionStatus === "connected",
         backend: "supabase",
+        realtimeConnected: wsJoined,
         storageReadable: connectionStatus === "connected",
         storageWritable: connectionStatus === "connected",
         storageCorrupted: false,
@@ -766,7 +1160,7 @@
       getAutoBackups: () => stateCache.autoBackups,
       hasRollbackBackup: () => stateCache.hasRollbackBackup,
       refreshLatest: () => stateCache.bookings,
-      pullLatest: () => pullLatestFromCloud({ type: "manual_refresh" }),
+      pullLatest: () => pullLatestFromCloud({ type: "manual_refresh", force: true }),
       saveBooking,
       deleteBooking,
       restoreFromImport,

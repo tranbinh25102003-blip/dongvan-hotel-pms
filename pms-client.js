@@ -40,6 +40,8 @@
     let eventSource = null;
     let reconnectTimer = null;
     let reconnectAttempt = 0;
+    let inFlightPull = null;
+    let queuedPullMeta = null;
     let versionCheckTimer = null;
     let idleUpdateTimer = null;
     let applyingUpdate = false;
@@ -90,7 +92,9 @@
     function getStatus() {
       return {
         mode,
+        backend: mode === "local" ? "local" : "sqlite",
         connectionStatus,
+        realtimeConnected: mode === "server" && Boolean(eventSource && eventSource.readyState === 1),
         lastSyncedAt,
         storeVersion,
         isOnline: mode === "local" ? true : connectionStatus === "connected",
@@ -205,11 +209,15 @@
 
     function applyServerState(data, meta = {}) {
       if (!data || !Array.isArray(data.bookings)) return;
+      const incomingVer = typeof data.storeVersion === "number" ? data.storeVersion : null;
+      const allowReset = meta.type === "init" || meta.type === "auth_login" || meta.force === true;
+      if (!allowReset && incomingVer !== null && incomingVer < storeVersion) return;
+
       stateCache.bookings = data.bookings;
       if (Array.isArray(data.auditLogs)) stateCache.auditLogs = data.auditLogs;
       if (Array.isArray(data.autoBackups)) stateCache.autoBackups = data.autoBackups;
       if (typeof data.hasRollbackBackup === "boolean") stateCache.hasRollbackBackup = data.hasRollbackBackup;
-      if (typeof data.storeVersion === "number") storeVersion = data.storeVersion;
+      if (incomingVer !== null) storeVersion = incomingVer;
       if (data.user) authState.user = data.user;
       if (data.appVersion || data.buildId) {
         recordOrCheckVersion(data.appVersion, data.buildId);
@@ -294,31 +302,52 @@
       if (authState.authRequired && !authState.authenticated) {
         return { ok: false, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập để đồng bộ dữ liệu." };
       }
-      try {
-        const res = await fetchJson("/api/state", { timeoutMs: 8000 });
-        if (res.status === 401) {
-          handleAuthExpired(res.data && res.data.error);
-          return { ok: false, code: "AUTH_REQUIRED", error: (res.data && res.data.error) || "Cần đăng nhập." };
-        }
-        if (res.status === 503 && res.data && res.data.code === "AUTH_NOT_CONFIGURED") {
-          authState.authRequired = true;
-          authState.authConfigured = false;
-          handleAuthExpired(res.data.error);
-          return { ok: false, code: "AUTH_NOT_CONFIGURED", error: res.data.error };
-        }
-        if (!res.httpOk || !res.data || !res.data.ok) {
-          throw new Error("Server returned invalid state");
-        }
-        if (connectionStatus !== "connected") {
-          connectionStatus = "connected";
-        }
-        applyServerState(res.data, meta);
-        return { ok: true, bookings: stateCache.bookings, storeVersion };
-      } catch {
-        connectionStatus = navigator.onLine === false ? "offline" : "reconnecting";
-        emit({ type: "status", status: getStatus() });
-        return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Mất kết nối tới máy chủ khách sạn." };
+      if (inFlightPull) {
+        queuedPullMeta = meta;
+        return inFlightPull;
       }
+
+      const runOnePull = async (currentMeta) => {
+        try {
+          const res = await fetchJson("/api/state", { timeoutMs: 8000 });
+          if (res.status === 401) {
+            handleAuthExpired(res.data && res.data.error);
+            return { ok: false, code: "AUTH_REQUIRED", error: (res.data && res.data.error) || "Cần đăng nhập." };
+          }
+          if (res.status === 503 && res.data && res.data.code === "AUTH_NOT_CONFIGURED") {
+            authState.authRequired = true;
+            authState.authConfigured = false;
+            handleAuthExpired(res.data.error);
+            return { ok: false, code: "AUTH_NOT_CONFIGURED", error: res.data.error };
+          }
+          if (!res.httpOk || !res.data || !res.data.ok) {
+            throw new Error("Server returned invalid state");
+          }
+          if (connectionStatus !== "connected") {
+            connectionStatus = "connected";
+          }
+          applyServerState(res.data, currentMeta);
+          return { ok: true, bookings: stateCache.bookings, storeVersion };
+        } catch {
+          connectionStatus = navigator.onLine === false ? "offline" : "reconnecting";
+          emit({ type: "status", status: getStatus() });
+          return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Mất kết nối tới máy chủ khách sạn." };
+        }
+      };
+
+      inFlightPull = (async () => {
+        let lastRes = await runOnePull(meta);
+        while (queuedPullMeta && (!authState.authRequired || authState.authenticated)) {
+          const nextMeta = queuedPullMeta;
+          queuedPullMeta = null;
+          lastRes = await runOnePull(nextMeta);
+        }
+        return lastRes;
+      })().finally(() => {
+        inFlightPull = null;
+      });
+
+      return inFlightPull;
     }
 
     function closeEventSource() {
@@ -356,7 +385,7 @@
             if (payload.appVersion || payload.buildId) {
               recordOrCheckVersion(payload.appVersion, payload.buildId);
             }
-            if (typeof payload.storeVersion === "number" && payload.storeVersion !== storeVersion) {
+            if (typeof payload.storeVersion === "number" && payload.storeVersion > storeVersion) {
               pullLatestFromServer({ type: "remote_change", remoteEvent: { action: "SYNC_CATCHUP", storeVersion: payload.storeVersion } });
             }
           } catch {}
@@ -365,6 +394,9 @@
         es.addEventListener("state_changed", (ev) => {
           let payload = {};
           try { payload = JSON.parse(ev.data || "{}"); } catch {}
+          if (typeof payload.storeVersion === "number" && payload.storeVersion <= storeVersion) {
+            return;
+          }
           pullLatestFromServer({ type: "remote_change", remoteEvent: payload });
         });
 
@@ -431,7 +463,7 @@
         connectSSE();
       });
 
-      root.document.addEventListener("visibilitychange", () => {
+      const handleResume = () => {
         if (mode !== "server" || root.document.hidden) return;
         checkAppVersion();
         if (authState.authRequired && !authState.authenticated) return;
@@ -439,7 +471,10 @@
         if (!eventSource || eventSource.readyState === 2) {
           connectSSE();
         }
-      });
+      };
+
+      root.document.addEventListener("visibilitychange", handleResume);
+      root.addEventListener("pageshow", handleResume);
 
       // Periodic lightweight version check while app stays open on PC/phone
       if (mode === "server" && !versionCheckTimer) {

@@ -1070,6 +1070,486 @@
     return updates;
   }
 
+  /* -------------------- Official Booking Confirmation (A4 PDF) Engine -------------------- */
+
+  const CONFIRMATION_ROOM_ORDER = Object.freeze({
+    "Double with balcony": 1,
+    "Double with garden view": 2,
+    "Twin with balcony": 3,
+    "Twin with garden view": 4,
+    "Family with balcony": 5,
+    "Family with garden view": 6,
+    "Triple room garden view": 7,
+    "Extra Bed": 8,
+    "Nội bộ ngủ Dorm": 9
+  });
+
+  function getConfirmationRoomCategoryName(room) {
+    if (!room) return "Double with balcony";
+    if (room.isDorm || room.id === "DORM") return "Nội bộ ngủ Dorm";
+    const isValley = String(room.view || "").toLowerCase().includes("thung lũng");
+    if (room.type === "Double") return isValley ? "Double with balcony" : "Double with garden view";
+    if (room.type === "Twins") return isValley ? "Twin with balcony" : "Twin with garden view";
+    if (room.type === "Family") return isValley ? "Family with balcony" : "Family with garden view";
+    if (room.type === "Triple") return "Triple room garden view";
+    return `${room.type || "Room"}${room.view ? ` (${room.view})` : ""}`;
+  }
+
+  function formatSenderNameForConfirmation(name) {
+    const clean = String(name || "").trim();
+    if (!clean) return "Mr. Trần Minh";
+    if (/^(Mr|Ms|Mrs|Anh|Chị)\.?\s+/i.test(clean)) return clean;
+    const female = ["Ngọc", "Tường Vi", "Lan Anh"];
+    const male = ["Trần Minh", "Trần Bình"];
+    if (female.includes(clean)) return `Ms. ${clean}`;
+    if (male.includes(clean)) return `Mr. ${clean}`;
+    return clean;
+  }
+
+  function formatConfirmationNumber(amount) {
+    const num = Math.round(Number(amount) || 0);
+    return num.toLocaleString("vi-VN");
+  }
+
+  function buildBookingConfirmationData(targetBooking, allBookings = [], options = {}) {
+    if (!targetBooking || typeof targetBooking !== "object") return null;
+
+    const issueDateISO = isValidISODate(options.issueDateISO) ? options.issueDateISO : getTodayISO();
+    const discountPercent = Math.min(100, Math.max(0, Number(options.discountPercent) || 0));
+    const extraBedRate = Math.max(0, parseVND(options.extraBedRate || 0));
+    const vatOverride = options.vatOverride === 0 || options.vatOverride === 8 ? options.vatOverride : null;
+
+    // Merge the latest live targetBooking into the bookings snapshot so unsaved edits appear immediately
+    const baseList = Array.isArray(allBookings) ? allBookings.filter(Boolean) : [];
+    const mergedList = targetBooking.id
+      ? [
+          targetBooking,
+          ...baseList.filter((b) => b.id !== targetBooking.id)
+        ]
+      : [targetBooking, ...baseList];
+
+    const normCode = normalizeGroupCode(targetBooking.bookingCode);
+    const groupSiblings = normCode
+      ? mergedList.filter((b) => normalizeGroupCode(b.bookingCode) === normCode)
+      : [targetBooking];
+    const isMultiRoomGroup = groupSiblings.length >= 2;
+    const includeGroup = options.includeGroup !== undefined ? Boolean(options.includeGroup) : isMultiRoomGroup;
+    const scopeBookings = (includeGroup && normCode) ? groupSiblings : [targetBooking];
+
+    const leadRegular = targetBooking.roomId !== "DORM"
+      ? targetBooking
+      : (scopeBookings.find((b) => b.roomId !== "DORM") || targetBooking);
+    const regularBookings = scopeBookings.filter((b) => b.roomId !== "DORM");
+    const dormBookings = scopeBookings.filter((b) => b.roomId === "DORM");
+
+    // Aggregate regular rooms by (checkin, checkout, roomCategory, unitPreVatRate)
+    const regularGroups = new Map();
+    let rawPreVatSum = 0;
+    let rawVatSum = 0;
+    let anyHasVat = false;
+    let totalPaid = 0;
+    let totalExtraBeds = 0;
+    const extraBedGroups = new Map();
+
+    for (const bk of regularBookings) {
+      const room = getRoomById(bk.roomId) || { id: bk.roomId, type: "Double", view: "View thung lũng", defaultGuests: 2, isDorm: false };
+      const category = getConfirmationRoomCategoryName(room);
+      const nights = Math.max(1, diffNights(bk.checkin, bk.checkout) || 1);
+      const totalAmt = parseVND(bk.totalAmount);
+      const hasVat = Boolean(bk.includeVat);
+      if (hasVat) anyHasVat = true;
+      const preVat = hasVat
+        ? Math.min(totalAmt, parseVND(bk.preVatAmount || extractPreVatFromTotal(totalAmt).preVatAmount))
+        : totalAmt;
+      const vatAmt = hasVat ? Math.max(0, totalAmt - preVat) : 0;
+      const unitRate = Math.round(preVat / nights);
+      const pax = Math.max(1, parseInt(bk.guestCount, 10) || room.defaultGuests || 2);
+      const eb = Math.max(0, parseInt(bk.extraBed, 10) || 0);
+
+      rawPreVatSum += preVat;
+      rawVatSum += vatAmt;
+      totalPaid += parseVND(bk.paidAmount);
+
+      if (eb > 0) {
+        totalExtraBeds += eb;
+        const ebKey = `${bk.checkin}|${bk.checkout}`;
+        if (!extraBedGroups.has(ebKey)) {
+          extraBedGroups.set(ebKey, { checkin: bk.checkin, checkout: bk.checkout, nights, count: 0 });
+        }
+        extraBedGroups.get(ebKey).count += eb;
+      }
+
+      const key = `${bk.checkin}|${bk.checkout}|${category}|${unitRate}`;
+      if (!regularGroups.has(key)) {
+        regularGroups.set(key, {
+          isDorm: false,
+          isExtraBed: false,
+          checkin: bk.checkin,
+          checkout: bk.checkout,
+          roomCategory: category,
+          noOfRooms: 0,
+          noOfNights: nights,
+          noOfPax: 0,
+          roomRate: unitRate,
+          totalAmount: 0
+        });
+      }
+      const row = regularGroups.get(key);
+      row.noOfRooms += 1;
+      row.noOfPax += pax;
+      row.totalAmount += preVat;
+    }
+
+    const rows = [...regularGroups.values()].sort((a, b) =>
+      String(a.checkin || "").localeCompare(String(b.checkin || "")) ||
+      (CONFIRMATION_ROOM_ORDER[a.roomCategory] || 99) - (CONFIRMATION_ROOM_ORDER[b.roomCategory] || 99)
+    );
+
+    // Optional Extra Bed rows when extraBedRate > 0 (never double-counts by default when extraBedRate === 0)
+    let extraBedSubtotal = 0;
+    if (extraBedRate > 0 && extraBedGroups.size > 0) {
+      for (const eb of extraBedGroups.values()) {
+        const ebTotal = eb.count * eb.nights * extraBedRate;
+        extraBedSubtotal += ebTotal;
+        rows.push({
+          isDorm: false,
+          isExtraBed: true,
+          checkin: eb.checkin,
+          checkout: eb.checkout,
+          roomCategory: "Extra Bed",
+          noOfRooms: "",
+          noOfNights: eb.nights,
+          noOfPax: eb.count,
+          roomRate: extraBedRate,
+          totalAmount: ebTotal
+        });
+      }
+    }
+
+    // Dorm rows (Nội bộ ngủ Dorm)
+    for (const bk of dormBookings) {
+      const nights = Math.max(1, diffNights(bk.checkin, bk.checkout) || 1);
+      const slotsCount = Array.isArray(bk.slots) && bk.slots.length > 0 ? bk.slots.length : Math.max(1, parseInt(bk.dormBeds, 10) || 1);
+      const totalAmt = parseVND(bk.totalAmount);
+      const hasVat = Boolean(bk.includeVat);
+      if (hasVat) anyHasVat = true;
+      const preVat = hasVat
+        ? Math.min(totalAmt, parseVND(bk.preVatAmount || extractPreVatFromTotal(totalAmt).preVatAmount))
+        : totalAmt;
+      const vatAmt = hasVat ? Math.max(0, totalAmt - preVat) : 0;
+      const unitRate = Math.round(preVat / (slotsCount * nights));
+
+      rawPreVatSum += preVat;
+      rawVatSum += vatAmt;
+      totalPaid += parseVND(bk.paidAmount);
+
+      rows.push({
+        isDorm: true,
+        isExtraBed: false,
+        checkin: bk.checkin,
+        checkout: bk.checkout,
+        roomCategory: "Nội bộ ngủ Dorm",
+        noOfRooms: "",
+        noOfNights: nights,
+        noOfPax: slotsCount,
+        roomRate: unitRate,
+        totalAmount: preVat
+      });
+    }
+
+    rows.forEach((r, idx) => {
+      r.stt = idx + 1;
+      r.arrivalVN = formatDateVN(r.checkin);
+      r.departureVN = formatDateVN(r.checkout);
+    });
+
+    const totalRooms = rows.reduce((s, r) => s + (typeof r.noOfRooms === "number" ? r.noOfRooms : 0), 0);
+    const totalPax = rows.reduce((s, r) => s + (Number(r.noOfPax) || 0), 0);
+    const subtotalAmount = rawPreVatSum + extraBedSubtotal;
+    const discountAmount = discountPercent > 0 ? Math.round((subtotalAmount * discountPercent) / 100) : 0;
+    const afterDiscount = Math.max(0, subtotalAmount - discountAmount);
+
+    const vatPercent = vatOverride !== null ? vatOverride : (anyHasVat ? 8 : 0);
+    let vatAmount = 0;
+    if (vatPercent > 0) {
+      vatAmount = (discountPercent === 0 && extraBedSubtotal === 0 && vatOverride === null && anyHasVat)
+        ? rawVatSum
+        : Math.round((afterDiscount * vatPercent) / 100);
+    }
+
+    const grandTotal = afterDiscount + vatAmount;
+    const depositAmount = totalPaid;
+    const depositPercent = grandTotal > 0 ? Math.round((depositAmount / grandTotal) * 100) : 0;
+    const paymentLeft = Math.max(0, grandTotal - depositAmount);
+
+    const recipientName = String(leadRegular.guestName || "").trim() || "Ms/Mr";
+    const unitName = String(
+      leadRegular.tourName ||
+      (leadRegular.channelKey === "walkin" ? "" : (leadRegular.sourceName || ""))
+    ).trim();
+    const bookingCode = String(leadRegular.bookingCode || "").trim();
+    const senderName = formatSenderNameForConfirmation(options.senderName !== undefined ? options.senderName : leadRegular.confirmedBy);
+
+    return {
+      issueDateISO,
+      issueDateVN: formatDateVN(issueDateISO),
+      recipientName,
+      unitName,
+      bookingCode,
+      transferNote: bookingCode || recipientName,
+      senderName,
+      isMultiRoomGroup,
+      includeGroup,
+      groupRoomCount: groupSiblings.length,
+      totalExtraBeds,
+      extraBedRate,
+      rows,
+      totalRooms,
+      totalPax,
+      subtotalAmount,
+      discountPercent,
+      discountAmount,
+      vatPercent,
+      vatAmount,
+      grandTotal,
+      depositPercent,
+      depositAmount,
+      paymentLeft
+    };
+  }
+
+  function renderBookingConfirmationHtml(data, options = {}) {
+    if (!data) return "";
+    const rowsHtml = data.rows.map((r) => `
+      <tr>
+        <td class="c-center">${r.stt}</td>
+        <td class="c-center">${escapeHtml(r.arrivalVN)}</td>
+        <td class="c-center">${escapeHtml(r.departureVN)}</td>
+        <td class="c-center">${escapeHtml(r.roomCategory)}</td>
+        <td class="c-center">${r.noOfRooms === "" ? "" : r.noOfRooms}</td>
+        <td class="c-center">${r.noOfNights}</td>
+        <td class="c-center">${r.noOfPax}</td>
+        <td class="c-right">${formatConfirmationNumber(r.roomRate)}</td>
+        <td class="c-right">${formatConfirmationNumber(r.totalAmount)}</td>
+      </tr>`).join("");
+
+    const vatClause = data.vatPercent > 0
+      ? "Giá phòng đã bao gồm VAT, đã bao gồm phí phục vụ/ Rates includes VAT, include service charge."
+      : "Giá phòng chưa bao gồm VAT, đã bao gồm phí phục vụ/ Rates excludes VAT, includes service charge.";
+
+    const sheetInner = `
+    <div class="bc-sheet">
+      <div class="bc-top-head">
+        <div class="bc-hotel-brand">DONGVAN VILLE DU H'MONG HOTEL</div>
+        <div class="bc-hotel-stars">------***------</div>
+        <div class="bc-hotel-line"><strong>Địa chỉ (Address):</strong> Tổ 5, xã Đồng Văn, tỉnh Tuyên Quang/Group 5, Dong Van Town, Tuyen Quang Province</div>
+        <div class="bc-hotel-line"><strong>Điện thoại (Tel):</strong> 0219.3856885 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <strong>Email:</strong> Dongvanvilleduhmong@gmail.com</div>
+      </div>
+
+      <div class="bc-date-line">Hà Nội, ngày &nbsp;&nbsp;${escapeHtml(data.issueDateVN)}</div>
+      <div class="bc-doc-title">XÁC NHẬN ĐẶT PHÒNG (BOOKING CONFIRMATION)</div>
+
+      <table class="bc-meta-table">
+        <tr>
+          <td class="bc-meta-lbl">Người nhận:</td>
+          <td class="bc-meta-val"><strong>${escapeHtml(data.recipientName)}</strong></td>
+          <td class="bc-meta-lbl-r">Người gửi: <strong>${escapeHtml(data.senderName)}</strong></td>
+        </tr>
+        <tr>
+          <td class="bc-meta-lbl">Đơn vị:</td>
+          <td class="bc-meta-val">${escapeHtml(data.unitName)}</td>
+          <td class="bc-meta-lbl-r">Điện thoại: 0912122721 - 0912251169</td>
+        </tr>
+        <tr>
+          <td class="bc-meta-lbl">Mã số đặt phòng/Code:</td>
+          <td class="bc-meta-val"><strong>${escapeHtml(data.bookingCode)}</strong></td>
+          <td class="bc-meta-lbl-r">Email: Dongvanvilleduhmong@gmail.com</td>
+        </tr>
+      </table>
+
+      <div class="bc-greet-vi">LỜI CHÀO NỒNG NHIỆT NHẤT TỪ DONGVAN VILLE DU H'MONG HOTEL</div>
+      <div class="bc-greet-en">WARMEST GREETINGS FROM DONGVAN VILLE DU H'MONG HOTEL</div>
+
+      <div class="bc-salutation">Kính gửi: &nbsp;${escapeHtml(data.recipientName)}</div>
+      <div class="bc-intro">
+        Xin chân thành cảm ơn sự quan tâm của Quý khách đến với DongVan Ville Du H'Mong Hotel. Chúng tôi xin xác nhận đặt phòng của Quý đơn vị như sau/We sincerely thank you for your interest in DongVan Ville Du H'Mong Hotel. We are to confirm your reservation as below:
+      </div>
+      <div class="bc-unit">ĐVT: VNĐ</div>
+
+      <table class="bc-price-table">
+        <thead>
+          <tr>
+            <th style="width:4.5%;">STT</th>
+            <th style="width:11.5%;">Arrival date<br><i>Ngày đến</i></th>
+            <th style="width:11.5%;">Departure date<br><i>Ngày đi</i></th>
+            <th style="width:23.5%;">Room category<br><i>Loại phòng</i></th>
+            <th style="width:9.5%;">No of rooms<br><i>Số lượng</i></th>
+            <th style="width:8.5%;">No of nights<br><i>Số đêm</i></th>
+            <th style="width:8.5%;">No of pax<br><i>Số khách</i></th>
+            <th style="width:11%;">Room rate<br><i>Đơn giá</i></th>
+            <th style="width:11.5%;">Total amount<br><i>Thành tiền</i></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml}
+          <tr class="bc-sum-row">
+            <td colspan="4" class="c-center"><strong><i>Total amount/ Tổng</i></strong></td>
+            <td class="c-center"><strong>${data.totalRooms || ""}</strong></td>
+            <td></td>
+            <td class="c-center"><strong>${data.totalPax}</strong></td>
+            <td></td>
+            <td class="c-right"><strong>${formatConfirmationNumber(data.subtotalAmount)}</strong></td>
+          </tr>
+          <tr class="bc-sum-row">
+            <td colspan="4" class="c-center"><i>Discount/ Chiết khấu</i></td>
+            <td class="c-center"><i>${data.discountPercent}%</i></td>
+            <td></td>
+            <td></td>
+            <td></td>
+            <td class="c-right">${formatConfirmationNumber(data.discountAmount)}</td>
+          </tr>
+          <tr class="bc-sum-row">
+            <td colspan="4" class="c-center"><i>Tax VAT/ VAT</i></td>
+            <td class="c-center"><i>${data.vatPercent}%</i></td>
+            <td></td>
+            <td></td>
+            <td></td>
+            <td class="c-right">${formatConfirmationNumber(data.vatAmount)}</td>
+          </tr>
+          <tr class="bc-sum-row">
+            <td colspan="4" class="c-center">Total amount/ Tổng</td>
+            <td></td>
+            <td></td>
+            <td></td>
+            <td></td>
+            <td class="c-right"><strong>${formatConfirmationNumber(data.grandTotal)}</strong></td>
+          </tr>
+          <tr class="bc-sum-row">
+            <td colspan="4" class="c-center"><i>Deposit/ Đặt cọc</i></td>
+            <td class="c-center"><i>${data.depositPercent}%</i></td>
+            <td></td>
+            <td></td>
+            <td></td>
+            <td class="c-right">${formatConfirmationNumber(data.depositAmount)}</td>
+          </tr>
+          <tr class="bc-payleft-row">
+            <td colspan="4" class="c-center"><strong>Payment left/ Còn phải thanh toán</strong></td>
+            <td></td>
+            <td></td>
+            <td></td>
+            <td></td>
+            <td class="c-right"><strong>${formatConfirmationNumber(data.paymentLeft)}</strong></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="bc-section">
+        <div class="bc-sec-title">1. Đặt cọc, thanh toán/Deposit, Payment:</div>
+        <p class="bc-p">Quý khách hàng vui lòng thanh toán tiền đặt cọc phòng khi nhận được Xác nhận đặt phòng ngày ${escapeHtml(data.issueDateVN)}. Đề nghị thanh toán 100% giá trị phòng trước khi nhận phòng tại khách sạn/Please settle all amount of room rates before arrival date.</p>
+        <table class="bc-bank-table">
+          <tr>
+            <td style="width:28%;">- Ngân hàng (Bank):</td>
+            <td colspan="3">Ngân hàng Thương mại Cổ phần Đầu tư và Phát triển Việt Nam (BIDV)</td>
+          </tr>
+          <tr>
+            <td>- Chủ tài khoản (Account holder):</td>
+            <td colspan="3" class="bc-red"><strong>Công ty cổ phần phát triển đầu tư ABT Việt Nam</strong></td>
+          </tr>
+          <tr>
+            <td>- Số tài khoản (Account number):</td>
+            <td class="bc-red" style="width:24%;"><strong>8695558888</strong></td>
+            <td style="width:17%;">- Nội dung CK:</td>
+            <td class="bc-red"><strong>${escapeHtml(data.transferNote)}</strong></td>
+          </tr>
+        </table>
+        <p class="bc-p bc-red"><strong><i>* Sau 01 ngày kể từ ngày xác nhận đặt phòng Quý khách chưa hoàn tất thanh toán tiền đặt cọc, DVM Hotel xin phép không xếp phòng theo Xác nhận đặt phòng đã gửi!</i></strong></p>
+      </div>
+
+      <div class="bc-section">
+        <div class="bc-sec-title">2. Giá phòng bao gồm/Room rate includes:</div>
+        <p class="bc-p">- ${escapeHtml(vatClause)}</p>
+        <p class="bc-p">- Miễn phí: (i) Nước chào mừng khi làm thủ tục nhận phòng/Welcome drink upon check-in. (ii) Hỗ trợ ăn sáng, 2 chai nước lọc, trà hoặc cà phê mỗi ngày/Daily complimentary breakfast, 2 bottles of mineral water, tea or coffee.</p>
+        <p class="bc-p">- Miễn phí tiền phòng và ăn sáng cho trẻ em dưới 6 tuổi lưu trú cùng bố mẹ, tối đa 1 trẻ/phòng - không đặt thêm giường phụ/Free accomodation and breakfast for children under 6 years old sharing with parents, maximum 1 children/room.- No extra bed required.</p>
+        <p class="bc-p">- Thu phí 100.000 VNĐ cho Trẻ em từ 6 tuổi đến 12 tuổi lưu trú cùng bố mẹ, tối đa 1 trẻ/phòng - không đặt thêm giường phụ/Fee of 100.000 VND for Children from 6 years old to 12 years old staying with parents, maximum 1 child/room - no extra bed required</p>
+      </div>
+
+      <div class="bc-section">
+        <div class="bc-sec-title">3. Lưu ý/Remarks:</div>
+        <p class="bc-p">- Lễ tân Khách sạn: 0972647172 - 0219.3856885</p>
+        <p class="bc-p">- Thời gian nhận phòng là 14:00pm và thời gian trả phòng là 12:00pm/Kindly note that the check-in time is 14:00pm and check-out time is 12:00pm.</p>
+        <p class="bc-p">- Thời gian ăn sáng tại Tầng 5 từ 6:30am đến 9:00am/Breakfast time is from 6:30am to 9:00am (on 5 Floor).</p>
+        <p class="bc-p">- Hủy phòng: Báo hủy 40 ngày trước ngày check in: Miễn phí; Báo hủy từ 20 đến 40 ngày trước ngày check in: Phí hủy bằng 50% giá phòng hủy; Báo hủy trước 20 ngày checkin: Phí hủy bằng 100% giá phòng hủy.</p>
+      </div>
+
+      <div class="bc-footer-sign">
+        <div class="bc-red"><strong>DONGVAN VILLE DU H'MONG HOTEL</strong></div>
+        <div><strong>Rất hân hạnh được chào đón Quý khách!</strong></div>
+      </div>
+    </div>`;
+
+    if (!options.standalone) return sheetInner;
+
+    const titleCode = data.bookingCode || data.recipientName || "Dongvan-Hotel";
+    return `<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Xac-nhan-dat-phong-${escapeHtml(titleCode)}</title>
+<style>
+  @page { size: A4 portrait; margin: 7mm 9mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 14px; background: #f3f4f6; font-family: "Times New Roman", Times, Georgia, serif; color: #111; }
+  .bc-standalone-bar { max-width: 210mm; margin: 0 auto 10px; display: flex; justify-content: flex-end; gap: 8px; }
+  .bc-standalone-btn { padding: 8px 14px; border-radius: 6px; border: 0; background: #1d4ed8; color: #fff; font-weight: 700; cursor: pointer; font-family: system-ui, sans-serif; }
+  .bc-sheet { width: 100%; max-width: 210mm; margin: 0 auto; background: #fff; padding: 8mm 10mm; font-family: "Times New Roman", Times, Georgia, serif; font-size: 9.3pt; line-height: 1.24; color: #000; box-shadow: 0 2px 12px rgba(0,0,0,0.12); }
+  .bc-top-head { max-width: 68%; }
+  .bc-hotel-brand { text-align: center; color: #c00000; font-weight: 700; font-size: 10.8pt; letter-spacing: 0.2px; }
+  .bc-hotel-stars { text-align: center; color: #c00000; font-weight: 700; font-size: 9.2pt; margin-bottom: 2px; }
+  .bc-hotel-line { font-size: 8.8pt; line-height: 1.24; }
+  .bc-date-line { text-align: right; font-style: italic; font-size: 9pt; margin: 1px 0 3px; }
+  .bc-doc-title { text-align: center; font-weight: 700; font-size: 10.8pt; margin: 1px 0 4px; }
+  .bc-meta-table { width: 100%; border-collapse: collapse; font-size: 9.2pt; margin-bottom: 4px; }
+  .bc-meta-table td { padding: 1px 4px; vertical-align: top; }
+  .bc-meta-lbl { width: 22%; }
+  .bc-meta-val { width: 38%; }
+  .bc-meta-lbl-r { width: 40%; }
+  .bc-greet-vi { text-align: center; font-weight: 700; font-size: 9.8pt; margin-top: 1px; }
+  .bc-greet-en { text-align: center; font-style: italic; font-size: 9pt; margin-bottom: 3px; }
+  .bc-salutation { font-weight: 700; margin: 2px 0 2px 14px; }
+  .bc-intro { text-indent: 14px; margin-bottom: 1px; }
+  .bc-unit { text-align: right; font-style: italic; font-size: 8.6pt; margin-bottom: 2px; }
+  .bc-price-table { width: 100%; border-collapse: collapse; font-size: 8.8pt; margin-bottom: 4px; }
+  .bc-price-table th, .bc-price-table td { border: 1px solid #000; padding: 2px 4px; }
+  .bc-price-table thead th { background: #ffc000; font-weight: 700; text-align: center; vertical-align: middle; line-height: 1.2; }
+  .bc-price-table .c-center { text-align: center; }
+  .bc-price-table .c-right { text-align: right; font-variant-numeric: tabular-nums; }
+  .bc-sum-row td { background: #e2efda; }
+  .bc-payleft-row td { background: #ffc000; font-weight: 700; }
+  .bc-section { margin-top: 4px; }
+  .bc-sec-title { font-weight: 700; margin-left: 14px; margin-bottom: 1px; }
+  .bc-p { margin: 1.2px 0; text-align: justify; }
+  .bc-bank-table { width: 100%; border-collapse: collapse; margin: 2px 0; font-size: 9pt; }
+  .bc-bank-table td { padding: 1px 4px; vertical-align: top; }
+  .bc-red { color: #c00000; }
+  .bc-footer-sign { margin-top: 6px; text-align: center; width: 42%; margin-left: auto; font-size: 9.5pt; line-height: 1.28; }
+  @media print {
+    body { background: #fff; padding: 0; }
+    .bc-standalone-bar { display: none !important; }
+    .bc-sheet { box-shadow: none; padding: 0; max-width: none; }
+    * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  }
+</style>
+</head>
+<body>
+  <div class="bc-standalone-bar">
+    <button class="bc-standalone-btn" onclick="window.print()">🖨️ In / Lưu thành PDF (A4)</button>
+  </div>
+  ${sheetInner}
+</body>
+</html>`;
+  }
+
   function generateCsvContent(bookings) {
     const headers = [
       "Phòng", "Tầng", "Hạng phòng", "View", "Ngày nhận", "Ngày trả", "Số đêm",
@@ -2075,6 +2555,9 @@
     allocateGroupPayment,
     buildCopiedBookingPayload,
     buildGroupSyncUpdates,
+    getConfirmationRoomCategoryName,
+    buildBookingConfirmationData,
+    renderBookingConfirmationHtml,
     generateCsvContent,
     diffBookingChanges,
     generateAuditCsvContent,

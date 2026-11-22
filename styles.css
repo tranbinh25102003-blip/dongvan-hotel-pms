@@ -2296,6 +2296,300 @@ html, body {
   flex-shrink: 0;
 }
 
+/* Booking Confirmation Export Button & A4 PDF Preview Modal */
+.confirm-export-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+}
+
+.btn-export-pdf {
+  flex: 1;
+  min-width: 0;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid #d97706;
+  background: linear-gradient(180deg, #fef3c7 0%, #fde68a 100%);
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.25;
+  text-align: center;
+  cursor: pointer;
+  transition: transform 0.1s ease, filter 0.15s ease;
+  white-space: normal;
+}
+
+.btn-export-pdf:hover {
+  filter: brightness(0.97);
+}
+
+.btn-export-pdf:active {
+  transform: scale(0.98);
+}
+
+.pdf-legacy-link {
+  flex-shrink: 0;
+  min-height: 38px;
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.confirm-pdf-modal-backdrop {
+  z-index: 9500 !important;
+}
+
+.confirm-pdf-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-subtle);
+  font-size: 12px;
+}
+
+.confirm-pdf-ctrl-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.confirm-pdf-ctrl-group label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.confirm-pdf-stage {
+  overflow-x: auto;
+  background: #e5e7eb;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+}
+
+/* Official Dongvan Ville du H'mong Hotel A4 Confirmation Layout */
+.bc-sheet {
+  width: 780px;
+  max-width: 100%;
+  min-width: 680px;
+  margin: 0 auto;
+  background: #ffffff;
+  padding: 26px 30px;
+  font-family: "Times New Roman", Times, Georgia, serif;
+  font-size: 13px;
+  line-height: 1.34;
+  color: #000000;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.14);
+}
+
+.bc-top-head {
+  max-width: 66%;
+}
+
+.bc-hotel-brand {
+  text-align: center;
+  color: #c00000;
+  font-weight: 700;
+  font-size: 14.5px;
+  letter-spacing: 0.2px;
+}
+
+.bc-hotel-stars {
+  text-align: center;
+  color: #c00000;
+  font-weight: 700;
+  font-size: 12.5px;
+  margin-bottom: 3px;
+}
+
+.bc-hotel-line {
+  font-size: 12px;
+  line-height: 1.32;
+}
+
+.bc-date-line {
+  text-align: right;
+  font-style: italic;
+  font-size: 12.5px;
+  margin: 2px 0 4px;
+}
+
+.bc-doc-title {
+  text-align: center;
+  font-weight: 700;
+  font-size: 14.5px;
+  margin: 2px 0 6px;
+}
+
+.bc-meta-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-bottom: 6px;
+}
+
+.bc-meta-table td {
+  padding: 1.5px 4px;
+  vertical-align: top;
+}
+
+.bc-meta-lbl { width: 22%; }
+.bc-meta-val { width: 38%; }
+.bc-meta-lbl-r { width: 40%; }
+
+.bc-greet-vi {
+  text-align: center;
+  font-weight: 700;
+  font-size: 13px;
+  margin-top: 3px;
+}
+
+.bc-greet-en {
+  text-align: center;
+  font-style: italic;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.bc-salutation {
+  font-weight: 700;
+  margin: 4px 0 3px 16px;
+}
+
+.bc-intro {
+  text-indent: 16px;
+  margin-bottom: 2px;
+}
+
+.bc-unit {
+  text-align: right;
+  font-style: italic;
+  font-size: 11.5px;
+  margin-bottom: 2px;
+}
+
+.bc-price-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.8px;
+  margin-bottom: 6px;
+}
+
+.bc-price-table th,
+.bc-price-table td {
+  border: 1px solid #000000;
+  padding: 3px 5px;
+  color: #000000;
+}
+
+.bc-price-table thead th {
+  background: #ffc000;
+  font-weight: 700;
+  text-align: center;
+  vertical-align: middle;
+  line-height: 1.24;
+}
+
+.bc-price-table .c-center { text-align: center; }
+.bc-price-table .c-right { text-align: right; font-variant-numeric: tabular-nums; }
+.bc-sum-row td { background: #e2efda; }
+.bc-payleft-row td { background: #ffc000; font-weight: 700; }
+
+.bc-section { margin-top: 5px; }
+.bc-sec-title { font-weight: 700; margin-left: 14px; margin-bottom: 2px; }
+.bc-p { margin: 2px 0; text-align: justify; }
+
+.bc-bank-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 3px 0;
+  font-size: 12.2px;
+}
+
+.bc-bank-table td {
+  padding: 1.5px 4px;
+  vertical-align: top;
+}
+
+.bc-red { color: #c00000; }
+
+.bc-footer-sign {
+  margin-top: 8px;
+  text-align: center;
+  width: 44%;
+  margin-left: auto;
+  font-size: 12.8px;
+  line-height: 1.35;
+}
+
+/* Dedicated A4 Print Container (visible ONLY during window.print()) */
+#confirm-pdf-print-root {
+  display: none;
+}
+
+@media print {
+  @page { size: A4 portrait; margin: 7mm 9mm; }
+  body.printing-confirmation > *:not(#confirm-pdf-print-root) {
+    display: none !important;
+  }
+  body.printing-confirmation {
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  body.printing-confirmation #confirm-pdf-print-root {
+    display: block !important;
+    width: 100% !important;
+  }
+  body.printing-confirmation #confirm-pdf-print-root .bc-sheet {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    font-size: 9.3pt !important;
+    line-height: 1.24 !important;
+  }
+  body.printing-confirmation #confirm-pdf-print-root .bc-hotel-brand,
+  body.printing-confirmation #confirm-pdf-print-root .bc-doc-title { font-size: 10.8pt !important; }
+  body.printing-confirmation #confirm-pdf-print-root .bc-hotel-line { font-size: 8.8pt !important; }
+  body.printing-confirmation #confirm-pdf-print-root .bc-meta-table { font-size: 9.2pt !important; margin-bottom: 4px !important; }
+  body.printing-confirmation #confirm-pdf-print-root .bc-price-table { font-size: 8.8pt !important; margin-bottom: 4px !important; }
+  body.printing-confirmation #confirm-pdf-print-root .bc-price-table th,
+  body.printing-confirmation #confirm-pdf-print-root .bc-price-table td { padding: 2px 4px !important; }
+  body.printing-confirmation #confirm-pdf-print-root .bc-bank-table { font-size: 9pt !important; }
+  body.printing-confirmation #confirm-pdf-print-root .bc-section { margin-top: 4px !important; }
+  body.printing-confirmation #confirm-pdf-print-root .bc-p { margin: 1.2px 0 !important; }
+  body.printing-confirmation #confirm-pdf-print-root .bc-footer-sign { margin-top: 6px !important; font-size: 9.5pt !important; }
+  body.printing-confirmation #confirm-pdf-print-root * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}
+
 
 
 

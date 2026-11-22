@@ -587,18 +587,10 @@
                 <select id="m-f-confirmed-by" class="m-select"></select>
               </div>
               <div class="m-field">
-                <label for="m-f-confirmation-pdf">Xác nhận (PDF)</label>
-                <div class="pdf-upload-box">
-                  <input id="m-f-confirmation-pdf" type="file" accept="application/pdf,.pdf" hidden />
-                  <button id="m-btn-pick-pdf" type="button" class="pdf-pick-btn">📎 Chọn PDF...</button>
-                  <div id="m-pdf-attached-bar" class="pdf-attached-bar" style="display:none;">
-                    <span id="m-pdf-file-name" class="pdf-file-name"></span>
-                    <div class="pdf-actions">
-                      <button id="m-btn-view-pdf" type="button" class="pdf-act-btn view">Xem</button>
-                      <button id="m-btn-replace-pdf" type="button" class="pdf-act-btn">Đổi</button>
-                      <button id="m-btn-remove-pdf" type="button" class="pdf-act-btn remove">✕</button>
-                    </div>
-                  </div>
+                <label>Xác nhận (PDF)</label>
+                <div class="confirm-export-box">
+                  <button id="m-btn-export-confirm-pdf" type="button" class="btn-export-pdf">📄 Xuất PDF xác nhận đặt phòng</button>
+                  <button id="m-btn-view-legacy-pdf" type="button" class="pdf-legacy-link" style="display:none;" title="Xem file PDF cũ đã đính kèm">📎</button>
                 </div>
               </div>
             </div>
@@ -718,18 +710,10 @@
                 <select id="m-df-confirmed-by" class="m-select"></select>
               </div>
               <div class="m-field">
-                <label for="m-df-confirmation-pdf">Xác nhận (PDF)</label>
-                <div class="pdf-upload-box">
-                  <input id="m-df-confirmation-pdf" type="file" accept="application/pdf,.pdf" hidden />
-                  <button id="m-dorm-btn-pick-pdf" type="button" class="pdf-pick-btn">📎 Chọn PDF...</button>
-                  <div id="m-dorm-pdf-attached-bar" class="pdf-attached-bar" style="display:none;">
-                    <span id="m-dorm-pdf-file-name" class="pdf-file-name"></span>
-                    <div class="pdf-actions">
-                      <button id="m-dorm-btn-view-pdf" type="button" class="pdf-act-btn view">Xem</button>
-                      <button id="m-dorm-btn-replace-pdf" type="button" class="pdf-act-btn">Đổi</button>
-                      <button id="m-dorm-btn-remove-pdf" type="button" class="pdf-act-btn remove">✕</button>
-                    </div>
-                  </div>
+                <label>Xác nhận (PDF)</label>
+                <div class="confirm-export-box">
+                  <button id="m-dorm-btn-export-confirm-pdf" type="button" class="btn-export-pdf">📄 Xuất PDF xác nhận đặt phòng</button>
+                  <button id="m-dorm-btn-view-legacy-pdf" type="button" class="pdf-legacy-link" style="display:none;" title="Xem file PDF cũ đã đính kèm">📎</button>
                 </div>
               </div>
             </div>
@@ -819,9 +803,21 @@
       : "—";
 
     if (moreInfo) {
+      const modeLabel = status.mode !== "server"
+        ? "Bộ nhớ cục bộ trình duyệt (Offline)"
+        : status.backend === "supabase"
+          ? "Đám mây Supabase Realtime 2 chiều (PC & Điện thoại)"
+          : "Máy chủ chung khách sạn (SQLite + SSE 2 chiều)";
+      const connLabel = status.connectionStatus === "connected"
+        ? (status.realtimeConnected ? "Trực tuyến tức thì (Realtime)" : "Đã kết nối trực tiếp")
+        : status.connectionStatus === "auth_required"
+          ? "Chờ đăng nhập"
+          : status.connectionStatus === "local"
+            ? "Đang chạy offline"
+            : "Mất kết nối / Đang nối lại";
       moreInfo.innerHTML = `
-        <div><strong>Chế độ:</strong> ${status.mode === "server" ? "Máy chủ chung khách sạn (SQLite + SSE 2 chiều)" : "Bộ nhớ cục bộ trình duyệt (Offline)"}</div>
-        <div><strong>Trạng thái:</strong> ${status.connectionStatus === "connected" ? "Đã kết nối trực tiếp" : status.connectionStatus === "auth_required" ? "Chờ đăng nhập" : status.connectionStatus === "local" ? "Đang chạy offline" : "Mất kết nối / Đang nối lại"}</div>
+        <div><strong>Chế độ:</strong> ${modeLabel}</div>
+        <div><strong>Trạng thái:</strong> ${connLabel}</div>
         ${status.user && status.user.staffName ? `<div><strong>Tài khoản trực ca:</strong> ${escapeHtml(status.user.staffName)}</div>` : ""}
         <div><strong>Phiên bản ứng dụng:</strong> <span id="m-app-version-val">${ver}</span></div>
         <div><strong>Đồng bộ lần cuối:</strong> ${status.lastSyncedAt ? formatDateTimeVN(status.lastSyncedAt) : "—"} (rev ${status.storeVersion})</div>
@@ -1813,21 +1809,88 @@
   }
 
   function syncMobilePdfUI(prefix, pdfObj) {
-    const pickBtn = $(`${prefix}btn-pick-pdf`);
-    const bar = $(`${prefix}pdf-attached-bar`);
-    const nameEl = $(`${prefix}pdf-file-name`);
-    if (!pickBtn || !bar || !nameEl) return;
+    const legacyBtn = $(`${prefix}btn-view-legacy-pdf`);
+    if (!legacyBtn) return;
     if (pdfObj && pdfObj.dataUrl) {
-      pickBtn.style.display = "none";
-      bar.style.display = "flex";
-      nameEl.textContent = `📄 ${pdfObj.name}`;
-      nameEl.title = `${pdfObj.name} (${formatFileSize(pdfObj.size)})`;
+      legacyBtn.style.display = "inline-flex";
+      legacyBtn.title = `Xem file PDF cũ đã đính kèm: ${pdfObj.name || "xac-nhan.pdf"} (${formatFileSize(pdfObj.size || 0)})`;
     } else {
-      pickBtn.style.display = "flex";
-      bar.style.display = "none";
-      nameEl.textContent = "";
-      nameEl.title = "";
+      legacyBtn.style.display = "none";
+      legacyBtn.title = "Xem file PDF cũ đã đính kèm";
     }
+  }
+
+  function collectLiveMobileRegularDraftBooking() {
+    const chKey = mState.bookingChannelKey;
+    const chObj = CHANNELS.find((c) => c.key === chKey);
+    const tourName = (chKey === "tour" || chKey === "zalo") ? $("m-f-tour-name").value.trim() : "";
+    let sourceName = chObj ? chObj.label : "";
+    if (chKey === "other") sourceName = $("m-f-source-custom").value.trim() || "Khác";
+    else if (chKey === "tour") sourceName = tourName ? `Gmail ${tourName}` : "Gmail";
+    else if (chKey === "zalo") sourceName = tourName ? `Zalo ${tourName}` : "Zalo";
+
+    const includeVat = $("m-f-include-vat").checked;
+    const checkin = $("m-f-checkin").value || getTodayISO();
+    const checkout = $("m-f-checkout").value || addDaysISO(checkin, 1);
+
+    return {
+      id: mState.editingBookingId || undefined,
+      roomId: $("m-f-room").value || ROOMS[0].id,
+      checkin,
+      checkout,
+      channelKey: chKey,
+      sourceName,
+      tourName,
+      bookingCode: $("m-f-booking-code").value.trim(),
+      guestName: $("m-f-guest-name").value.trim(),
+      phone: $("m-f-phone").value.trim(),
+      guestCount: parseInt($("m-f-guests").value, 10) || 2,
+      totalAmount: parseVND($("m-f-total").value),
+      includeVat,
+      preVatAmount: includeVat ? parseVND($("m-f-pre-vat").value) : parseVND($("m-f-total").value),
+      paidAmount: parseVND($("m-f-paid").value),
+      paymentStatus: mState.bookingPayStatus,
+      mergeBed: $("m-f-merge-bed").checked,
+      extraBed: parseInt($("m-f-extra-bed").value, 10) || 0,
+      confirmedBy: $("m-f-confirmed-by").value,
+      notes: $("m-f-notes").value
+    };
+  }
+
+  function collectLiveMobileDormDraftBooking() {
+    const chKey = $("m-df-source").value;
+    const tourOrCustom = $("m-df-tour").value.trim();
+    let sourceName = "Dorm nội bộ", tourName = "";
+    if (chKey === "tour") { tourName = tourOrCustom; sourceName = tourOrCustom ? `Gmail ${tourOrCustom}` : "Gmail"; }
+    else if (chKey === "walkin") sourceName = "Nội bộ / Khách lẻ";
+    else if (chKey === "zalo") { tourName = tourOrCustom; sourceName = tourOrCustom ? `Zalo ${tourOrCustom}` : "Zalo"; }
+    else sourceName = tourOrCustom || "Nguồn khác";
+
+    const checkin = $("m-df-checkin").value || mState.dormDateISO || getTodayISO();
+    const checkout = $("m-df-checkout").value || addDaysISO(checkin, 1);
+    const slots = mState.dormSelectedSlots && mState.dormSelectedSlots.length > 0 ? [...mState.dormSelectedSlots] : [1];
+
+    return {
+      id: mState.editingDormId || undefined,
+      roomId: "DORM",
+      checkin,
+      checkout,
+      channelKey: chKey,
+      sourceName,
+      tourName,
+      bookingCode: $("m-df-code").value.trim(),
+      guestName: $("m-df-guest").value.trim(),
+      phone: $("m-df-phone").value.trim(),
+      slots,
+      dormBeds: slots.length,
+      guestCount: slots.length,
+      totalAmount: parseVND($("m-df-total").value),
+      includeVat: false,
+      preVatAmount: parseVND($("m-df-total").value),
+      paidAmount: parseVND($("m-df-paid").value),
+      confirmedBy: $("m-df-confirmed-by").value,
+      notes: $("m-df-notes").value
+    };
   }
 
   async function handleMobileSaveBooking(e) {
@@ -1897,11 +1960,22 @@
 
       // Propagate edited shared group info to ALL sibling rooms sharing this bookingCode
       let syncedSiblings = 0;
+      let failedSiblings = 0;
       if (shouldSyncGroup && res.booking) {
         const sibUpdates = buildGroupSyncUpdates(previousBooking, res.booking, getBookings());
         for (const upd of sibUpdates) {
-          const sibRes = await client.saveBooking(upd.payload, { expectedRevision: upd.expectedRevision });
+          let sibRes = await client.saveBooking(upd.payload, { expectedRevision: upd.expectedRevision });
+          if (!sibRes.ok && sibRes.code === "CONFLICT_STALE_EDIT") {
+            const latestSib = getBookings().find((b) => b.id === upd.id);
+            if (latestSib) {
+              const retryUpd = buildGroupSyncUpdates(previousBooking, res.booking, [latestSib])[0];
+              if (retryUpd) {
+                sibRes = await client.saveBooking(retryUpd.payload, { expectedRevision: Number(latestSib.revision) || 1 });
+              }
+            }
+          }
           if (sibRes.ok) syncedSiblings += 1;
+          else failedSiblings += 1;
         }
       }
 
@@ -1911,7 +1985,9 @@
       if ($("m-sheet-room").classList.contains("open")) renderRoomDetailSheet();
       restoreScrollPosition();
       const r = getRoomById(res.booking.roomId);
-      if (syncedSiblings > 0) {
+      if (syncedSiblings > 0 && failedSiblings > 0) {
+        showMobileToast(`Đã lưu P.${r ? r.name : res.booking.roomId} & đồng bộ ${syncedSiblings} phòng (${failedSiblings} phòng cần kiểm tra lại)`);
+      } else if (syncedSiblings > 0) {
         showMobileToast(`Đã lưu P.${r ? r.name : res.booking.roomId} & đồng bộ ${syncedSiblings} phòng cùng đoàn`);
       } else {
         showMobileToast(res.isUpdate ? `Đã lưu cập nhật P.${r ? r.name : res.booking.roomId}` : `Đã đặt P.${r ? r.name : res.booking.roomId} cho ${res.booking.guestName}`);
@@ -1925,6 +2001,9 @@
 
   function showBookingConflictBanner(latestBooking) {
     mState.bookingConflictBooking = latestBooking;
+    const totalNum = parseVND($("m-f-total").value);
+    const incVat = $("m-f-include-vat").checked;
+    const preVatNum = incVat ? Math.min(totalNum, parseVND($("m-f-pre-vat").value)) : totalNum;
     const draftSnapshot = {
       roomId: $("m-f-room").value,
       checkin: $("m-f-checkin").value,
@@ -1935,7 +2014,10 @@
       guestName: $("m-f-guest-name").value,
       phone: $("m-f-phone").value,
       guestCount: Number($("m-f-guests").value) || 2,
-      totalAmount: parseVND($("m-f-total").value),
+      totalAmount: totalNum,
+      includeVat: incVat,
+      preVatAmount: preVatNum,
+      vatAmount: incVat ? Math.max(0, totalNum - preVatNum) : 0,
       paidAmount: parseVND($("m-f-paid").value),
       mergeBed: $("m-f-merge-bed").checked,
       extraBed: Number($("m-f-extra-bed").value) || 0,
@@ -2165,6 +2247,7 @@
     } finally {
       mState.isSubmitting = false;
       $("m-dorm-save").disabled = false;
+      if (typeof client.notifyIdleCheck === "function") client.notifyIdleCheck();
     }
   }
 
@@ -2542,22 +2625,40 @@
     $("m-bk-form").addEventListener("input", saveMobileDraft);
     $("m-bk-form").addEventListener("submit", handleMobileSaveBooking);
     $("m-bk-reload-latest").addEventListener("click", () => {
-      if (mState.editingBookingId) openMobileBookingSheet({ bookingId: mState.editingBookingId });
+      const id = mState.editingBookingId;
+      $("m-bk-conflict-banner").classList.remove("show");
+      if (!id) return;
+      const latest = getBookings().find((b) => b.id === id);
+      if (!latest) {
+        $("m-sheet-booking").classList.remove("open");
+        restoreScrollPosition();
+        showMobileToast("Đặt phòng này đã bị xóa từ thiết bị khác");
+        return;
+      }
+      openMobileBookingSheet({ bookingId: id });
     });
     $("m-bk-dismiss-conflict").addEventListener("click", () => {
       // Allow user to inspect & keep editing; update revision ONLY if user explicitly reloads
       $("m-bk-conflict-banner").classList.remove("show");
     });
     $("m-bk-delete").addEventListener("click", async () => {
-      if (!mState.editingBookingId) return;
+      if (!mState.editingBookingId || mState.isSubmitting) return;
       const bk = getBookings().find((b) => b.id === mState.editingBookingId);
       if (!bk || !confirm(`Xóa đặt phòng của "${bk.guestName}" tại P.${getRoomById(bk.roomId)?.name || bk.roomId}?`)) return;
-      const res = await client.deleteBooking(bk.id, { expectedRevision: mState.editingBookingRevision });
-      if (!res.ok) return showMobileBookingError(res.error);
-      $("m-sheet-booking").classList.remove("open");
-      renderMobileAll();
-      restoreScrollPosition();
-      showMobileToast("Đã xóa đặt phòng (có thể khôi phục trong Lịch sử)");
+      mState.isSubmitting = true;
+      $("m-bk-delete").disabled = true;
+      try {
+        const res = await client.deleteBooking(bk.id, { expectedRevision: mState.editingBookingRevision });
+        if (!res.ok) return showMobileBookingError(res.error);
+        $("m-sheet-booking").classList.remove("open");
+        renderMobileAll();
+        restoreScrollPosition();
+        showMobileToast("Đã xóa đặt phòng (có thể khôi phục trong Lịch sử)");
+      } finally {
+        mState.isSubmitting = false;
+        $("m-bk-delete").disabled = false;
+        if (typeof client.notifyIdleCheck === "function") client.notifyIdleCheck();
+      }
     });
 
     // Dorm Sheet events
@@ -2601,71 +2702,59 @@
     });
     $("m-dorm-form-pane").addEventListener("submit", handleMobileSaveDorm);
 
-    // Confirmation PDF upload/view/replace/remove (Mobile Regular Room + Dorm)
-    const bindMobilePdfControls = ({ prefix, inputId, getPdf, setPdf, showErr }) => {
-      const inputEl = $(inputId);
-      const triggerPick = () => { if (inputEl) inputEl.click(); };
-      $(`${prefix}btn-pick-pdf`).addEventListener("click", triggerPick);
-      $(`${prefix}btn-replace-pdf`).addEventListener("click", triggerPick);
-      $(`${prefix}btn-view-pdf`).addEventListener("click", () => {
-        if (window.PMSPdfHelper) window.PMSPdfHelper.openPdfAttachment(getPdf());
-      });
-      $(`${prefix}btn-remove-pdf`).addEventListener("click", () => {
-        setPdf(null);
-        syncMobilePdfUI(prefix, null);
-        showMobileToast("Đã gỡ file PDF (chạm Lưu để áp dụng)");
-      });
-      inputEl.addEventListener("change", async (e) => {
-        const file = e.target.files && e.target.files[0];
-        e.target.value = "";
-        if (!file || !window.PMSPdfHelper) return;
-        const parsed = await window.PMSPdfHelper.readPdfFileInput(file);
-        if (!parsed.ok) {
-          showErr(parsed.error);
-          return;
-        }
-        showErr("");
-        setPdf(parsed.pdf);
-        syncMobilePdfUI(prefix, parsed.pdf);
-        showMobileToast(`Đã đính kèm ${parsed.pdf.name}`);
-      });
-    };
-
-    bindMobilePdfControls({
-      prefix: "m-",
-      inputId: "m-f-confirmation-pdf",
-      getPdf: () => mState.bookingConfirmationPdf,
-      setPdf: (v) => { mState.bookingConfirmationPdf = v; },
-      showErr: showMobileBookingError
-    });
-    bindMobilePdfControls({
-      prefix: "m-dorm-",
-      inputId: "m-df-confirmation-pdf",
-      getPdf: () => mState.dormConfirmationPdf,
-      setPdf: (v) => { mState.dormConfirmationPdf = v; },
-      showErr: (msg) => {
-        $("m-dorm-error").textContent = msg || "";
-        $("m-dorm-error").classList.toggle("show", Boolean(msg));
+    // Booking Confirmation A4 PDF Export (Mobile Regular Room + Dorm)
+    $("m-btn-export-confirm-pdf").addEventListener("click", () => {
+      if (window.PMSConfirmationModal) {
+        window.PMSConfirmationModal.open(collectLiveMobileRegularDraftBooking(), getBookings());
       }
+    });
+    $("m-dorm-btn-export-confirm-pdf").addEventListener("click", () => {
+      if (window.PMSConfirmationModal) {
+        window.PMSConfirmationModal.open(collectLiveMobileDormDraftBooking(), getBookings());
+      }
+    });
+    $("m-btn-view-legacy-pdf").addEventListener("click", () => {
+      if (window.PMSPdfHelper) window.PMSPdfHelper.openPdfAttachment(mState.bookingConfirmationPdf);
+    });
+    $("m-dorm-btn-view-legacy-pdf").addEventListener("click", () => {
+      if (window.PMSPdfHelper) window.PMSPdfHelper.openPdfAttachment(mState.dormConfirmationPdf);
     });
 
     $("m-dorm-reload-latest").addEventListener("click", () => {
-      if (mState.editingDormId) openMobileDormForm({ bookingId: mState.editingDormId });
-    });
-    $("m-dorm-delete").addEventListener("click", async () => {
-      if (!mState.editingDormId) return;
-      const bk = getBookings().find((b) => b.id === mState.editingDormId);
-      if (!bk || !confirm(`Xóa lượt đặt Dorm của "${bk.guestName}"?`)) return;
-      const res = await client.deleteBooking(bk.id, { expectedRevision: mState.editingDormRevision });
-      if (!res.ok) {
-        $("m-dorm-error").textContent = res.error;
-        $("m-dorm-error").classList.add("show");
+      const id = mState.editingDormId;
+      $("m-dorm-conflict-banner").classList.remove("show");
+      if (!id) return;
+      const latest = getBookings().find((b) => b.id === id);
+      if (!latest) {
+        setDormSheetMode("board");
+        renderMobileDormBoard();
+        showMobileToast("Lượt đặt Dorm này đã bị xóa từ thiết bị khác");
         return;
       }
-      setDormSheetMode("board");
-      renderMobileDormBoard();
-      renderMobileAll();
-      showMobileToast("Đã xóa lượt đặt Dorm");
+      openMobileDormForm({ bookingId: id });
+    });
+    $("m-dorm-delete").addEventListener("click", async () => {
+      if (!mState.editingDormId || mState.isSubmitting) return;
+      const bk = getBookings().find((b) => b.id === mState.editingDormId);
+      if (!bk || !confirm(`Xóa lượt đặt Dorm của "${bk.guestName}"?`)) return;
+      mState.isSubmitting = true;
+      $("m-dorm-delete").disabled = true;
+      try {
+        const res = await client.deleteBooking(bk.id, { expectedRevision: mState.editingDormRevision });
+        if (!res.ok) {
+          $("m-dorm-error").textContent = res.error;
+          $("m-dorm-error").classList.add("show");
+          return;
+        }
+        setDormSheetMode("board");
+        renderMobileDormBoard();
+        renderMobileAll();
+        showMobileToast("Đã xóa lượt đặt Dorm");
+      } finally {
+        mState.isSubmitting = false;
+        $("m-dorm-delete").disabled = false;
+        if (typeof client.notifyIdleCheck === "function") client.notifyIdleCheck();
+      }
     });
 
     // History Sheet events
@@ -2693,7 +2782,13 @@
     });
 
     // More Tab actions (100% PC feature parity)
-    $("m-menu-history").addEventListener("click", () => { renderMobileHistorySheet(); $("m-sheet-history").classList.add("open"); });
+    $("m-menu-history").addEventListener("click", () => {
+      renderMobileHistorySheet();
+      $("m-sheet-history").classList.add("open");
+      if (typeof client.pullLatest === "function" && client.getStatus().mode === "server") {
+        client.pullLatest().catch(() => {});
+      }
+    });
     $("m-menu-rollback").addEventListener("click", async () => {
       if (!confirm("Hoàn tác dữ liệu về trạng thái ngay trước thay đổi gần nhất?")) return;
       const res = await client.rollbackLastChange();
@@ -2767,8 +2862,8 @@
       );
     }
 
-    // Realtime subscription from shared PMSClient (SSE + reconnect catch-up)
-    client.subscribe(({ type, state }) => {
+    // Realtime subscription from shared PMSClient (Supabase Realtime / SSE + reconnect catch-up)
+    client.subscribe(({ type, state, remoteEvent }) => {
       renderSyncStatus();
       if (type === "status" || type === "version" || type === "update_pending" || type === "update_applying" || type === "auth_required") return;
 
@@ -2793,6 +2888,13 @@
       }
 
       renderMobileAll();
+
+      if (type === "remote_change" && remoteEvent && ["CREATE", "UPDATE", "DELETE"].includes(remoteEvent.action)) {
+        const verb = remoteEvent.action === "CREATE" ? "vừa đặt mới" : remoteEvent.action === "DELETE" ? "vừa xóa" : "vừa cập nhật";
+        const rName = remoteEvent.roomId ? (remoteEvent.roomId === "DORM" ? "Dorm" : `P.${getRoomById(remoteEvent.roomId)?.name || remoteEvent.roomId}`) : "sổ phòng";
+        const actor = remoteEvent.actor ? `${remoteEvent.actor} ` : "Thiết bị khác ";
+        showMobileToast(`🔄 ${actor}${verb} ${rName}`);
+      }
     });
   }
 

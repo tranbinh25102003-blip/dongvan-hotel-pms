@@ -357,18 +357,10 @@
           </div>
 
           <div class="field">
-            <label for="field-confirmation-pdf">Xác nhận đặt phòng (PDF)</label>
-            <div id="pdf-upload-box" class="pdf-upload-box">
-              <input id="field-confirmation-pdf" type="file" accept="application/pdf,.pdf" hidden />
-              <button id="btn-pick-pdf" type="button" class="pdf-pick-btn">📎 Chọn file PDF xác nhận...</button>
-              <div id="pdf-attached-bar" class="pdf-attached-bar" style="display:none;">
-                <span id="pdf-file-name" class="pdf-file-name"></span>
-                <div class="pdf-actions">
-                  <button id="btn-view-pdf" type="button" class="pdf-act-btn view" title="Mở / Tải file PDF xác nhận">Xem</button>
-                  <button id="btn-replace-pdf" type="button" class="pdf-act-btn" title="Đổi file PDF khác">Đổi</button>
-                  <button id="btn-remove-pdf" type="button" class="pdf-act-btn remove" title="Xóa file PDF đính kèm">✕</button>
-                </div>
-              </div>
+            <label>Xác nhận đặt phòng (PDF)</label>
+            <div class="confirm-export-box">
+              <button id="btn-export-confirm-pdf" type="button" class="btn-export-pdf">📄 Xuất PDF xác nhận đặt phòng</button>
+              <button id="btn-view-legacy-pdf" type="button" class="pdf-legacy-link" style="display:none;" title="Xem file PDF cũ đã đính kèm trước đây">📎 PDF cũ</button>
             </div>
           </div>
         </div>
@@ -521,18 +513,10 @@
           </div>
 
           <div class="field">
-            <label for="dorm-confirmation-pdf">Xác nhận đặt phòng (PDF)</label>
-            <div id="dorm-pdf-upload-box" class="pdf-upload-box">
-              <input id="dorm-confirmation-pdf" type="file" accept="application/pdf,.pdf" hidden />
-              <button id="dorm-btn-pick-pdf" type="button" class="pdf-pick-btn">📎 Chọn file PDF xác nhận...</button>
-              <div id="dorm-pdf-attached-bar" class="pdf-attached-bar" style="display:none;">
-                <span id="dorm-pdf-file-name" class="pdf-file-name"></span>
-                <div class="pdf-actions">
-                  <button id="dorm-btn-view-pdf" type="button" class="pdf-act-btn view" title="Mở / Tải file PDF xác nhận">Xem</button>
-                  <button id="dorm-btn-replace-pdf" type="button" class="pdf-act-btn" title="Đổi file PDF khác">Đổi</button>
-                  <button id="dorm-btn-remove-pdf" type="button" class="pdf-act-btn remove" title="Xóa file PDF đính kèm">✕</button>
-                </div>
-              </div>
+            <label>Xác nhận đặt phòng (PDF)</label>
+            <div class="confirm-export-box">
+              <button id="dorm-btn-export-confirm-pdf" type="button" class="btn-export-pdf">📄 Xuất PDF xác nhận đặt phòng</button>
+              <button id="dorm-btn-view-legacy-pdf" type="button" class="pdf-legacy-link" style="display:none;" title="Xem file PDF cũ đã đính kèm trước đây">📎 PDF cũ</button>
             </div>
           </div>
         </div>
@@ -713,6 +697,67 @@
       </div>
     </div>
   </div>
+
+  <!-- Official Booking Confirmation A4 Preview & PDF Export Modal (Shared PC & Mobile) -->
+  <div id="confirm-pdf-modal" class="modal-backdrop confirm-pdf-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="confirm-pdf-title">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <div>
+          <h2 id="confirm-pdf-title" class="modal-title">📄 Xem trước &amp; Xuất PDF Xác Nhận Đặt Phòng</h2>
+          <div id="confirm-pdf-sub" class="modal-subtitle">Tự động lấy dữ liệu mới nhất theo mẫu chính thức Dongvan Ville du H'mong Hotel</div>
+        </div>
+        <button id="btn-close-confirm-pdf" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="confirm-pdf-controls">
+          <div class="confirm-pdf-ctrl-group">
+            <label id="cpdf-scope-wrap" style="display:none;">
+              <span>Phạm vi:</span>
+              <select id="cpdf-scope" class="filter-select">
+                <option value="group">Cả đoàn (chung mã)</option>
+                <option value="single">Chỉ phòng này</option>
+              </select>
+            </label>
+            <label>
+              <span>Giảm giá (%):</span>
+              <input id="cpdf-discount" class="input" type="number" min="0" max="100" step="1" value="0" style="width:68px; padding:4px 6px;" />
+            </label>
+            <label>
+              <span>VAT:</span>
+              <select id="cpdf-vat" class="filter-select">
+                <option value="auto">Theo đơn</option>
+                <option value="0">0% (Chưa VAT)</option>
+                <option value="8">8% (Có VAT)</option>
+              </select>
+            </label>
+            <label id="cpdf-eb-wrap" style="display:none;" title="Để 0 nếu giá Extra Bed đã cộng sẵn vào tiền phòng">
+              <span>Đơn giá Extra Bed:</span>
+              <input id="cpdf-eb-rate" class="input" type="text" inputmode="numeric" placeholder="0 (đã gộp)" style="width:104px; padding:4px 6px;" />
+            </label>
+          </div>
+          <div style="font-size:11.5px; color:var(--text-muted);">
+            Mẹo: Bấm <strong>In / Lưu PDF</strong> → chọn đích <strong>Lưu dưới dạng PDF</strong> (A4)
+          </div>
+        </div>
+
+        <div class="confirm-pdf-stage">
+          <div id="confirm-pdf-preview"></div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="btn-download-confirm-html" class="btn btn-sm" type="button" title="Tải bản phiếu xác nhận dạng file HTML độc lập để mở/in lại sau">⬇ Tải file phiếu (.html)</button>
+        <div class="modal-footer-right">
+          <button id="btn-close-confirm-pdf-2" class="btn" type="button">Đóng</button>
+          <button id="btn-print-confirm-pdf" class="btn btn-primary" type="button">🖨️ In / Lưu file PDF</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dedicated Print-Only Root for A4 Confirmation Sheet (no document.write needed) -->
+  <div id="confirm-pdf-print-root" aria-hidden="true"></div>
 
   <!-- Toast -->
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
