@@ -13,6 +13,7 @@
 
   const {
     ROOMS,
+    ROOM_SECTIONS,
     DORM_SLOTS,
     CHANNELS,
     CODE_PLACEHOLDERS,
@@ -30,6 +31,7 @@
     formatVND,
     formatShortVND,
     formatNumberInput,
+    formatFileSize,
     escapeHtml,
     getRoomById,
     getRemaining,
@@ -40,6 +42,11 @@
     getDormOccupiedSlotsInRange,
     checkRegularConflict,
     computeMonthlyFinancials,
+    normalizeGroupCode,
+    computeBookingGroupSummary,
+    computeAllBookingGroups,
+    allocateGroupPayment,
+    buildCopiedBookingPayload,
     generateCsvContent,
     generateAuditCsvContent,
     diffBookingChanges
@@ -79,6 +86,7 @@
     editingDormRevision: null,
     dormIdempotencyKey: null,
     dormConflictBooking: null,
+    dormConfirmationPdf: null,
     // Regular booking form
     editingBookingId: null,
     editingBookingRevision: null,
@@ -86,6 +94,8 @@
     bookingChannelKey: "booking",
     bookingPayStatus: "deposit",
     bookingConflictBooking: null,
+    bookingConfirmationPdf: null,
+    copiedBooking: null,
     isSubmitting: false,
     // History filter
     historySearch: "",
@@ -190,6 +200,11 @@
         <button id="m-btn-retry-sync" type="button" class="m-btn" style="min-height:36px; padding:0 10px; font-size:12px;">Thử lại</button>
       </div>
 
+      <div id="m-clipboard-bar" class="m-clipboard-bar" role="status" aria-live="polite">
+        <span id="m-clipboard-text" class="m-clipboard-text"></span>
+        <button id="m-clipboard-cancel" type="button" class="m-clipboard-cancel">✕ Hủy dán</button>
+      </div>
+
       <main id="m-main" class="m-main">
         <!-- Tab 1: Daily Schedule -->
         <section id="m-view-schedule" class="m-tab-view active" aria-label="Lịch theo ngày">
@@ -240,8 +255,9 @@
           <div id="m-filter-drawer" class="m-filter-drawer">
             <div class="m-filter-grid">
               <select id="m-filter-floor" class="m-select" aria-label="Lọc tầng">
-                <option value="all">Tất cả tầng</option>
-                <option value="1">Tầng 1 (5 phòng + Dorm)</option>
+                <option value="all">Tất cả tầng &amp; Dorm</option>
+                <option value="dorm">Dorm nội bộ (8 chỗ)</option>
+                <option value="1">Tầng 1 (5 phòng ngủ)</option>
                 <option value="2">Tầng 2 (7 phòng)</option>
                 <option value="3">Tầng 3 (7 phòng)</option>
                 <option value="4">Tầng 4 (7 phòng)</option>
@@ -387,6 +403,7 @@
             <h2 id="m-bk-sheet-title" class="m-sheet-title">Đặt phòng mới</h2>
             <div id="m-bk-sheet-sub" class="m-sheet-sub">Phòng 101</div>
           </div>
+          <button id="m-bk-copy" type="button" class="m-btn" style="display:none; padding:0 10px; font-size:12.5px;">📋 Chép</button>
           <button id="m-bk-delete" type="button" class="m-btn m-btn-danger" style="display:none; padding:0 10px; font-size:13px;">Xóa</button>
         </div>
 
@@ -485,6 +502,27 @@
             <button id="m-bk-mark-paid" type="button" class="m-btn m-btn-success m-btn-block" style="display:none;">✓ Điền thu đủ 100%</button>
           </div>
 
+          <!-- Live Group Summary & Lump-Sum Payment Allocation -->
+          <div id="m-group-summary-box" class="m-group-box" style="display:none;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;">
+              <strong id="m-group-title" style="font-size:13px;">👥 Tổng hợp cả đoàn</strong>
+              <span id="m-group-count" class="m-group-pill"></span>
+            </div>
+            <div id="m-group-rooms" class="m-group-rooms"></div>
+            <div class="m-group-totals">
+              <div><span>Tổng đoàn</span><strong id="m-group-total">0 đ</strong></div>
+              <div><span>Đã cọc/TT</span><strong id="m-group-paid" class="ok">0 đ</strong></div>
+              <div><span>Còn nợ</span><strong id="m-group-remaining" class="warn">0 đ</strong></div>
+            </div>
+            <div id="m-group-lump-wrap" class="m-group-lump">
+              <input id="m-group-lump-input" class="m-input" type="text" inputmode="numeric" placeholder="Nhập tổng tiền cọc/thu chung cả đoàn (VNĐ)..." />
+              <div class="m-group-lump-btns">
+                <button id="m-btn-group-allocate" type="button" class="m-btn m-btn-primary">Chia tự động</button>
+                <button id="m-btn-group-mark-paid" type="button" class="m-btn m-btn-success">✓ Thu đủ đoàn</button>
+              </div>
+            </div>
+          </div>
+
           <!-- Group 4: Room Options, Confirmer & Notes -->
           <div class="m-form-group">
             <h3 class="m-group-title">4. Ghép giường, Xác nhận &amp; Ghi chú</h3>
@@ -503,9 +541,26 @@
                 <option value="2">2 giường phụ</option>
               </select>
             </div>
-            <div class="m-field">
-              <label for="m-f-confirmed-by">Người xác nhận đơn đặt phòng</label>
-              <select id="m-f-confirmed-by" class="m-select"></select>
+            <div class="m-grid-2">
+              <div class="m-field">
+                <label for="m-f-confirmed-by">Người xác nhận</label>
+                <select id="m-f-confirmed-by" class="m-select"></select>
+              </div>
+              <div class="m-field">
+                <label for="m-f-confirmation-pdf">Xác nhận (PDF)</label>
+                <div class="pdf-upload-box">
+                  <input id="m-f-confirmation-pdf" type="file" accept="application/pdf,.pdf" hidden />
+                  <button id="m-btn-pick-pdf" type="button" class="pdf-pick-btn">📎 Chọn PDF...</button>
+                  <div id="m-pdf-attached-bar" class="pdf-attached-bar" style="display:none;">
+                    <span id="m-pdf-file-name" class="pdf-file-name"></span>
+                    <div class="pdf-actions">
+                      <button id="m-btn-view-pdf" type="button" class="pdf-act-btn view">Xem</button>
+                      <button id="m-btn-replace-pdf" type="button" class="pdf-act-btn">Đổi</button>
+                      <button id="m-btn-remove-pdf" type="button" class="pdf-act-btn remove">✕</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
             <div class="m-field">
               <label for="m-f-notes">Ghi chú của khách / Lễ tân</label>
@@ -526,7 +581,7 @@
           <button id="m-dorm-back-btn" type="button" class="m-date-btn" aria-label="Quay lại">←</button>
           <div style="flex:1; min-width:0;">
             <h2 id="m-dorm-title" class="m-sheet-title">🛏️ Dorm nội bộ (8 slot)</h2>
-            <div id="m-dorm-sub" class="m-sheet-sub">Tầng 1 • 4 giường tầng cho HDV &amp; Lái xe</div>
+            <div id="m-dorm-sub" class="m-sheet-sub">Mục riêng • 4 giường tầng (8 chỗ) cho HDV &amp; Lái xe</div>
           </div>
           <button id="m-dorm-delete" type="button" class="m-btn m-btn-danger" style="display:none; padding:0 10px; font-size:13px;">Xóa</button>
         </div>
@@ -617,9 +672,26 @@
               <span>Còn lại:</span>
               <span id="m-df-remaining" class="balance-amount settled">0 đ</span>
             </div>
-            <div class="m-field">
-              <label for="m-df-confirmed-by">Người xác nhận đơn đặt phòng</label>
-              <select id="m-df-confirmed-by" class="m-select"></select>
+            <div class="m-grid-2">
+              <div class="m-field">
+                <label for="m-df-confirmed-by">Người xác nhận</label>
+                <select id="m-df-confirmed-by" class="m-select"></select>
+              </div>
+              <div class="m-field">
+                <label for="m-df-confirmation-pdf">Xác nhận (PDF)</label>
+                <div class="pdf-upload-box">
+                  <input id="m-df-confirmation-pdf" type="file" accept="application/pdf,.pdf" hidden />
+                  <button id="m-dorm-btn-pick-pdf" type="button" class="pdf-pick-btn">📎 Chọn PDF...</button>
+                  <div id="m-dorm-pdf-attached-bar" class="pdf-attached-bar" style="display:none;">
+                    <span id="m-dorm-pdf-file-name" class="pdf-file-name"></span>
+                    <div class="pdf-actions">
+                      <button id="m-dorm-btn-view-pdf" type="button" class="pdf-act-btn view">Xem</button>
+                      <button id="m-dorm-btn-replace-pdf" type="button" class="pdf-act-btn">Đổi</button>
+                      <button id="m-dorm-btn-remove-pdf" type="button" class="pdf-act-btn remove">✕</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
             <div class="m-field">
               <label for="m-df-notes">Ghi chú</label>
@@ -738,9 +810,110 @@
     window.visualViewport.addEventListener("resize", syncHeight);
   }
 
+  /* -------------------- Mobile Copy/Paste & Group Lump-Sum Helpers -------------------- */
+
+  function updateMobileClipboardUI() {
+    const bar = $("m-clipboard-bar");
+    const txt = $("m-clipboard-text");
+    if (!bar || !txt) return;
+    const src = mState.copiedBooking;
+    if (!src) {
+      bar.classList.remove("show");
+      return;
+    }
+    const nights = Math.max(1, diffNights(src.checkin, src.checkout) || 1);
+    const rName = getRoomById(src.roomId)?.name || src.roomId;
+    const codePart = src.bookingCode ? ` • ${src.bookingCode}` : "";
+    txt.textContent = `📋 Đang chép P.${rName} (${src.guestName}, ${nights}đ${codePart}) — chạm 📋 Dán ở phòng trống`;
+    bar.classList.add("show");
+  }
+
+  function copyMobileBooking(bk) {
+    if (!bk || bk.roomId === "DORM") {
+      showMobileToast("Chức năng sao chép áp dụng cho 26 phòng khách.");
+      return;
+    }
+    mState.copiedBooking = {
+      ...bk,
+      confirmationPdf: bk.confirmationPdf ? { ...bk.confirmationPdf } : null
+    };
+    $("m-sheet-booking").classList.remove("open");
+    updateMobileClipboardUI();
+    renderMobileAll();
+    showMobileToast(`📋 Đã sao chép P.${getRoomById(bk.roomId)?.name || bk.roomId} — chạm "📋 Dán" ở phòng trống`);
+  }
+
+  function clearMobileClipboard(silent = false) {
+    if (!mState.copiedBooking) return;
+    mState.copiedBooking = null;
+    updateMobileClipboardUI();
+    renderMobileAll();
+    if (!silent) showMobileToast("Đã thoát chế độ dán phòng");
+  }
+
+  async function pasteMobileBookingIntoRoom(targetRoomId, targetCheckin) {
+    if (!mState.copiedBooking || mState.isSubmitting) return;
+    const built = buildCopiedBookingPayload(mState.copiedBooking, targetRoomId, targetCheckin, { keepGroupCode: true });
+    if (!built.ok) {
+      showMobileToast(built.error);
+      return;
+    }
+    mState.isSubmitting = true;
+    try {
+      const res = await client.saveBooking(built.payload, { idempotencyKey: newIdemKey("mpaste") });
+      if (!res.ok) {
+        openMobileBookingSheet({ roomId: targetRoomId, checkin: targetCheckin, prefill: built.payload });
+        showMobileBookingError(res.error);
+        return;
+      }
+      renderMobileAll();
+      const rName = getRoomById(targetRoomId)?.name || targetRoomId;
+      const grpSuffix = res.booking.bookingCode ? ` • Đoàn ${res.booking.bookingCode}` : "";
+      showMobileToast(`📋 Đã dán vào P.${rName}${grpSuffix}`);
+    } finally {
+      mState.isSubmitting = false;
+    }
+  }
+
+  async function applyMobileGroupLumpSumPayment(bookingCode, targetPaidRaw) {
+    if (mState.isSubmitting) return { ok: false, error: "Đang xử lý, vui lòng đợi..." };
+    mState.isSubmitting = true;
+    try {
+      const summary = computeBookingGroupSummary(getBookings(), bookingCode);
+      if (!summary) return { ok: false, error: "Không tìm thấy phòng nào trong mã đoàn này." };
+      const alloc = allocateGroupPayment(summary.bookings, targetPaidRaw);
+      if (!alloc.ok) return { ok: false, error: alloc.error };
+
+      let updatedCount = 0;
+      for (const item of alloc.allocations) {
+        if (!item.changed) continue;
+        const latestBk = getBookings().find((b) => b.id === item.id);
+        if (!latestBk) continue;
+        const nextStatus = item.totalAmount > 0 && item.newPaid >= item.totalAmount
+          ? "paid"
+          : (item.newPaid > 0 ? "deposit" : "unpaid");
+        const saveRes = await client.saveBooking({
+          ...latestBk,
+          paidAmount: item.newPaid,
+          paymentStatus: nextStatus
+        }, { expectedRevision: Number(latestBk.revision) || 1 });
+        if (!saveRes.ok) {
+          renderMobileAll();
+          return { ok: false, error: `Lỗi cập nhật P.${getRoomById(latestBk.roomId)?.name || latestBk.roomId}: ${saveRes.error}` };
+        }
+        updatedCount += 1;
+      }
+
+      renderMobileAll();
+      return { ok: true, updatedCount, summary: computeBookingGroupSummary(getBookings(), bookingCode) };
+    } finally {
+      mState.isSubmitting = false;
+    }
+  }
+
   /* -------------------- Render Tab 1: Daily Schedule -------------------- */
 
-  function renderTurnCardHtml(bk, turnLabel, turnClass) {
+  function renderTurnCardHtml(bk, turnLabel, turnClass, groupMap = null) {
     const room = getRoomById(bk.roomId);
     const rem = getRemaining(bk);
     const total = parseVND(bk.totalAmount);
@@ -754,6 +927,11 @@
           ? `Cọc ${formatShortVND(paid)} • Nợ ${formatShortVND(rem)}`
           : `Chưa TT • Nợ ${formatShortVND(total)}`;
 
+    const grp = bk.bookingCode
+      ? (groupMap ? groupMap.get(normalizeGroupCode(bk.bookingCode)) : computeBookingGroupSummary(getBookings(), bk.bookingCode))
+      : null;
+    const isMultiGroup = grp && grp.roomCount >= 2;
+
     const chKey = bk.channelKey || detectChannelKey(bk.sourceName);
     return `<div class="m-turn-box ${turnClass}" data-m-edit-bk="${escapeHtml(bk.id)}">
       ${turnLabel ? `<div class="m-turn-label">${escapeHtml(turnLabel)}</div>` : ""}
@@ -762,8 +940,10 @@
         <div class="m-badges-row">
           ${bk.mergeBed && room && room.type === "Twins" ? `<span class="m-badge-g" title="Ghép giường Twins thành Double">G</span>` : ""}
           ${Number(bk.extraBed) > 0 ? `<span class="m-badge-eb">+${bk.extraBed} EB</span>` : ""}
+          ${bk.confirmationPdf && bk.confirmationPdf.name ? `<span class="pdf-mini-badge" title="Đã lưu file PDF xác nhận">📄 PDF</span>` : ""}
         </div>
       </div>
+      ${isMultiGroup ? `<div class="m-badges-row"><span class="m-group-pill">👥 Đoàn ${escapeHtml(grp.code)} (${grp.roomCount}P) • ${grp.remaining > 0 ? `Nợ đoàn ${formatShortVND(grp.remaining)}` : "✓ Đủ đoàn"}</span></div>` : ""}
       <div class="m-badges-row">
         <span class="m-channel-tag ch-${escapeHtml(chKey)}">${escapeHtml(bk.sourceName)}</span>
         <span style="font-size:11.5px; color:var(--text-muted);">${formatDateVN(bk.checkin)} → ${formatDateVN(bk.checkout)}</span>
@@ -777,6 +957,7 @@
   }
 
   function renderScheduleView() {
+    updateMobileClipboardUI();
     const dateISO = mState.selectedDate;
     const isToday = dateISO === getTodayISO();
     $("m-date-main").textContent = formatFullDateLabel(dateISO);
@@ -838,14 +1019,23 @@
 
     $("m-btn-filter-toggle").classList.toggle("has-filter", hasScheduleFilters());
 
-    // Build floor-grouped room cards
-    const floors = [1, 2, 3, 4];
+    // Precompute multi-room group map
+    const groupMap = new Map();
+    computeAllBookingGroups(getBookings(), { minRooms: 2 }).forEach((g) => groupMap.set(g.normalizedCode, g));
+    const pasteActive = Boolean(mState.copiedBooking);
+
+    // Build section-grouped room cards (Dorm separated at VERY TOP, then Floors 1-4)
     const htmlParts = [];
 
-    for (const fl of floors) {
-      if (mState.filters.floor !== "all" && String(fl) !== mState.filters.floor) continue;
-      const floorRooms = ROOMS.filter((r) => {
-        if (r.floor !== fl) return false;
+    for (const section of ROOM_SECTIONS) {
+      if (mState.filters.floor === "dorm") {
+        if (!section.isDorm) continue;
+      } else if (mState.filters.floor !== "all") {
+        if (section.isDorm || String(section.floor) !== mState.filters.floor) continue;
+      }
+
+      const sectionRooms = ROOMS.filter((r) => {
+        if (section.isDorm ? !r.isDorm : (r.isDorm || r.floor !== section.floor)) return false;
         if (mState.filters.type !== "all" && r.type !== mState.filters.type) return false;
         if (mState.filters.view !== "all" && r.view !== mState.filters.view) return false;
 
@@ -874,12 +1064,9 @@
         return true;
       });
 
-      if (floorRooms.length === 0) continue;
+      if (sectionRooms.length === 0) continue;
 
-      const floorRegRooms = floorRooms.filter((r) => !r.isDorm);
-      const floorFreeCount = floorRegRooms.filter((r) => getRoomTurnsForDate(r.id, dateISO).staying.length === 0).length;
-
-      const cardsHtml = floorRooms.map((room) => {
+      const cardsHtml = sectionRooms.map((room) => {
         if (room.isDorm) {
           const dMap = mState.rangeActive
             ? getDormOccupiedSlotsInRange(getBookings(), mState.rangeCheckin, mState.rangeCheckout, null)
@@ -887,7 +1074,7 @@
           const used = Object.keys(dMap).length;
           const free = Math.max(0, 8 - used);
           const uniqueGuests = [...new Set(Object.values(dMap).map((b) => b.guestName))];
-          return `<article class="m-room-card dorm-card">
+          return `<article class="m-room-card dorm-card" data-room-id="DORM">
             <div class="m-room-head" data-m-open-dorm="${escapeHtml(mState.rangeActive ? mState.rangeCheckin : dateISO)}">
               <div>
                 <div class="m-room-title-row">
@@ -926,22 +1113,38 @@
             </div>
             <span class="m-status-pill ${pillCls}">${pillTxt}</span>
           </div>
-          ${checkoutBk ? renderTurnCardHtml(checkoutBk, "↗ Trả phòng hôm nay", "checkout-turn") : ""}
-          ${stayingBk ? renderTurnCardHtml(stayingBk, isTurnover ? "↙ Nhận phòng hôm nay" : (stayingBk.checkin === dateISO ? "↙ Nhận phòng hôm nay" : ""), isTurnover ? "checkin-turn" : "") : ""}
+          ${checkoutBk ? renderTurnCardHtml(checkoutBk, "↗ Trả phòng hôm nay", "checkout-turn", groupMap) : ""}
+          ${stayingBk ? renderTurnCardHtml(stayingBk, isTurnover ? "↙ Nhận phòng hôm nay" : (stayingBk.checkin === dateISO ? "↙ Nhận phòng hôm nay" : ""), isTurnover ? "checkin-turn" : "", groupMap) : ""}
           ${!stayingBk ? `<div class="m-card-actions">
-            <button type="button" class="m-btn m-btn-primary m-btn-block" data-m-book-room="${escapeHtml(room.id)}" data-m-ci="${escapeHtml(bookCi)}" data-m-co="${escapeHtml(bookCo)}">+ Đặt phòng${mState.rangeActive ? ` (${diffNights(bookCi, bookCo)} đêm)` : ""}</button>
-            <button type="button" class="m-btn" data-m-open-room="${escapeHtml(room.id)}">Lịch phòng</button>
+            ${pasteActive ? `<button type="button" class="m-btn m-btn-primary m-btn-block" data-m-paste-room="${escapeHtml(room.id)}" data-m-ci="${escapeHtml(bookCi)}">📋 Dán vào P.${escapeHtml(room.name)}</button>` : ""}
+            <button type="button" class="m-btn ${pasteActive ? "" : "m-btn-primary m-btn-block"}" data-m-book-room="${escapeHtml(room.id)}" data-m-ci="${escapeHtml(bookCi)}" data-m-co="${escapeHtml(bookCo)}">${pasteActive ? "+ Mới" : `+ Đặt phòng${mState.rangeActive ? ` (${diffNights(bookCi, bookCo)} đêm)` : ""}`}</button>
+            ${!pasteActive ? `<button type="button" class="m-btn" data-m-open-room="${escapeHtml(room.id)}">Lịch phòng</button>` : ""}
           </div>` : ""}
         </article>`;
       }).join("");
 
-      htmlParts.push(`<div class="m-floor-section">
-        <div class="m-floor-header">
-          <span>Tầng ${fl}${fl === 1 ? " (5 phòng + Dorm nội bộ)" : ` (${floorRegRooms.length} phòng)`}</span>
-          <span>Trống ${floorFreeCount}/${floorRegRooms.length}</span>
-        </div>
-        ${cardsHtml}
-      </div>`);
+      if (section.isDorm) {
+        const dMap = mState.rangeActive
+          ? getDormOccupiedSlotsInRange(getBookings(), mState.rangeCheckin, mState.rangeCheckout, null)
+          : dormMap;
+        const free = Math.max(0, 8 - Object.keys(dMap).length);
+        htmlParts.push(`<div class="m-floor-section" data-m-section="dorm">
+          <div class="m-floor-header is-dorm">
+            <span>🛏️ Dorm nội bộ (Mục riêng • 8 chỗ)</span>
+            <span>Trống ${free}/8 slot</span>
+          </div>
+          ${cardsHtml}
+        </div>`);
+      } else {
+        const floorFreeCount = sectionRooms.filter((r) => getRoomTurnsForDate(r.id, dateISO).staying.length === 0).length;
+        htmlParts.push(`<div class="m-floor-section" data-m-section="${section.floor}">
+          <div class="m-floor-header">
+            <span>Tầng ${section.floor} (${sectionRooms.length} phòng ngủ)</span>
+            <span>Trống ${floorFreeCount}/${sectionRooms.length}</span>
+          </div>
+          ${cardsHtml}
+        </div>`);
+      }
     }
 
     $("m-rooms-list").innerHTML = htmlParts.length > 0
@@ -956,6 +1159,9 @@
   function renderBookingsTab() {
     const today = getTodayISO();
     const q = mState.bookingsSearch.trim().toLowerCase();
+    const groupMap = new Map();
+    computeAllBookingGroups(getBookings(), { minRooms: 2 }).forEach((g) => groupMap.set(g.normalizedCode, g));
+
     const list = getBookings().filter((bk) => {
       if (mState.bookingsTabFilter === "today" && !(bookingCoversDate(bk, today) || bk.checkout === today)) return false;
       if (mState.bookingsTabFilter === "upcoming" && bk.checkin <= today) return false;
@@ -979,7 +1185,7 @@
             <strong style="font-size:14px;">${escapeHtml(roomLabel)}</strong>
             <span style="font-size:11.5px; color:var(--text-muted);">${diffNights(bk.checkin, bk.checkout)} đêm</span>
           </div>
-          ${renderTurnCardHtml(bk, "", "")}
+          ${renderTurnCardHtml(bk, "", "", groupMap)}
           ${rem > 0 ? `<div class="m-card-actions">
             <button type="button" class="m-btn m-btn-success m-btn-block" data-m-edit-bk="${escapeHtml(bk.id)}">💰 Thu tiền / Cập nhật</button>
           </div>` : ""}
@@ -1014,13 +1220,50 @@
     const { map: dormMap } = getDormSlotMapForDate(getBookings(), dateISO);
     const dormUsed = Object.keys(dormMap).length;
     const fin = computeMonthlyFinancials(getBookings(), year, month0);
+    const groups = computeAllBookingGroups(getBookings(), { minRooms: 2 });
     const health = client.runHealthCheck();
+
+    const groupsHtml = groups.length === 0
+      ? `<div style="font-size:12.5px; color:var(--text-muted);">Chưa có đoàn nào có từ 2 phòng trở lên chung Mã đặt phòng.</div>`
+      : groups.map((g) => `
+          <div class="m-group-box" data-m-rpt-group="${escapeHtml(g.code)}">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;">
+              <strong style="font-size:13.5px;">👥 ${escapeHtml(g.code)} — ${escapeHtml(g.tourName || g.leadGuestName)}</strong>
+              <span class="m-group-pill">${g.roomCount} phòng • ${g.totalNights} đêm</span>
+            </div>
+            <div style="font-size:11.5px; color:var(--text-muted);">${escapeHtml(g.sourceName)} • ${formatDateVN(g.earliestCheckin)} → ${formatDateVN(g.latestCheckout)}</div>
+            <div class="m-group-rooms">
+              ${g.bookings.map((b) => {
+                const lbl = b.roomId === "DORM" ? `Dorm(${(b.slots || []).join(",")})` : `P.${getRoomById(b.roomId)?.name || b.roomId}`;
+                const rem = getRemaining(b);
+                return `<button type="button" class="m-group-room-tag" data-m-edit-bk="${escapeHtml(b.id)}">${escapeHtml(lbl)} • ${rem > 0 ? `Nợ ${formatShortVND(rem)}` : "✓Đủ"}</button>`;
+              }).join("")}
+            </div>
+            <div class="m-group-totals">
+              <div><span>Tổng đoàn</span><strong>${formatVND(g.totalAmount)}</strong></div>
+              <div><span>Đã thu</span><strong class="ok">${formatVND(g.paidAmount)}</strong></div>
+              <div><span>Còn nợ</span><strong class="${g.remaining > 0 ? "warn" : "ok"}">${formatVND(g.remaining)}</strong></div>
+            </div>
+            <div class="m-group-lump">
+              <input class="m-input m-rpt-group-lump-input" type="text" inputmode="numeric" value="${g.paidAmount > 0 ? formatNumberInput(g.paidAmount) : ""}" placeholder="Nhập tổng tiền cọc/TT cả đoàn (VNĐ)..." />
+              <div class="m-group-lump-btns">
+                <button type="button" class="m-btn m-btn-primary" data-m-rpt-group-allocate="${escapeHtml(g.code)}">Chia tự động</button>
+                <button type="button" class="m-btn m-btn-success" data-m-rpt-group-paid="${escapeHtml(g.code)}" ${g.remaining <= 0 ? "disabled" : ""}>✓ Thu đủ đoàn</button>
+              </div>
+            </div>
+          </div>
+        `).join("");
 
     $("m-report-content").innerHTML = `
       <div class="m-section-card">
+        <h3>👥 Tổng hợp theo Đoàn / Mã đặt phòng (${groups.length})</h3>
+        ${groupsHtml}
+      </div>
+
+      <div class="m-section-card">
         <h3>📅 Báo cáo ngày ${formatDateVN(dateISO)}</h3>
         <div class="m-kv-row"><span>Phòng đang ở</span><strong>${activeEntries.length} / 26 phòng (trống ${26 - activeEntries.length})</strong></div>
-        <div class="m-kv-row"><span>Dorm nội bộ (Tầng 1)</span><strong>Đã đặt ${dormUsed}/8 (còn ${8 - dormUsed} slot)</strong></div>
+        <div class="m-kv-row"><span>Dorm nội bộ (Mục riêng)</span><strong>Đã đặt ${dormUsed}/8 (còn ${8 - dormUsed} slot)</strong></div>
         <div class="m-kv-row"><span>Nhận / Trả phòng ngày này</span><strong>${checkins.length} đến • ${checkouts.length} đi</strong></div>
         <div class="m-kv-row"><span>🍽️ Buffet sáng Tầng 5 (dự kiến)</span><strong style="color:#b45309;">${buffetTotal} khách</strong></div>
       </div>
@@ -1252,7 +1495,50 @@
     selectEl.value = clean;
   }
 
-  function openMobileBookingSheet({ bookingId = null, roomId = "101", checkin = mState.selectedDate, checkout = null } = {}) {
+  function renderMobileModalGroupSummary() {
+    const box = $("m-group-summary-box");
+    if (!box) return;
+    const code = ($("m-f-booking-code").value || "").trim();
+    const norm = normalizeGroupCode(code);
+    if (!norm) {
+      box.style.display = "none";
+      return;
+    }
+    const summary = computeBookingGroupSummary(getBookings(), norm);
+    const isJoiningNew = !mState.editingBookingId && summary && summary.roomCount >= 1;
+    const isMultiSaved = summary && summary.roomCount >= 2;
+    if (!isJoiningNew && !isMultiSaved) {
+      box.style.display = "none";
+      return;
+    }
+
+    box.style.display = "flex";
+    $("m-group-title").textContent = isJoiningNew
+      ? `👥 Đang ghép vào đoàn ${summary.code}`
+      : `👥 Tổng hợp đoàn ${summary.code}`;
+    $("m-group-count").textContent = `${summary.roomCount}P • ${summary.totalNights} đêm`;
+
+    $("m-group-rooms").innerHTML = summary.bookings.map((b) => {
+      const lbl = b.roomId === "DORM" ? `Dorm(${(b.slots || []).join(",")})` : `P.${getRoomById(b.roomId)?.name || b.roomId}`;
+      const isCur = b.id === mState.editingBookingId;
+      const rem = getRemaining(b);
+      return `<button type="button" class="m-group-room-tag ${isCur ? "current" : ""}" data-m-jump-bk="${escapeHtml(b.id)}">${escapeHtml(lbl)} • ${rem > 0 ? `Nợ ${formatShortVND(rem)}` : "✓Đủ"}</button>`;
+    }).join("");
+
+    $("m-group-total").textContent = formatVND(summary.totalAmount);
+    $("m-group-paid").textContent = formatVND(summary.paidAmount);
+    $("m-group-remaining").textContent = formatVND(summary.remaining);
+    $("m-group-remaining").className = summary.remaining > 0 ? "warn" : "ok";
+
+    const lumpWrap = $("m-group-lump-wrap");
+    if (lumpWrap) lumpWrap.style.display = isMultiSaved ? "flex" : "none";
+    if (isMultiSaved) {
+      $("m-group-lump-input").value = summary.paidAmount > 0 ? formatNumberInput(summary.paidAmount) : "";
+      $("m-btn-group-mark-paid").disabled = summary.remaining <= 0;
+    }
+  }
+
+  function openMobileBookingSheet({ bookingId = null, roomId = "101", checkin = mState.selectedDate, checkout = null, prefill = null } = {}) {
     mState.savedScrollTop = $("m-main").scrollTop;
     showMobileBookingError("");
     mState.bookingConflictBooking = null;
@@ -1284,41 +1570,67 @@
       $("m-f-merge-bed").checked = Boolean(existing.mergeBed);
       $("m-f-extra-bed").value = String(existing.extraBed || 0);
       setMobileConfirmerSelect($("m-f-confirmed-by"), existing.confirmedBy);
+      mState.bookingConfirmationPdf = existing.confirmationPdf ? { ...existing.confirmationPdf } : null;
+      syncMobilePdfUI("m-", mState.bookingConfirmationPdf);
       $("m-f-notes").value = existing.notes || "";
       $("m-bk-delete").style.display = "inline-flex";
+      $("m-bk-copy").style.display = "inline-flex";
       $("m-bk-mark-paid").style.display = getRemaining(existing) > 0 ? "inline-flex" : "none";
     } else {
       mState.editingBookingId = null;
       mState.editingBookingRevision = null;
       const room = getRoomById(roomId) || ROOMS[0];
-      const draft = loadMobileDraftFor(room.id, checkin);
-      $("m-bk-sheet-title").textContent = `Đặt phòng mới — P.${room.name}`;
+      const draft = prefill || loadMobileDraftFor(room.id, checkin);
+      $("m-bk-sheet-title").textContent = prefill ? `Dán phòng — P.${room.name}` : `Đặt phòng mới — P.${room.name}`;
       $("m-f-room").value = room.id;
-      $("m-f-checkin").value = checkin;
+      $("m-f-checkin").value = (prefill && prefill.checkin) || checkin;
       $("m-f-checkout").value = (draft && draft.checkout) || checkout || addDaysISO(checkin, 1);
-      setMobileChannel((draft && draft.channelKey) || "booking", {
-        customText: (draft && draft.sourceCustom) || "",
+      const chKey = (draft && draft.channelKey) || "booking";
+      setMobileChannel(chKey, {
+        customText: (draft && (draft.sourceCustom || (chKey === "other" ? draft.sourceName : ""))) || "",
         tourName: (draft && draft.tourName) || ""
       });
       $("m-f-booking-code").value = (draft && draft.bookingCode) || "";
       $("m-f-guest-name").value = (draft && draft.guestName) || "";
       $("m-f-phone").value = (draft && draft.phone) || "";
       $("m-f-guests").value = (draft && draft.guestCount) || room.defaultGuests;
-      $("m-f-total").value = (draft && draft.totalAmount) || "";
-      $("m-f-paid").value = (draft && draft.paidAmount) || "";
+      $("m-f-total").value = prefill ? formatNumberInput(prefill.totalAmount) : ((draft && draft.totalAmount) || "");
+      $("m-f-paid").value = prefill ? formatNumberInput(prefill.paidAmount) : ((draft && draft.paidAmount) || "");
       $("m-f-merge-bed").checked = Boolean(draft && draft.mergeBed);
-      $("m-f-extra-bed").value = (draft && draft.extraBed) || "0";
+      $("m-f-extra-bed").value = String((draft && draft.extraBed) || "0");
       setMobileConfirmerSelect($("m-f-confirmed-by"), (draft && draft.confirmedBy) || "");
+      mState.bookingConfirmationPdf = (prefill && prefill.confirmationPdf) ? { ...prefill.confirmationPdf } : null;
+      syncMobilePdfUI("m-", mState.bookingConfirmationPdf);
       $("m-f-notes").value = (draft && draft.notes) || "";
       $("m-bk-delete").style.display = "none";
+      $("m-bk-copy").style.display = "none";
       $("m-bk-mark-paid").style.display = "none";
-      if (draft) showMobileToast("Đã khôi phục nội dung đang nhập dở");
+      if (!prefill && draft) showMobileToast("Đã khôi phục nội dung đang nhập dở");
     }
 
     updateMobileRoomFields();
     updateMobileNights();
     updateMobilePaymentPreview();
+    renderMobileModalGroupSummary();
     $("m-sheet-booking").classList.add("open");
+  }
+
+  function syncMobilePdfUI(prefix, pdfObj) {
+    const pickBtn = $(`${prefix}btn-pick-pdf`);
+    const bar = $(`${prefix}pdf-attached-bar`);
+    const nameEl = $(`${prefix}pdf-file-name`);
+    if (!pickBtn || !bar || !nameEl) return;
+    if (pdfObj && pdfObj.dataUrl) {
+      pickBtn.style.display = "none";
+      bar.style.display = "flex";
+      nameEl.textContent = `📄 ${pdfObj.name}`;
+      nameEl.title = `${pdfObj.name} (${formatFileSize(pdfObj.size)})`;
+    } else {
+      pickBtn.style.display = "flex";
+      bar.style.display = "none";
+      nameEl.textContent = "";
+      nameEl.title = "";
+    }
   }
 
   async function handleMobileSaveBooking(e) {
@@ -1361,6 +1673,7 @@
         mergeBed: $("m-f-merge-bed").checked,
         extraBed: $("m-f-extra-bed").value,
         confirmedBy: $("m-f-confirmed-by").value,
+        confirmationPdf: mState.bookingConfirmationPdf,
         notes: $("m-f-notes").value
       };
 
@@ -1542,6 +1855,8 @@
       $("m-df-total").value = formatNumberInput(ex.totalAmount);
       $("m-df-paid").value = formatNumberInput(ex.paidAmount);
       setMobileConfirmerSelect($("m-df-confirmed-by"), ex.confirmedBy);
+      mState.dormConfirmationPdf = ex.confirmationPdf ? { ...ex.confirmationPdf } : null;
+      syncMobilePdfUI("m-dorm-", mState.dormConfirmationPdf);
       $("m-df-notes").value = ex.notes || "";
     } else {
       mState.editingDormId = null;
@@ -1564,6 +1879,8 @@
       $("m-df-total").value = "";
       $("m-df-paid").value = "";
       setMobileConfirmerSelect($("m-df-confirmed-by"), "");
+      mState.dormConfirmationPdf = null;
+      syncMobilePdfUI("m-dorm-", null);
       $("m-df-notes").value = "";
     }
 
@@ -1603,6 +1920,7 @@
         totalAmount: $("m-df-total").value,
         paidAmount: $("m-df-paid").value,
         confirmedBy: $("m-df-confirmed-by").value,
+        confirmationPdf: mState.dormConfirmationPdf,
         notes: $("m-df-notes").value
       }, {
         expectedRevision: mState.editingDormId ? mState.editingDormRevision : undefined,
@@ -1692,10 +2010,12 @@
 
   function renderMobileAll() {
     renderSyncStatus();
+    updateMobileClipboardUI();
     if (mState.activeTab === "schedule") renderScheduleView();
     else if (mState.activeTab === "bookings") renderBookingsTab();
     else if (mState.activeTab === "report") renderReportTab();
     if ($("m-sheet-room").classList.contains("open")) renderRoomDetailSheet();
+    if ($("m-sheet-booking").classList.contains("open")) renderMobileModalGroupSummary();
     if ($("m-sheet-dorm").classList.contains("open") && mState.dormMode === "board") renderMobileDormBoard();
     if ($("m-sheet-history").classList.contains("open")) renderMobileHistorySheet();
   }
@@ -1730,8 +2050,9 @@
       btn.addEventListener("click", () => switchTab(btn.dataset.mTab));
     });
 
-    // Offline retry button
+    // Offline retry & clipboard cancel buttons
     $("m-btn-retry-sync").addEventListener("click", () => client.pullLatest());
+    $("m-clipboard-cancel").addEventListener("click", () => clearMobileClipboard(false));
     $("m-btn-force-sync").addEventListener("click", async () => {
       const res = await client.pullLatest();
       showMobileToast(res.ok ? "Đã đồng bộ dữ liệu mới nhất!" : res.error);
@@ -1804,11 +2125,42 @@
       renderScheduleView();
     });
 
+    // Format lump-sum inputs in Report tab
+    $("m-main").addEventListener("input", (e) => {
+      const inp = e.target.closest(".m-rpt-group-lump-input");
+      if (!inp) return;
+      const raw = parseVND(inp.value);
+      inp.value = raw > 0 ? raw.toLocaleString("vi-VN") : "";
+    });
+
     // Delegated clicks inside Schedule, Bookings, Report, and Room Detail
-    $("m-main").addEventListener("click", (e) => {
+    $("m-main").addEventListener("click", async (e) => {
       if (e.target.closest("#m-stat-dorm-card")) return openDormSheet(mState.selectedDate);
       const dormBtn = e.target.closest("[data-m-open-dorm]");
       if (dormBtn) return openDormSheet(dormBtn.dataset.mOpenDorm);
+      const pasteBtn = e.target.closest("[data-m-paste-room]");
+      if (pasteBtn) return pasteMobileBookingIntoRoom(pasteBtn.dataset.mPasteRoom, pasteBtn.dataset.mCi);
+      const rptAllocBtn = e.target.closest("[data-m-rpt-group-allocate]");
+      if (rptAllocBtn) {
+        const code = rptAllocBtn.dataset.mRptGroupAllocate;
+        const box = rptAllocBtn.closest("[data-m-rpt-group]");
+        const inp = box ? box.querySelector(".m-rpt-group-lump-input") : null;
+        const val = inp ? inp.value : 0;
+        const res = await applyMobileGroupLumpSumPayment(code, val);
+        if (!res.ok) return alert(res.error);
+        showMobileToast(`✓ Đã chia ${formatVND(parseVND(val))} cho đoàn ${code}`);
+        return;
+      }
+      const rptPaidBtn = e.target.closest("[data-m-rpt-group-paid]");
+      if (rptPaidBtn) {
+        const code = rptPaidBtn.dataset.mRptGroupPaid;
+        const summary = computeBookingGroupSummary(getBookings(), code);
+        if (!summary) return;
+        const res = await applyMobileGroupLumpSumPayment(code, summary.totalAmount);
+        if (!res.ok) return alert(res.error);
+        showMobileToast(`✓ Đã thu đủ cả đoàn ${code}`);
+        return;
+      }
       const bookBtn = e.target.closest("[data-m-book-room]");
       if (bookBtn) return openMobileBookingSheet({ roomId: bookBtn.dataset.mBookRoom, checkin: bookBtn.dataset.mCi, checkout: bookBtn.dataset.mCo });
       const editBk = e.target.closest("[data-m-edit-bk]");
@@ -1868,6 +2220,11 @@
       restoreScrollPosition();
       if (typeof client.notifyIdleCheck === "function") client.notifyIdleCheck();
     });
+    $("m-bk-copy").addEventListener("click", () => {
+      if (!mState.editingBookingId) return;
+      const bk = getBookings().find((b) => b.id === mState.editingBookingId);
+      if (bk) copyMobileBooking(bk);
+    });
     $("m-f-room").addEventListener("change", () => { updateMobileRoomFields(); saveMobileDraft(); });
     $("m-f-checkin").addEventListener("change", () => {
       if (!$("m-f-checkout").value || $("m-f-checkout").value <= $("m-f-checkin").value) {
@@ -1877,6 +2234,7 @@
       saveMobileDraft();
     });
     $("m-f-checkout").addEventListener("change", () => { updateMobileNights(); saveMobileDraft(); });
+    $("m-f-booking-code").addEventListener("input", renderMobileModalGroupSummary);
     $("m-f-channels").addEventListener("click", (e) => {
       const chip = e.target.closest("[data-m-ch]");
       if (!chip) return;
@@ -1895,6 +2253,44 @@
         saveMobileDraft();
       });
     });
+
+    // Mobile Group Summary Box events inside Booking Form
+    $("m-group-lump-input").addEventListener("input", (e) => {
+      const raw = parseVND(e.target.value);
+      e.target.value = raw > 0 ? raw.toLocaleString("vi-VN") : "";
+    });
+    $("m-group-rooms").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-m-jump-bk]");
+      if (!btn) return;
+      const targetId = btn.dataset.mJumpBk;
+      if (targetId && targetId !== mState.editingBookingId) {
+        openMobileBookingSheet({ bookingId: targetId });
+      }
+    });
+    $("m-btn-group-allocate").addEventListener("click", async () => {
+      const code = ($("m-f-booking-code").value || "").trim();
+      const val = $("m-group-lump-input").value;
+      const curId = mState.editingBookingId;
+      const res = await applyMobileGroupLumpSumPayment(code, val);
+      if (!res.ok) return showMobileBookingError(res.error);
+      showMobileBookingError("");
+      if (curId) openMobileBookingSheet({ bookingId: curId });
+      else renderMobileModalGroupSummary();
+      showMobileToast(`✓ Đã chia ${formatVND(parseVND(val))} cho đoàn ${code}`);
+    });
+    $("m-btn-group-mark-paid").addEventListener("click", async () => {
+      const code = ($("m-f-booking-code").value || "").trim();
+      const curId = mState.editingBookingId;
+      const summary = computeBookingGroupSummary(getBookings(), code);
+      if (!summary) return;
+      const res = await applyMobileGroupLumpSumPayment(code, summary.totalAmount);
+      if (!res.ok) return showMobileBookingError(res.error);
+      showMobileBookingError("");
+      if (curId) openMobileBookingSheet({ bookingId: curId });
+      else renderMobileModalGroupSummary();
+      showMobileToast(`✓ Đã thu đủ cả đoàn ${code}`);
+    });
+
     $("m-bk-mark-paid").addEventListener("click", () => {
       setMobilePayTab("paid", true);
       showMobileToast("Đã điền thu đủ — chạm Lưu thông tin");
@@ -1960,6 +2356,55 @@
       });
     });
     $("m-dorm-form-pane").addEventListener("submit", handleMobileSaveDorm);
+
+    // Confirmation PDF upload/view/replace/remove (Mobile Regular Room + Dorm)
+    const bindMobilePdfControls = ({ prefix, inputId, getPdf, setPdf, showErr }) => {
+      const inputEl = $(inputId);
+      const triggerPick = () => { if (inputEl) inputEl.click(); };
+      $(`${prefix}btn-pick-pdf`).addEventListener("click", triggerPick);
+      $(`${prefix}btn-replace-pdf`).addEventListener("click", triggerPick);
+      $(`${prefix}btn-view-pdf`).addEventListener("click", () => {
+        if (window.PMSPdfHelper) window.PMSPdfHelper.openPdfAttachment(getPdf());
+      });
+      $(`${prefix}btn-remove-pdf`).addEventListener("click", () => {
+        setPdf(null);
+        syncMobilePdfUI(prefix, null);
+        showMobileToast("Đã gỡ file PDF (chạm Lưu để áp dụng)");
+      });
+      inputEl.addEventListener("change", async (e) => {
+        const file = e.target.files && e.target.files[0];
+        e.target.value = "";
+        if (!file || !window.PMSPdfHelper) return;
+        const parsed = await window.PMSPdfHelper.readPdfFileInput(file);
+        if (!parsed.ok) {
+          showErr(parsed.error);
+          return;
+        }
+        showErr("");
+        setPdf(parsed.pdf);
+        syncMobilePdfUI(prefix, parsed.pdf);
+        showMobileToast(`Đã đính kèm ${parsed.pdf.name}`);
+      });
+    };
+
+    bindMobilePdfControls({
+      prefix: "m-",
+      inputId: "m-f-confirmation-pdf",
+      getPdf: () => mState.bookingConfirmationPdf,
+      setPdf: (v) => { mState.bookingConfirmationPdf = v; },
+      showErr: showMobileBookingError
+    });
+    bindMobilePdfControls({
+      prefix: "m-dorm-",
+      inputId: "m-df-confirmation-pdf",
+      getPdf: () => mState.dormConfirmationPdf,
+      setPdf: (v) => { mState.dormConfirmationPdf = v; },
+      showErr: (msg) => {
+        $("m-dorm-error").textContent = msg || "";
+        $("m-dorm-error").classList.toggle("show", Boolean(msg));
+      }
+    });
+
     $("m-dorm-reload-latest").addEventListener("click", () => {
       if (mState.editingDormId) openMobileDormForm({ bookingId: mState.editingDormId });
     });

@@ -47,6 +47,10 @@
         </span>
         <button id="btn-new-booking" class="btn btn-primary" type="button">+ Đặt phòng</button>
         <button id="btn-open-dorm-today" class="btn btn-sm" type="button">🛏️ Đặt slot Dorm</button>
+        <button id="btn-open-groups" class="btn btn-sm" type="button" title="Báo cáo tổng tiền & thu tiền chung theo Đoàn / Mã đặt phòng">
+          <span>👥 Đoàn</span>
+          <span id="groups-count-pill" class="autobackup-pill" style="display:none;">0</span>
+        </button>
         <button id="btn-open-history" class="btn btn-sm btn-history" type="button" title="Xem lịch sử chỉnh sửa & cấu hình sao lưu tự động">
           <span>🕒 Lịch sử</span>
           <span id="autobackup-status-pill" class="autobackup-pill">Auto</span>
@@ -95,11 +99,12 @@
       <div class="filters-row">
         <input id="filter-search" class="search-input" type="search" placeholder="Tìm khách, SĐT, mã ĐP, tour..." />
         <select id="filter-floor" class="filter-select" aria-label="Lọc theo tầng">
-          <option value="all">Tất cả tầng</option>
-          <option value="1">Tầng 1 (5 phòng + Dorm nội bộ)</option>
-          <option value="2">Tầng 2 (7 phòng)</option>
-          <option value="3">Tầng 3 (7 phòng)</option>
-          <option value="4">Tầng 4 (7 phòng)</option>
+          <option value="all">Tất cả tầng &amp; Dorm</option>
+          <option value="dorm">Dorm nội bộ (8 chỗ)</option>
+          <option value="1">Tầng 1 (5 phòng ngủ)</option>
+          <option value="2">Tầng 2 (7 phòng ngủ)</option>
+          <option value="3">Tầng 3 (7 phòng ngủ)</option>
+          <option value="4">Tầng 4 (7 phòng ngủ)</option>
         </select>
         <select id="filter-type" class="filter-select" aria-label="Lọc theo hạng phòng">
           <option value="all">Tất cả hạng phòng</option>
@@ -129,6 +134,20 @@
     <div id="active-filter-bar" class="active-filter-bar">
       <span id="active-filter-text"></span>
       <button id="btn-clear-filter-bar" class="btn btn-primary btn-sm" type="button">Hiện tất cả</button>
+    </div>
+
+    <!-- Copy / Paste Active Clipboard Bar -->
+    <div id="pc-clipboard-bar" class="clipboard-bar" role="status" aria-live="polite">
+      <div class="clipboard-info">
+        <span id="pc-clipboard-text"></span>
+      </div>
+      <div class="clipboard-actions">
+        <label class="clipboard-chk">
+          <input id="chk-paste-keep-group" type="checkbox" checked />
+          <span>Giữ cùng đoàn (Mã ĐP)</span>
+        </label>
+        <button id="btn-cancel-clipboard" class="btn btn-sm" type="button">✕ Hủy dán (Esc)</button>
+      </div>
     </div>
 
     <!-- Monthly Calendar Matrix -->
@@ -254,6 +273,25 @@
           </div>
         </div>
 
+        <!-- Live Multi-Room Group Financial Summary & Lump-Sum Payment Allocation -->
+        <div id="pc-group-summary-box" class="group-summary-box" style="display:none;">
+          <div class="group-summary-head">
+            <strong id="pc-group-title">👥 Tổng hợp cả đoàn</strong>
+            <span id="pc-group-rooms-count" class="group-pill"></span>
+          </div>
+          <div id="pc-group-rooms-list" class="group-rooms-list"></div>
+          <div class="group-totals-grid">
+            <div><span>Tổng tiền đoàn</span><strong id="pc-group-total">0 đ</strong></div>
+            <div><span>Đã cọc / TT đoàn</span><strong id="pc-group-paid" class="ok">0 đ</strong></div>
+            <div><span>Còn nợ cả đoàn</span><strong id="pc-group-remaining" class="warn">0 đ</strong></div>
+          </div>
+          <div class="group-lump-row">
+            <input id="pc-group-lump-input" class="input" type="text" inputmode="numeric" placeholder="Nhập tổng tiền cọc / thu chung cả đoàn (VNĐ)..." />
+            <button id="btn-pc-group-allocate" type="button" class="btn btn-sm btn-primary">Chia tự động</button>
+            <button id="btn-pc-group-mark-paid" type="button" class="btn btn-sm btn-success">✓ Thu đủ đoàn</button>
+          </div>
+        </div>
+
         <!-- Room Options: Ghép giường & Extra bed -->
         <div class="options-row">
           <label id="card-merge-bed" class="toggle-card">
@@ -277,17 +315,35 @@
           </div>
         </div>
 
-        <!-- Booking Confirmer -->
-        <div class="field">
-          <label for="field-confirmed-by">Người xác nhận đơn đặt phòng</label>
-          <select id="field-confirmed-by" class="select">
-            <option value="">-- Chọn người xác nhận --</option>
-            <option value="Ngọc">Ngọc</option>
-            <option value="Tường Vi">Tường Vi</option>
-            <option value="Trần Bình">Trần Bình</option>
-            <option value="Lan Anh">Lan Anh</option>
-            <option value="Trần Minh">Trần Minh</option>
-          </select>
+        <!-- Booking Confirmer + Confirmation PDF (Split 50/50) -->
+        <div class="form-grid">
+          <div class="field">
+            <label for="field-confirmed-by">Người xác nhận đơn đặt phòng</label>
+            <select id="field-confirmed-by" class="select">
+              <option value="">-- Chọn người xác nhận --</option>
+              <option value="Ngọc">Ngọc</option>
+              <option value="Tường Vi">Tường Vi</option>
+              <option value="Trần Bình">Trần Bình</option>
+              <option value="Lan Anh">Lan Anh</option>
+              <option value="Trần Minh">Trần Minh</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="field-confirmation-pdf">Xác nhận đặt phòng (PDF)</label>
+            <div id="pdf-upload-box" class="pdf-upload-box">
+              <input id="field-confirmation-pdf" type="file" accept="application/pdf,.pdf" hidden />
+              <button id="btn-pick-pdf" type="button" class="pdf-pick-btn">📎 Chọn file PDF xác nhận...</button>
+              <div id="pdf-attached-bar" class="pdf-attached-bar" style="display:none;">
+                <span id="pdf-file-name" class="pdf-file-name"></span>
+                <div class="pdf-actions">
+                  <button id="btn-view-pdf" type="button" class="pdf-act-btn view" title="Mở / Tải file PDF xác nhận">Xem</button>
+                  <button id="btn-replace-pdf" type="button" class="pdf-act-btn" title="Đổi file PDF khác">Đổi</button>
+                  <button id="btn-remove-pdf" type="button" class="pdf-act-btn remove" title="Xóa file PDF đính kèm">✕</button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Guest Notes -->
@@ -298,8 +354,9 @@
       </form>
 
       <div class="modal-footer">
-        <div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
           <button id="btn-delete-booking" class="btn btn-danger" type="button" style="display: none;">Xóa đặt phòng</button>
+          <button id="btn-copy-booking" class="btn btn-sm" type="button" style="display: none;" title="Sao chép ô đặt phòng này để dán nhanh sang phòng/ngày khác">📋 Sao chép</button>
         </div>
         <div class="modal-footer-right">
           <button id="btn-mark-paid" class="btn btn-success" type="button" style="display: none;">✓ Đã thu đủ</button>
@@ -315,7 +372,7 @@
     <div class="modal-card wide">
       <div class="modal-header">
         <div>
-          <h2 id="dorm-modal-title" class="modal-title">Bảng Đặt Slot Dorm Nội Bộ (Tầng 1)</h2>
+          <h2 id="dorm-modal-title" class="modal-title">Bảng Đặt Slot Dorm Nội Bộ (8 chỗ)</h2>
           <div class="modal-subtitle">4 giường tầng • 8 chỗ ngủ dành cho Hướng dẫn viên &amp; Lái xe</div>
         </div>
         <button id="btn-close-dorm" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
@@ -423,16 +480,34 @@
           </div>
         </div>
 
-        <div class="field">
-          <label for="dorm-confirmed-by">Người xác nhận đơn đặt phòng</label>
-          <select id="dorm-confirmed-by" class="select">
-            <option value="">-- Chọn người xác nhận --</option>
-            <option value="Ngọc">Ngọc</option>
-            <option value="Tường Vi">Tường Vi</option>
-            <option value="Trần Bình">Trần Bình</option>
-            <option value="Lan Anh">Lan Anh</option>
-            <option value="Trần Minh">Trần Minh</option>
-          </select>
+        <div class="form-grid">
+          <div class="field">
+            <label for="dorm-confirmed-by">Người xác nhận đơn đặt phòng</label>
+            <select id="dorm-confirmed-by" class="select">
+              <option value="">-- Chọn người xác nhận --</option>
+              <option value="Ngọc">Ngọc</option>
+              <option value="Tường Vi">Tường Vi</option>
+              <option value="Trần Bình">Trần Bình</option>
+              <option value="Lan Anh">Lan Anh</option>
+              <option value="Trần Minh">Trần Minh</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="dorm-confirmation-pdf">Xác nhận đặt phòng (PDF)</label>
+            <div id="dorm-pdf-upload-box" class="pdf-upload-box">
+              <input id="dorm-confirmation-pdf" type="file" accept="application/pdf,.pdf" hidden />
+              <button id="dorm-btn-pick-pdf" type="button" class="pdf-pick-btn">📎 Chọn file PDF xác nhận...</button>
+              <div id="dorm-pdf-attached-bar" class="pdf-attached-bar" style="display:none;">
+                <span id="dorm-pdf-file-name" class="pdf-file-name"></span>
+                <div class="pdf-actions">
+                  <button id="dorm-btn-view-pdf" type="button" class="pdf-act-btn view" title="Mở / Tải file PDF xác nhận">Xem</button>
+                  <button id="dorm-btn-replace-pdf" type="button" class="pdf-act-btn" title="Đổi file PDF khác">Đổi</button>
+                  <button id="dorm-btn-remove-pdf" type="button" class="pdf-act-btn remove" title="Xóa file PDF đính kèm">✕</button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="field">
@@ -480,6 +555,30 @@
           <button id="btn-reset-sample" class="btn btn-sm" type="button">Khôi phục mẫu</button>
         </div>
         <button id="btn-close-report-2" class="btn btn-primary" type="button">Đóng</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Group Bookings & Lump-Sum Payment Report Modal -->
+  <div id="group-report-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="group-report-title">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <div>
+          <h2 id="group-report-title" class="modal-title">👥 Tổng hợp Đoàn &amp; Thanh toán gộp theo Mã đặt phòng</h2>
+          <div id="group-report-sub" class="modal-subtitle">Tự động gom tất cả phòng &amp; ngày lưu trú chung 1 mã đặt phòng — nhập tổng tiền khách cọc/trả 1 lần để tự phân bổ</div>
+        </div>
+        <button id="btn-close-group-report" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="group-report-toolbar">
+          <input id="group-report-search" class="search-input" type="search" placeholder="Tìm mã đoàn, tên khách, tên tour, số phòng..." style="flex:1; min-width:200px;" />
+          <span id="group-report-summary" class="group-report-summary-pill">0 đoàn</span>
+        </div>
+        <div id="group-report-body" class="group-report-list"></div>
+      </div>
+      <div class="modal-footer">
+        <span style="font-size:12px; color:var(--text-muted);">Mẹo: Đặt chung 1 <strong>Mã đặt phòng</strong> hoặc dùng <strong>Sao chép / Dán</strong> để tự gom phòng vào cùng 1 đoàn.</span>
+        <button id="btn-close-group-report-2" class="btn btn-primary" type="button">Đóng</button>
       </div>
     </div>
   </div>

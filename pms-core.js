@@ -66,6 +66,15 @@
 
   const ROOM_BY_ID = Object.freeze(Object.fromEntries(ROOMS.map((r) => [r.id, r])));
 
+  // Display section order: Dorm nội bộ is separated into its own section at the VERY TOP, followed by Floors 1–4
+  const ROOM_SECTIONS = Object.freeze([
+    { key: "dorm", label: "Dorm nội bộ (4 giường tầng • 8 chỗ)", shortLabel: "Dorm nội bộ (8 chỗ)", isDorm: true, floor: null },
+    { key: "1", label: "Tầng 1 (5 phòng ngủ)", shortLabel: "Tầng 1 (5 phòng)", isDorm: false, floor: 1 },
+    { key: "2", label: "Tầng 2 (7 phòng ngủ)", shortLabel: "Tầng 2 (7 phòng)", isDorm: false, floor: 2 },
+    { key: "3", label: "Tầng 3 (7 phòng ngủ)", shortLabel: "Tầng 3 (7 phòng)", isDorm: false, floor: 3 },
+    { key: "4", label: "Tầng 4 (7 phòng ngủ)", shortLabel: "Tầng 4 (7 phòng)", isDorm: false, floor: 4 }
+  ]);
+
   const DORM_SLOTS = Object.freeze([
     { slot: 1, label: "Slot 1", bunk: "Giường tầng 1 • Dưới" },
     { slot: 2, label: "Slot 2", bunk: "Giường tầng 1 • Trên" },
@@ -409,6 +418,57 @@
     return warnings;
   }
 
+  const MAX_CONFIRMATION_PDF_BYTES = 2 * 1024 * 1024; // 2MB raw PDF limit for fast PC/Mobile sync
+  const MAX_CONFIRMATION_PDF_B64_CHARS = Math.ceil((MAX_CONFIRMATION_PDF_BYTES * 4) / 3) + 256;
+
+  function formatFileSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n <= 0) return "0 KB";
+    if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function sanitizeConfirmationPdf(rawPdf) {
+    if (rawPdf === null || rawPdf === undefined || rawPdf === "") {
+      return { ok: true, value: null };
+    }
+    const obj = stripDangerousKeys(rawPdf);
+    if (!obj || typeof obj !== "object") {
+      return { ok: false, error: "File xác nhận PDF không hợp lệ." };
+    }
+    const dataUrl = typeof obj.dataUrl === "string" ? obj.dataUrl.trim() : "";
+    if (!dataUrl.startsWith("data:application/pdf;base64,")) {
+      return { ok: false, error: "Chỉ chấp nhận file định dạng PDF (.pdf)." };
+    }
+    if (dataUrl.length > MAX_CONFIRMATION_PDF_B64_CHARS) {
+      return { ok: false, error: "File PDF xác nhận vượt quá dung lượng tối đa 2 MB." };
+    }
+    const b64Part = dataUrl.slice("data:application/pdf;base64,".length);
+    if (!b64Part || !/^[A-Za-z0-9+/=\s]+$/.test(b64Part)) {
+      return { ok: false, error: "Nội dung file PDF không hợp lệ." };
+    }
+    const approxBytes = Math.floor((b64Part.replace(/\s+/g, "").length * 3) / 4);
+    const size = Number.isFinite(Number(obj.size)) && Number(obj.size) > 0
+      ? Math.min(MAX_CONFIRMATION_PDF_BYTES, Math.round(Number(obj.size)))
+      : approxBytes;
+    if (approxBytes > MAX_CONFIRMATION_PDF_BYTES + 1024) {
+      return { ok: false, error: "File PDF xác nhận vượt quá dung lượng tối đa 2 MB." };
+    }
+    let name = sanitizeText(obj.name, 140) || "xac-nhan-dat-phong.pdf";
+    if (!name.toLowerCase().endsWith(".pdf")) name += ".pdf";
+    const uploadedAt = sanitizeText(obj.uploadedAt, 40) || new Date().toISOString();
+    return {
+      ok: true,
+      value: {
+        name,
+        size,
+        type: "application/pdf",
+        dataUrl: `data:application/pdf;base64,${b64Part.replace(/\s+/g, "")}`,
+        uploadedAt
+      }
+    };
+  }
+
   function sanitizeBookingRecord(raw, existingRecord) {
     const obj = stripDangerousKeys(raw);
     if (!obj || typeof obj !== "object") {
@@ -482,6 +542,20 @@
       ? (room.isDorm || obj.paymentStatus === "paid" ? "paid" : "unpaid")
       : (paidAmount >= totalAmount ? "paid" : paidAmount > 0 ? "deposit" : "unpaid");
 
+    let confirmationPdf = null;
+    if (obj.confirmationPdf === undefined) {
+      if (existingRecord && existingRecord.confirmationPdf) {
+        const prevCheck = sanitizeConfirmationPdf(existingRecord.confirmationPdf);
+        confirmationPdf = prevCheck.ok ? prevCheck.value : null;
+      }
+    } else {
+      const pdfCheck = sanitizeConfirmationPdf(obj.confirmationPdf);
+      if (!pdfCheck.ok) {
+        return { ok: false, error: pdfCheck.error };
+      }
+      confirmationPdf = pdfCheck.value;
+    }
+
     const nowISO = new Date().toISOString();
     const id = sanitizeText(obj.id, 64) || `${room.isDorm ? "dorm" : "bk"}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
@@ -505,6 +579,7 @@
       mergeBed,
       extraBed,
       confirmedBy: sanitizeText(obj.confirmedBy, 60),
+      confirmationPdf,
       notes: sanitizeText(obj.notes, 2000),
       idempotencyKey: sanitizeText(obj.idempotencyKey, 80) || undefined,
       revision: existingRecord ? (Number(existingRecord.revision) || 1) + 1 : 1,
@@ -654,12 +729,191 @@
     };
   }
 
+  /* -------------------- Group / Multi-Room Aggregation & Copy-Paste -------------------- */
+
+  function normalizeGroupCode(code) {
+    return sanitizeText(code, 60).toUpperCase();
+  }
+
+  function computeBookingGroupSummary(bookings, bookingCode) {
+    const normalizedCode = normalizeGroupCode(bookingCode);
+    if (!normalizedCode) return null;
+    const list = (Array.isArray(bookings) ? bookings : [])
+      .filter((b) => b && normalizeGroupCode(b.bookingCode) === normalizedCode)
+      .slice()
+      .sort((a, b) => String(a.checkin || "").localeCompare(String(b.checkin || "")) || String(a.roomId || "").localeCompare(String(b.roomId || "")));
+
+    if (list.length === 0) return null;
+
+    let totalAmount = 0;
+    let paidAmount = 0;
+    let remaining = 0;
+    let totalNights = 0;
+    let totalGuests = 0;
+    let regularRoomCount = 0;
+    let dormBookingCount = 0;
+    let earliestCheckin = list[0].checkin || "";
+    let latestCheckout = list[0].checkout || "";
+
+    for (const b of list) {
+      totalAmount += parseVND(b.totalAmount);
+      paidAmount += parseVND(b.paidAmount);
+      remaining += getRemaining(b);
+      totalNights += Math.max(0, diffNights(b.checkin, b.checkout) || 0);
+      totalGuests += Number(b.guestCount) || 0;
+      if (b.roomId === "DORM") dormBookingCount += 1;
+      else regularRoomCount += 1;
+      if (b.checkin && (!earliestCheckin || b.checkin < earliestCheckin)) earliestCheckin = b.checkin;
+      if (b.checkout && (!latestCheckout || b.checkout > latestCheckout)) latestCheckout = b.checkout;
+    }
+
+    const paymentStatus = totalAmount === 0
+      ? (list.every((b) => getPaymentStatus(b) === "paid") ? "paid" : "unpaid")
+      : (remaining === 0 ? "paid" : paidAmount > 0 ? "deposit" : "unpaid");
+
+    return {
+      code: sanitizeText(list[0].bookingCode, 60),
+      normalizedCode,
+      bookings: list,
+      roomCount: list.length,
+      regularRoomCount,
+      dormBookingCount,
+      totalNights,
+      totalGuests,
+      totalAmount,
+      paidAmount,
+      remaining,
+      paymentStatus,
+      earliestCheckin,
+      latestCheckout,
+      leadGuestName: list[0].guestName || "",
+      sourceName: list[0].sourceName || "",
+      tourName: list.find((b) => b.tourName)?.tourName || ""
+    };
+  }
+
+  function computeAllBookingGroups(bookings, options = {}) {
+    const minRooms = Number.isInteger(options.minRooms) && options.minRooms >= 1 ? options.minRooms : 2;
+    const codeSet = new Set();
+    for (const b of Array.isArray(bookings) ? bookings : []) {
+      const norm = normalizeGroupCode(b && b.bookingCode);
+      if (norm) codeSet.add(norm);
+    }
+    const groups = [];
+    for (const norm of codeSet) {
+      const summary = computeBookingGroupSummary(bookings, norm);
+      if (summary && summary.roomCount >= minRooms) {
+        groups.push(summary);
+      }
+    }
+    groups.sort((a, b) =>
+      String(b.earliestCheckin || "").localeCompare(String(a.earliestCheckin || "")) ||
+      b.remaining - a.remaining ||
+      a.code.localeCompare(b.code)
+    );
+    return groups;
+  }
+
+  // Distribute ONE lump-sum deposit/payment cleanly across all rooms in a group without exceeding any room's totalAmount
+  function allocateGroupPayment(groupBookings, targetGroupPaidRaw) {
+    const list = (Array.isArray(groupBookings) ? groupBookings : [])
+      .slice()
+      .sort((a, b) => String(a.checkin || "").localeCompare(String(b.checkin || "")) || String(a.roomId || "").localeCompare(String(b.roomId || "")));
+
+    if (list.length === 0) {
+      return { ok: false, error: "Không tìm thấy phòng nào trong đoàn này." };
+    }
+    const groupTotal = list.reduce((s, b) => s + parseVND(b.totalAmount), 0);
+    if (typeof targetGroupPaidRaw === "number" && targetGroupPaidRaw < 0) {
+      return { ok: false, error: "Số tiền thu của đoàn không được âm." };
+    }
+    if (typeof targetGroupPaidRaw === "string" && targetGroupPaidRaw.trim().startsWith("-")) {
+      return { ok: false, error: "Số tiền thu của đoàn không được âm." };
+    }
+    const targetPaid = parseVND(targetGroupPaidRaw);
+
+    if (targetPaid < 0) {
+      return { ok: false, error: "Số tiền thu của đoàn không được âm." };
+    }
+    if (groupTotal === 0 && targetPaid > 0) {
+      return { ok: false, error: "Tổng tiền cả đoàn đang là 0 đ — vui lòng nhập tiền phòng trước khi thu tiền chung." };
+    }
+    if (targetPaid > groupTotal) {
+      return { ok: false, error: `Số tiền thu chung (${formatVND(targetPaid)}) vượt quá tổng tiền cả đoàn (${formatVND(groupTotal)}).` };
+    }
+
+    let pool = targetPaid;
+    const allocations = list.map((bk) => {
+      const roomTotal = parseVND(bk.totalAmount);
+      const oldPaid = parseVND(bk.paidAmount);
+      const newPaid = Math.min(roomTotal, pool);
+      pool = Math.max(0, pool - newPaid);
+      return {
+        id: bk.id,
+        roomId: bk.roomId,
+        guestName: bk.guestName,
+        totalAmount: roomTotal,
+        oldPaid,
+        newPaid,
+        changed: newPaid !== oldPaid,
+        revision: Number(bk.revision) || 1
+      };
+    });
+
+    return { ok: true, groupTotal, targetPaid, allocations };
+  }
+
+  // Build safe copy-paste payload preserving stay length, group code, guest & PDF, enforcing Twins-only mergeBed, and zeroing deposit to prevent double-counting
+  function buildCopiedBookingPayload(sourceBooking, targetRoomId, targetCheckin, options = {}) {
+    if (!sourceBooking || typeof sourceBooking !== "object") {
+      return { ok: false, error: "Không có dữ liệu đặt phòng để dán." };
+    }
+    const targetRoom = getRoomById(targetRoomId);
+    if (!targetRoom) {
+      return { ok: false, error: `Phòng đích không hợp lệ: ${targetRoomId}` };
+    }
+    if (targetRoom.isDorm) {
+      return { ok: false, error: "Vui lòng dùng sơ đồ 8 slot Dorm để đặt phòng Dorm nội bộ." };
+    }
+    if (!isValidISODate(targetCheckin)) {
+      return { ok: false, error: "Ngày nhận phòng đích không hợp lệ." };
+    }
+
+    const nights = Math.max(1, diffNights(sourceBooking.checkin, sourceBooking.checkout) || 1);
+    const targetCheckout = addDaysISO(targetCheckin, nights);
+    const keepGroupCode = options.keepGroupCode !== false;
+    const keepPaidAmount = options.keepPaidAmount === true;
+
+    const payload = {
+      roomId: targetRoom.id,
+      checkin: targetCheckin,
+      checkout: targetCheckout,
+      channelKey: sourceBooking.channelKey || detectChannelKey(sourceBooking.sourceName),
+      sourceName: sourceBooking.sourceName || "",
+      tourName: sourceBooking.tourName || "",
+      bookingCode: keepGroupCode ? (sourceBooking.bookingCode || "") : "",
+      guestName: sourceBooking.guestName || "",
+      phone: sourceBooking.phone || "",
+      guestCount: Math.min(12, Math.max(1, Number(sourceBooking.guestCount) || targetRoom.defaultGuests)),
+      totalAmount: parseVND(sourceBooking.totalAmount),
+      paidAmount: keepPaidAmount ? parseVND(sourceBooking.paidAmount) : 0,
+      paymentStatus: keepPaidAmount ? getPaymentStatus(sourceBooking) : "unpaid",
+      mergeBed: targetRoom.type === "Twins" ? Boolean(sourceBooking.mergeBed) : false,
+      extraBed: Math.min(2, Math.max(0, Number(sourceBooking.extraBed) || 0)),
+      confirmedBy: sourceBooking.confirmedBy || "",
+      confirmationPdf: sourceBooking.confirmationPdf ? { ...sourceBooking.confirmationPdf } : null,
+      notes: sourceBooking.notes || ""
+    };
+
+    return { ok: true, payload, nights, targetRoom };
+  }
+
   function generateCsvContent(bookings) {
     const headers = [
       "Phòng", "Tầng", "Hạng phòng", "View", "Ngày nhận", "Ngày trả", "Số đêm",
       "Đơn vị book", "Tên tour", "Mã đặt phòng", "Tên khách", "Số điện thoại",
       "Số khách / Slot Dorm", "Tổng tiền (VNĐ)", "Đã thanh toán/Cọc (VNĐ)", "Còn lại (VNĐ)",
-      "Ghép giường", "Extra bed", "Người xác nhận", "Ghi chú"
+      "Ghép giường", "Extra bed", "Người xác nhận", "Xác nhận PDF", "Ghi chú"
     ];
 
     const rows = bookings
@@ -668,11 +922,12 @@
       .map((b) => {
         const r = getRoomById(b.roomId) || { name: b.roomId, floor: "", type: "", view: "", isDorm: false };
         const slotDesc = r.isDorm ? `Slot ${(b.slots || []).join(", ")} (${b.dormBeds || (b.slots || []).length} chỗ)` : b.guestCount;
+        const pdfLabel = b.confirmationPdf && b.confirmationPdf.name ? b.confirmationPdf.name : "";
         return [
           r.name, r.floor, r.type, r.view, b.checkin, b.checkout, diffNights(b.checkin, b.checkout),
           b.sourceName, b.tourName || "", b.bookingCode || "", b.guestName, b.phone,
           slotDesc, parseVND(b.totalAmount), parseVND(b.paidAmount), getRemaining(b),
-          b.mergeBed ? "Có" : "Không", b.extraBed || 0, b.confirmedBy || "", b.notes || ""
+          b.mergeBed ? "Có" : "Không", b.extraBed || 0, b.confirmedBy || "", pdfLabel, b.notes || ""
         ];
       });
 
@@ -709,6 +964,9 @@
     pushIfDiff("Tổng tiền", formatVND(before.totalAmount), formatVND(after.totalAmount));
     pushIfDiff("Đã TT/Cọc", formatVND(before.paidAmount), formatVND(after.paidAmount));
     pushIfDiff("Người xác nhận", before.confirmedBy || "", after.confirmedBy || "");
+    const oldPdf = before.confirmationPdf && before.confirmationPdf.name ? `${before.confirmationPdf.name} (${formatFileSize(before.confirmationPdf.size)})` : "";
+    const newPdf = after.confirmationPdf && after.confirmationPdf.name ? `${after.confirmationPdf.name} (${formatFileSize(after.confirmationPdf.size)})` : "";
+    pushIfDiff("Xác nhận PDF", oldPdf, newPdf);
     pushIfDiff("Ghi chú", before.notes || "", after.notes || "");
     return changes;
   }
@@ -1599,7 +1857,9 @@
     QUARANTINE_KEY,
     LOCK_KEY,
     MAX_AUTOBACKUPS,
+    MAX_CONFIRMATION_PDF_BYTES,
     ROOMS,
+    ROOM_SECTIONS,
     DORM_SLOTS,
     CHANNELS,
     CODE_PLACEHOLDERS,
@@ -1618,9 +1878,11 @@
     formatVND,
     formatShortVND,
     formatNumberInput,
+    formatFileSize,
     escapeHtml,
     sanitizeCsvCell,
     sanitizeText,
+    sanitizeConfirmationPdf,
     stripDangerousKeys,
     getRoomById,
     getRemaining,
@@ -1639,6 +1901,11 @@
     auditBookingConsistency,
     validateAndSanitizeImport,
     computeMonthlyFinancials,
+    normalizeGroupCode,
+    computeBookingGroupSummary,
+    computeAllBookingGroups,
+    allocateGroupPayment,
+    buildCopiedBookingPayload,
     generateCsvContent,
     diffBookingChanges,
     generateAuditCsvContent,
