@@ -1023,13 +1023,32 @@
     $("m-date-sub").textContent = isToday ? "Hôm nay • Chạm để đổi ngày" : "Chạm để chọn ngày khác";
     $("m-date-input").value = dateISO;
 
+    const allBookings = getBookings();
+    const turnsByRoom = new Map();
+    for (let i = 0; i < allBookings.length; i++) {
+      const b = allBookings[i];
+      if (!b || b.roomId === "DORM") continue;
+      const isStay = bookingCoversDate(b, dateISO);
+      const isOut = b.checkout === dateISO;
+      if (!isStay && !isOut) continue;
+      let entry = turnsByRoom.get(b.roomId);
+      if (!entry) {
+        entry = { staying: [], checkingOut: [] };
+        turnsByRoom.set(b.roomId, entry);
+      }
+      if (isStay) entry.staying.push(b);
+      if (isOut) entry.checkingOut.push(b);
+    }
+    const emptyTurns = { staying: [], checkingOut: [] };
+    const getTurnsFast = (roomId) => turnsByRoom.get(roomId) || emptyTurns;
+
     const regularRooms = ROOMS.filter((r) => !r.isDorm);
     let occupiedCount = 0;
     let checkinsToday = 0;
     let checkoutsToday = 0;
 
     regularRooms.forEach((r) => {
-      const { staying, checkingOut } = getRoomTurnsForDate(r.id, dateISO);
+      const { staying, checkingOut } = getTurnsFast(r.id);
       if (staying.length > 0) {
         occupiedCount += 1;
         if (staying[0].checkin === dateISO) checkinsToday += 1;
@@ -1038,7 +1057,7 @@
     });
 
     const vacantCount = regularRooms.length - occupiedCount;
-    const { map: dormMap } = getDormSlotMapForDate(getBookings(), dateISO);
+    const { map: dormMap } = getDormSlotMapForDate(allBookings, dateISO);
     const dormUsed = Object.keys(dormMap).length;
     const dormFree = Math.max(0, 8 - dormUsed);
 
@@ -1065,9 +1084,12 @@
     $("m-range-ci").value = mState.rangeCheckin;
     $("m-range-co").value = mState.rangeCheckout;
     $("m-btn-clear-range").style.display = mState.rangeActive ? "inline-flex" : "none";
+    const dormRangeMap = mState.rangeActive
+      ? getDormOccupiedSlotsInRange(allBookings, mState.rangeCheckin, mState.rangeCheckout, null)
+      : null;
     if (mState.rangeActive) {
       const freeInRange = regularRooms.filter((r) => isRoomFreeInRange(r.id, mState.rangeCheckin, mState.rangeCheckout)).length;
-      const dormOccRange = Object.keys(getDormOccupiedSlotsInRange(getBookings(), mState.rangeCheckin, mState.rangeCheckout, null)).length;
+      const dormOccRange = Object.keys(dormRangeMap).length;
       $("m-range-title").textContent = `🔎 Trống ${formatDateVN(mState.rangeCheckin)} → ${formatDateVN(mState.rangeCheckout)} (${freeInRange} phòng)`;
       $("m-range-summary").style.display = "block";
       $("m-range-summary").innerHTML = `Đang chỉ hiện <strong>${freeInRange}/26 phòng trống suốt kỳ</strong> (${diffNights(mState.rangeCheckin, mState.rangeCheckout)} đêm) • Dorm trống <strong>${8 - dormOccRange}/8 slot</strong>.`;
@@ -1080,7 +1102,7 @@
 
     // Precompute multi-room group map
     const groupMap = new Map();
-    computeAllBookingGroups(getBookings(), { minRooms: 2 }).forEach((g) => groupMap.set(g.normalizedCode, g));
+    computeAllBookingGroups(allBookings, { minRooms: 2 }).forEach((g) => groupMap.set(g.normalizedCode, g));
     const pasteActive = Boolean(mState.copiedBooking);
 
     // Build section-grouped room cards (Dorm separated at VERY TOP, then Floors 1-4)
@@ -1100,8 +1122,7 @@
 
         if (mState.rangeActive) {
           if (r.isDorm) {
-            const occ = Object.keys(getDormOccupiedSlotsInRange(getBookings(), mState.rangeCheckin, mState.rangeCheckout, null)).length;
-            if (occ >= 8) return false;
+            if (Object.keys(dormRangeMap).length >= 8) return false;
           } else if (!isRoomFreeInRange(r.id, mState.rangeCheckin, mState.rangeCheckout)) {
             return false;
           }
@@ -1112,10 +1133,10 @@
           const q = mState.filters.search.toLowerCase();
           const roomNameMatches = q && (`p.${r.name} ${r.name} ${r.type} ${r.view}`).toLowerCase().includes(q);
           if (r.isDorm) {
-            const dormBks = getBookings().filter((b) => b.roomId === "DORM" && (bookingCoversDate(b, dateISO) || b.checkout === dateISO));
+            const dormBks = allBookings.filter((b) => b.roomId === "DORM" && (bookingCoversDate(b, dateISO) || b.checkout === dateISO));
             if (!roomNameMatches && !dormBks.some(bookingMatchesSearchAndFilters)) return false;
           } else {
-            const { staying, checkingOut } = getRoomTurnsForDate(r.id, dateISO);
+            const { staying, checkingOut } = getTurnsFast(r.id);
             const allTurns = [...staying, ...checkingOut];
             if (!roomNameMatches && !allTurns.some(bookingMatchesSearchAndFilters)) return false;
           }
@@ -1127,9 +1148,7 @@
 
       const cardsHtml = sectionRooms.map((room) => {
         if (room.isDorm) {
-          const dMap = mState.rangeActive
-            ? getDormOccupiedSlotsInRange(getBookings(), mState.rangeCheckin, mState.rangeCheckout, null)
-            : dormMap;
+          const dMap = mState.rangeActive ? dormRangeMap : dormMap;
           const used = Object.keys(dMap).length;
           const free = Math.max(0, 8 - used);
           const uniqueGuests = [...new Set(Object.values(dMap).map((b) => b.guestName))];
@@ -1150,7 +1169,7 @@
           </article>`;
         }
 
-        const { staying, checkingOut } = getRoomTurnsForDate(room.id, dateISO);
+        const { staying, checkingOut } = getTurnsFast(room.id);
         const stayingBk = staying[0] || null;
         const checkoutBk = checkingOut.find((b) => !stayingBk || b.id !== stayingBk.id) || null;
         const isTurnover = Boolean(stayingBk && checkoutBk);
@@ -2328,7 +2347,34 @@
     });
   }
 
+  function isMobileViewActive() {
+    const mode = document.body && document.body.dataset ? document.body.dataset.viewMode : "";
+    if (mode === "mobile") return true;
+    if (mode === "pc") return false;
+    return window.innerWidth <= 768;
+  }
+
+  let mobileRenderDirty = false;
+  let mobileRenderRafId = 0;
+
+  function scheduleMobileRenderAll() {
+    if (!isMobileViewActive()) {
+      mobileRenderDirty = true;
+      return;
+    }
+    if (mobileRenderRafId) return;
+    mobileRenderRafId = requestAnimationFrame(() => {
+      mobileRenderRafId = 0;
+      renderMobileAll();
+    });
+  }
+
   function renderMobileAll() {
+    if (!isMobileViewActive()) {
+      mobileRenderDirty = true;
+      return;
+    }
+    mobileRenderDirty = false;
     renderSyncStatus();
     updateMobileClipboardUI();
     if (mState.activeTab === "schedule") renderScheduleView();
@@ -2888,6 +2934,10 @@
 
     // Realtime subscription from shared PMSClient (Supabase Realtime / SSE + reconnect catch-up)
     client.subscribe(({ type, state, remoteEvent }) => {
+      if (!isMobileViewActive()) {
+        mobileRenderDirty = true;
+        return;
+      }
       renderSyncStatus();
       if (type === "status" || type === "version" || type === "update_pending" || type === "update_applying" || type === "auth_required") return;
 
@@ -2911,7 +2961,7 @@
         }
       }
 
-      renderMobileAll();
+      scheduleMobileRenderAll();
 
       if (type === "remote_change" && remoteEvent && ["CREATE", "UPDATE", "DELETE"].includes(remoteEvent.action)) {
         const verb = remoteEvent.action === "CREATE" ? "vừa đặt mới" : remoteEvent.action === "DELETE" ? "vừa xóa" : "vừa cập nhật";
@@ -2937,6 +2987,14 @@
       await window.__pmsClientInitPromise;
     }
     renderMobileAll();
+    if (window.matchMedia) {
+      const mql = window.matchMedia("(max-width: 768px)");
+      const onViewportChange = () => {
+        if (mobileRenderDirty && isMobileViewActive()) renderMobileAll();
+      };
+      if (mql.addEventListener) mql.addEventListener("change", onViewportChange);
+      else if (mql.addListener) mql.addListener(onViewportChange);
+    }
   }
 
   bootMobile();

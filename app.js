@@ -318,6 +318,73 @@
     }
   }
 
+  function isPcViewActive() {
+    const mode = document.body && document.body.dataset ? document.body.dataset.viewMode : "";
+    if (mode === "pc") return true;
+    if (mode === "mobile") return false;
+    return window.innerWidth > 768;
+  }
+
+  let pcRenderDirty = false;
+  let pcRenderRafId = 0;
+
+  function scheduleRenderAll() {
+    if (!isPcViewActive()) {
+      pcRenderDirty = true;
+      return;
+    }
+    if (pcRenderRafId) return;
+    pcRenderRafId = requestAnimationFrame(() => {
+      pcRenderRafId = 0;
+      renderAll();
+    });
+  }
+
+  function buildMonthBookingIndex(bookings, year, month, daysCount) {
+    const monthStart = formatDateISO(year, month, 1);
+    const monthEnd = formatDateISO(year, month, daysCount);
+    const cellMap = new Map();
+    const dormSlotsByDate = new Map();
+    const occupiedRoomsByDay = Array.from({ length: daysCount }, () => new Set());
+    const bookingById = new Map();
+
+    for (let i = 0; i < bookings.length; i++) {
+      const b = bookings[i];
+      if (!b) continue;
+      bookingById.set(b.id, b);
+      if (!b.checkin || !b.checkout || b.checkout <= monthStart || b.checkin > monthEnd) continue;
+
+      const startDay = b.checkin <= monthStart ? 1 : parseInt(b.checkin.slice(8, 10), 10);
+      const endISO = b.checkout > monthEnd ? addDaysISO(monthEnd, 1) : b.checkout;
+      const lastDay = endISO > monthEnd ? daysCount : Math.min(daysCount, parseInt(endISO.slice(8, 10), 10) - 1);
+
+      for (let d = startDay; d <= lastDay; d++) {
+        const iso = formatDateISO(year, month, d);
+        const key = `${b.roomId}|${iso}`;
+        let arr = cellMap.get(key);
+        if (!arr) {
+          arr = [];
+          cellMap.set(key, arr);
+        }
+        arr.push(b);
+
+        if (b.roomId === "DORM") {
+          let slotSet = dormSlotsByDate.get(iso);
+          if (!slotSet) {
+            slotSet = new Set();
+            dormSlotsByDate.set(iso, slotSet);
+          }
+          const slots = Array.isArray(b.slots) ? b.slots : [];
+          for (let s = 0; s < slots.length; s++) slotSet.add(slots[s]);
+        } else {
+          occupiedRoomsByDay[d - 1].add(b.roomId);
+        }
+      }
+    }
+
+    return { cellMap, dormSlotsByDate, occupiedRoomsByDay, bookingById };
+  }
+
   function renderCalendar() {
     renderFilterNotice();
     const daysCount = getDaysInMonth(state.year, state.month);
@@ -331,34 +398,37 @@
       dates.push({ day: d, iso, dow: DOW_VI[dowIdx], isWeekend: dowIdx === 0 || dowIdx === 6, isToday: iso === today });
     }
 
-    const regularRooms = ROOMS.filter((r) => !r.isDorm);
-    const availPerDay = dates.map((dt) => 26 - regularRooms.filter((r) => getBookingsForRoomDate(r.id, dt.iso).length > 0).length);
+    // Single-pass O(N) month index -> O(1) lookup per cell (eliminates ~1,674 full array scans/render)
+    const { cellMap, dormSlotsByDate, occupiedRoomsByDay, bookingById } = buildMonthBookingIndex(state.bookings, state.year, state.month, daysCount);
+    state.lastBookingById = bookingById;
+    const availPerDay = occupiedRoomsByDay.map((set) => 26 - set.size);
 
-    // Precompute multi-room group map for O(1) lookup per cell
+    // Precompute multi-room group map for O(1) lookup per cell & hover tooltip
     const groupMap = new Map();
     computeAllBookingGroups(state.bookings, { minRooms: 2 }).forEach((g) => {
       groupMap.set(g.normalizedCode, g);
     });
+    state.lastGroupMap = groupMap;
     const pasteMode = Boolean(state.copiedBooking);
 
-    let headHtml = `<tr><th class="corner-cell">
+    const headParts = [`<tr><th class="corner-cell">
       <div style="font-weight:700; font-size:13px;">Phòng / Hạng / View</div>
       <div style="font-size:11px; color:var(--text-muted); font-weight:500;">Nhấn đặt • Chuột phải ô để sao chép</div>
-    </th>`;
+    </th>`];
     dates.forEach((dt, idx) => {
       const cls = ["day-header", dt.isWeekend ? "is-weekend" : "", dt.isToday ? "is-today" : ""].filter(Boolean).join(" ");
-      headHtml += `<th class="${cls}" data-report-date="${dt.iso}" ${dt.isToday ? 'data-is-today="1" style="box-shadow: inset 0 3px 0 var(--accent-primary);"' : ""} title="Nhấn xem báo cáo ngày ${formatDateVN(dt.iso)}">
+      headParts.push(`<th class="${cls}" data-report-date="${dt.iso}" ${dt.isToday ? 'data-is-today="1" style="box-shadow: inset 0 3px 0 var(--accent-primary);"' : ""} title="Nhấn xem báo cáo ngày ${formatDateVN(dt.iso)}">
         <span class="day-dow" style="${dt.isToday ? "color:var(--accent-primary); font-weight:800;" : ""}">${dt.isToday ? `${dt.dow} • Hôm nay` : dt.dow}</span>
         <span class="day-num" style="${dt.isToday ? "color:var(--accent-primary);" : ""}">${dt.day}/${state.month + 1}</span>
         <span class="day-avail-mini">${availPerDay[idx]} trống</span>
-      </th>`;
+      </th>`);
     });
-    headHtml += `</tr>`;
-    $("calendar-thead").innerHTML = headHtml;
+    headParts.push(`</tr>`);
+    $("calendar-thead").innerHTML = headParts.join("");
 
     const filteredRooms = getFilteredRooms();
     const filterOn = hasActiveBookingFilters();
-    let bodyHtml = "";
+    const bodyParts = [];
 
     ROOM_SECTIONS.forEach((section) => {
       const sectionRooms = filteredRooms.filter((r) => (section.isDorm ? r.isDorm : (!r.isDorm && r.floor === section.floor)));
@@ -369,7 +439,7 @@
         ? section.label
         : `Tầng ${section.floor} (${sectionRooms.length} phòng ngủ)`;
 
-      bodyHtml += `<tr class="floor-row ${section.isDorm ? "is-dorm-section" : ""}" data-section-key="${section.key}">
+      bodyParts.push(`<tr class="floor-row ${section.isDorm ? "is-dorm-section" : ""}" data-section-key="${section.key}">
         <td class="floor-sticky">
           <div class="floor-row-inner floor-label-inner">
             <button type="button" class="floor-toggle" data-floor-toggle="${section.key}">
@@ -379,12 +449,12 @@
           </div>
         </td>
         <td colspan="${daysCount}"></td>
-      </tr>`;
+      </tr>`);
 
       if (isCollapsed) return;
 
       sectionRooms.forEach((room) => {
-        bodyHtml += `<tr class="room-row" data-room-id="${room.id}">
+        bodyParts.push(`<tr class="room-row" data-room-id="${room.id}">
           <td class="room-cell">
             <div class="room-top">
               <span class="room-number">${escapeHtml(room.name)}</span>
@@ -393,52 +463,52 @@
             <div class="room-meta" title="${escapeHtml(room.view)} • ${escapeHtml(room.bedInfo)}">
               ${escapeHtml(room.view)} • ${escapeHtml(room.bedInfo)}
             </div>
-          </td>`;
+          </td>`);
 
         dates.forEach((dt) => {
-          const bksAll = getBookingsForRoomDate(room.id, dt.iso);
+          const bksAll = cellMap.get(`${room.id}|${dt.iso}`) || [];
           const baseCls = ["grid-cell", dt.isWeekend ? "is-weekend" : "", dt.isToday ? "is-today" : ""].filter(Boolean);
 
           if (room.isDorm) {
-            const { map: slotMap } = getDormSlotMapForDate(state.bookings, dt.iso);
-            const used = Object.keys(slotMap).length;
+            const slotSet = dormSlotsByDate.get(dt.iso);
+            const used = slotSet ? slotSet.size : 0;
             const free = Math.max(0, room.capacity - used);
             if (used === 0) {
-              bodyHtml += `<td class="${baseCls.concat("is-vacant").join(" ")}" data-room="${room.id}" data-date="${dt.iso}" title="Dorm ngày ${formatDateVN(dt.iso)}: Trống 8/8 chỗ — Nhấn đặt slot">
+              bodyParts.push(`<td class="${baseCls.concat("is-vacant").join(" ")}" data-room="${room.id}" data-date="${dt.iso}" title="Dorm ngày ${formatDateVN(dt.iso)}: Trống 8/8 chỗ — Nhấn đặt slot">
                 <div class="vacant-inner">
                   <span class="vacant-plus">+</span>
                   <span class="vacant-label" style="color:var(--status-paid);">Trống 8/8</span>
                 </div>
-              </td>`;
+              </td>`);
             } else {
               const totalDebt = bksAll.reduce((s, b) => s + getRemaining(b), 0);
               const isFull = free === 0;
               const vis = !filterOn || bksAll.some(matchesBookingFilter);
               const dormPayCls = totalDebt > 0 ? "unpaid" : "paid";
               const dormPayText = totalDebt > 0 ? `Nợ ${formatShortVND(totalDebt)}` : "✓ Đã TT";
-              bodyHtml += `<td class="${baseCls.join(" ")}" data-room="${room.id}" data-date="${dt.iso}" data-dorm-day="1">
+              bodyParts.push(`<td class="${baseCls.join(" ")}" data-room="${room.id}" data-date="${dt.iso}" data-dorm-day="1">
                 <div class="dorm-pill ${isFull ? "is-full" : ""} ${vis ? "" : "bk-dimmed"}">
                   <span class="dorm-count">${isFull ? "Hết 0/8 chỗ" : `Trống ${free}/8`}</span>
                   <span class="dorm-sub">Đã đặt ${used}/8</span>
                   <span class="booking-pay ${dormPayCls}" style="margin-top:1px;">${dormPayText}</span>
                 </div>
-              </td>`;
+              </td>`);
             }
             return;
           }
 
           if (bksAll.length === 0) {
-            bodyHtml += `<td class="${baseCls.concat("is-vacant").join(" ")}" data-room="${room.id}" data-date="${dt.iso}" title="${pasteMode ? `Nhấn để DÁN đặt phòng vào P.${room.name} (${formatDateVN(dt.iso)})` : `Phòng ${room.name} ngày ${formatDateVN(dt.iso)} còn trống — Nhấn để đặt`}">
+            bodyParts.push(`<td class="${baseCls.concat("is-vacant").join(" ")}" data-room="${room.id}" data-date="${dt.iso}" title="${pasteMode ? `Nhấn để DÁN đặt phòng vào P.${room.name} (${formatDateVN(dt.iso)})` : `Phòng ${room.name} ngày ${formatDateVN(dt.iso)} còn trống — Nhấn để đặt`}">
               <div class="vacant-inner">
                 <span class="vacant-plus">${pasteMode ? "📋" : "+"}</span>
                 <span class="vacant-label">${pasteMode ? "Dán" : "Trống"}</span>
               </div>
-            </td>`;
+            </td>`);
           } else {
             const bk = bksAll[0];
             const vis = !filterOn || matchesBookingFilter(bk);
-            const hasPrev = bookingCoversDate(bk, addDaysISO(dt.iso, -1)) && dt.day > 1;
-            const hasNext = bookingCoversDate(bk, addDaysISO(dt.iso, 1)) && dt.day < daysCount;
+            const hasPrev = dt.day > 1 && bk.checkin < dt.iso;
+            const hasNext = dt.day < daysCount && bk.checkout > addDaysISO(dt.iso, 1);
             let segCls = "";
             if (!hasPrev && hasNext) segCls = "seg-start";
             else if (hasPrev && hasNext) segCls = "seg-mid";
@@ -449,7 +519,7 @@
             const shortSource = bk.sourceName.replace(/\.com$/i, "");
             const shortGuest = bk.guestName.split(" ").slice(-2).join(" ");
             const groupInfo = bk.bookingCode ? groupMap.get(normalizeGroupCode(bk.bookingCode)) : null;
-            const payBadge = groupInfo ? getGroupCellPaymentBadge(groupInfo) : getCellPaymentBadge(bk, showLabel, hasNext);
+            const payBadge = groupInfo ? getGroupCellPaymentBadge(groupInfo) : getCellPaymentBadge(bk);
 
             const badgesHtml = `<div class="booking-badges">
               ${groupInfo ? `<span class="group-mini-badge" title="Đoàn ${escapeHtml(groupInfo.code)} (${groupInfo.roomCount} phòng) • Tổng ${formatVND(groupInfo.totalAmount)}">👥${groupInfo.roomCount}</span>` : ""}
@@ -457,7 +527,7 @@
               ${Number(bk.extraBed) > 0 ? `<span class="badge-mini" title="Extra bed">+${bk.extraBed}</span>` : ""}
             </div>`;
 
-            bodyHtml += `<td class="${baseCls.join(" ")}" data-room="${room.id}" data-date="${dt.iso}" data-booking-id="${bk.id}">
+            bodyParts.push(`<td class="${baseCls.join(" ")}" data-room="${room.id}" data-date="${dt.iso}" data-booking-id="${bk.id}">
               <div class="booking-block ch-${chKey} ${segCls} ${vis ? "" : "bk-dimmed"}">
                 <div class="booking-top-row">
                   <div class="booking-source">${showLabel ? escapeHtml(shortSource) : escapeHtml(shortGuest)}</div>
@@ -466,27 +536,32 @@
                 <div class="booking-guest" style="${showLabel ? "" : "opacity:0.72;"}">${showLabel ? escapeHtml(shortGuest) : escapeHtml(shortSource)}</div>
                 <div class="booking-pay ${payBadge.cls}" title="${escapeHtml(payBadge.title)}">${escapeHtml(payBadge.text)}</div>
               </div>
-            </td>`;
+            </td>`);
           }
         });
 
-        bodyHtml += `</tr>`;
+        bodyParts.push(`</tr>`);
       });
     });
 
-    $("calendar-tbody").innerHTML = bodyHtml || `<tr><td colspan="${daysCount + 1}" style="padding:32px; text-align:center; color:var(--text-muted);">Không tìm thấy phòng phù hợp với bộ lọc hiện tại.</td></tr>`;
+    $("calendar-tbody").innerHTML = bodyParts.length ? bodyParts.join("") : `<tr><td colspan="${daysCount + 1}" style="padding:32px; text-align:center; color:var(--text-muted);">Không tìm thấy phòng phù hợp với bộ lọc hiện tại.</td></tr>`;
 
-    let footHtml = `<tr><td class="foot-sticky">Tổng trống (26 phòng) • T5 Buffet</td>`;
+    const footParts = [`<tr><td class="foot-sticky">Tổng trống (26 phòng) • T5 Buffet</td>`];
     dates.forEach((dt, idx) => {
       const avail = availPerDay[idx];
       const color = avail === 0 ? "color: var(--status-unpaid);" : avail <= 5 ? "color: var(--status-deposit);" : "";
-      footHtml += `<td style="${color}" title="Ngày ${formatDateVN(dt.iso)}: Đã đặt ${26 - avail}/26 phòng, còn trống ${avail} phòng">${avail}/26</td>`;
+      footParts.push(`<td style="${color}" title="Ngày ${formatDateVN(dt.iso)}: Đã đặt ${26 - avail}/26 phòng, còn trống ${avail} phòng">${avail}/26</td>`);
     });
-    footHtml += `</tr>`;
-    $("calendar-tfoot").innerHTML = footHtml;
+    footParts.push(`</tr>`);
+    $("calendar-tfoot").innerHTML = footParts.join("");
   }
 
   function renderAll() {
+    if (!isPcViewActive()) {
+      pcRenderDirty = true;
+      return;
+    }
+    pcRenderDirty = false;
     updateTodayDateLabel();
     updateHeaderGroupPill();
     updateClipboardUI();
@@ -541,33 +616,82 @@
     });
 
     let hoveredCell = null;
+    let hoverTimer = 0;
+    let tipRafId = 0;
+    let tipMouseX = 0;
+    let tipMouseY = 0;
+    let tipVisible = false;
+    let tipCachedH = 180;
+    const tooltipEl = $("cell-tooltip");
+
+    const flushTooltipPos = () => {
+      tipRafId = 0;
+      if (!tipVisible) return;
+      const pad = 14, w = 265, h = tipCachedH;
+      let left = tipMouseX + pad, top = tipMouseY + pad;
+      if (left + w > window.innerWidth - 10) left = tipMouseX - w - pad;
+      if (top + h > window.innerHeight - 10) top = tipMouseY - h - pad;
+      tooltipEl.style.transform = `translate3d(${Math.max(8, left)}px, ${Math.max(8, top)}px, 0)`;
+    };
+
+    const scheduleTooltipPos = (x, y) => {
+      tipMouseX = x;
+      tipMouseY = y;
+      if (!tipRafId) tipRafId = requestAnimationFrame(flushTooltipPos);
+    };
+
     $("calendar-tbody").addEventListener("mouseover", (e) => {
       const td = e.target.closest("td.grid-cell");
       if (td === hoveredCell) return;
       hoveredCell = td;
+      if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = 0; }
       if (!td) { hideTooltip(); return; }
       const roomId = td.dataset.room, dateISO = td.dataset.date, bookingId = td.dataset.bookingId;
-      if (roomId === "DORM") {
-        const list = getBookingsForRoomDate("DORM", dateISO);
-        if (list.length > 0) showDormTooltip(e, dateISO, list);
-        else hideTooltip();
-      } else if (bookingId) {
-        const bk = state.bookings.find((b) => b.id === bookingId);
-        if (bk) showBookingTooltip(e, bk);
-        else hideTooltip();
-      } else {
-        hideTooltip();
-      }
+      if (roomId !== "DORM" && !bookingId) { hideTooltip(); return; }
+
+      const cx = e.clientX, cy = e.clientY;
+      hoverTimer = setTimeout(() => {
+        hoverTimer = 0;
+        if (hoveredCell !== td) return;
+        const evLike = { clientX: tipMouseX || cx, clientY: tipMouseY || cy };
+        if (roomId === "DORM") {
+          const list = getBookingsForRoomDate("DORM", dateISO);
+          if (list.length > 0) showDormTooltip(evLike, dateISO, list);
+          else hideTooltip();
+        } else if (bookingId) {
+          const bk = (state.lastBookingById && state.lastBookingById.get(bookingId)) || state.bookings.find((b) => b.id === bookingId);
+          if (bk) showBookingTooltip(evLike, bk);
+          else hideTooltip();
+        }
+      }, 65);
     });
 
     $("calendar-tbody").addEventListener("mousemove", (e) => {
-      if ($("cell-tooltip").classList.contains("visible")) positionTooltip(e);
-    });
+      tipMouseX = e.clientX;
+      tipMouseY = e.clientY;
+      if (tipVisible) scheduleTooltipPos(e.clientX, e.clientY);
+    }, { passive: true });
 
     $("calendar-tbody").addEventListener("mouseleave", () => {
       hoveredCell = null;
+      if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = 0; }
       hideTooltip();
     });
+
+    state._setTipState = (visible, e) => {
+      tipVisible = visible;
+      if (visible) {
+        tooltipEl.classList.add("visible");
+        // Measure tooltip height ONCE on content update (never inside mousemove!)
+        tipCachedH = tooltipEl.offsetHeight || 180;
+        tipMouseX = e.clientX;
+        tipMouseY = e.clientY;
+        flushTooltipPos();
+      } else {
+        tooltipEl.classList.remove("visible");
+        if (tipRafId) { cancelAnimationFrame(tipRafId); tipRafId = 0; }
+      }
+    };
   }
 
   /* -------------------- Tooltips -------------------- */
@@ -578,7 +702,10 @@
     const extras = [];
     if (bk.mergeBed && room && room.type === "Twins") extras.push("Ghép giường (→ Double)");
     if (Number(bk.extraBed) > 0) extras.push(`+${bk.extraBed} Extra bed`);
-    const groupSummary = bk.bookingCode ? computeBookingGroupSummary(state.bookings, bk.bookingCode) : null;
+    const normCode = bk.bookingCode ? normalizeGroupCode(bk.bookingCode) : "";
+    const groupSummary = normCode
+      ? ((state.lastGroupMap && state.lastGroupMap.get(normCode)) || computeBookingGroupSummary(state.bookings, bk.bookingCode))
+      : null;
     const isGroup = Boolean(groupSummary && groupSummary.roomCount >= 2);
     const grpStatusLabel = isGroup
       ? (groupSummary.remaining === 0 && groupSummary.totalAmount > 0 ? "Đã thanh toán đủ cả đoàn" : groupSummary.paidAmount > 0 ? "Đã đặt cọc (cả đoàn)" : "Chưa thanh toán (cả đoàn)")
@@ -611,8 +738,7 @@
       ${bk.notes ? `<div style="margin-top:6px; padding-top:6px; border-top:1px dashed var(--border-subtle); color:var(--text-secondary); font-size:11.5px;">📝 ${escapeHtml(bk.notes)}</div>` : ""}
       <div style="margin-top:5px; font-size:10.5px; color:var(--text-muted);">Chuột phải để sao chép nhanh ô này</div>
     `;
-    $("cell-tooltip").classList.add("visible");
-    positionTooltip(e);
+    if (state._setTipState) state._setTipState(true, e);
   }
 
   function showDormTooltip(e, dateISO, list) {
@@ -627,20 +753,13 @@
       ${list.map((b) => `<div class="tt-row"><span class="tt-label">Slot ${(b.slots || []).join(",")}: ${escapeHtml(b.guestName)}</span><span class="tt-val">${escapeHtml(b.sourceName)}</span></div>`).join("")}
       <div style="margin-top:6px; font-size:11px; color:var(--text-muted);">Nhấn để mở sơ đồ 8 slot giường tầng</div>
     `;
-    $("cell-tooltip").classList.add("visible");
-    positionTooltip(e);
+    if (state._setTipState) state._setTipState(true, e);
   }
 
-  function positionTooltip(e) {
-    const pad = 14, w = 265, h = $("cell-tooltip").offsetHeight || 180;
-    let left = e.clientX + pad, top = e.clientY + pad;
-    if (left + w > window.innerWidth - 10) left = e.clientX - w - pad;
-    if (top + h > window.innerHeight - 10) top = e.clientY - h - pad;
-    $("cell-tooltip").style.left = `${Math.max(8, left)}px`;
-    $("cell-tooltip").style.top = `${Math.max(8, top)}px`;
-  }
-
-  const hideTooltip = () => $("cell-tooltip").classList.remove("visible");
+  const hideTooltip = () => {
+    if (state._setTipState) state._setTipState(false);
+    else $("cell-tooltip").classList.remove("visible");
+  };
 
   /* -------------------- Session Draft Preservation (New Booking Form) -------------------- */
 
@@ -2384,7 +2503,12 @@
           }
         }
 
-        renderAll();
+        if (!isPcViewActive()) {
+          pcRenderDirty = true;
+          return;
+        }
+
+        scheduleRenderAll();
         updateAutoBackupUI();
         if ($("dorm-modal").classList.contains("open") && $("dorm-board-view").style.display !== "none") {
           renderDormBoard();
@@ -2942,7 +3066,19 @@
     } else if (loadRes && loadRes.recoveredFromBackup) {
       showToast("Phát hiện lỗi bộ nhớ — đã tự động khôi phục từ bản dự phòng!");
     }
-    setTimeout(() => scrollToToday(false), 60);
+    if (window.matchMedia) {
+      const mql = window.matchMedia("(max-width: 768px)");
+      const onViewportChange = () => {
+        if (pcRenderDirty && isPcViewActive()) {
+          state.bookings = store.getBookings() || state.bookings;
+          renderAll();
+          setTimeout(() => scrollToToday(false), 30);
+        }
+      };
+      if (mql.addEventListener) mql.addEventListener("change", onViewportChange);
+      else if (mql.addListener) mql.addListener(onViewportChange);
+    }
+    setTimeout(() => { if (isPcViewActive()) scrollToToday(false); }, 60);
   }
 
   boot();
