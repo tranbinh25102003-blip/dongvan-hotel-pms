@@ -36,6 +36,8 @@
     getRoomById,
     getRemaining,
     getPaymentStatus,
+    calculateVatBreakdown,
+    extractPreVatFromTotal,
     detectChannelKey,
     bookingCoversDate,
     getDormSlotMapForDate,
@@ -505,6 +507,25 @@
               <div class="m-field">
                 <label for="m-f-paid">Đã TT / Cọc (VNĐ)</label>
                 <input id="m-f-paid" class="m-input" type="text" inputmode="numeric" placeholder="0" />
+              </div>
+            </div>
+            <div class="vat-box" id="m-vat-box">
+              <label class="vat-toggle-row" for="m-f-include-vat">
+                <span class="vat-toggle-left">
+                  <input id="m-f-include-vat" type="checkbox" />
+                  <span><strong>Cộng thêm VAT 8%</strong> <small>(nếu khách yêu cầu)</small></span>
+                </span>
+                <span id="m-vat-badge" class="vat-pill" style="display:none;">+ VAT 8%</span>
+              </label>
+              <div id="m-vat-breakdown" class="vat-breakdown" style="display:none;">
+                <div class="vat-base-row">
+                  <label for="m-f-pre-vat">Giá trước VAT (VNĐ)</label>
+                  <input id="m-f-pre-vat" class="m-input vat-base-input" type="text" inputmode="numeric" placeholder="0" />
+                </div>
+                <div class="vat-summary-line">
+                  <span>VAT 8%: <strong id="m-vat-amount-display">0 đ</strong></span>
+                  <span>Tổng sau VAT: <strong id="m-vat-total-display">0 đ</strong></span>
+                </div>
               </div>
             </div>
             <div class="balance-banner">
@@ -1449,6 +1470,8 @@
         phone: $("m-f-phone").value,
         guestCount: $("m-f-guests").value,
         totalAmount: $("m-f-total").value,
+        includeVat: $("m-f-include-vat").checked,
+        preVatAmount: $("m-f-pre-vat").value,
         paidAmount: $("m-f-paid").value,
         mergeBed: $("m-f-merge-bed").checked,
         extraBed: $("m-f-extra-bed").value,
@@ -1493,6 +1516,38 @@
     updateMobilePaymentPreview();
   }
 
+  function syncMobileVatDisplay() {
+    const includeVat = $("m-f-include-vat").checked;
+    const total = parseVND($("m-f-total").value);
+    const preVat = includeVat ? Math.min(total, parseVND($("m-f-pre-vat").value)) : total;
+    const vatAmt = includeVat ? Math.max(0, total - preVat) : 0;
+    $("m-vat-box").classList.toggle("active", includeVat);
+    $("m-vat-badge").style.display = includeVat ? "inline-flex" : "none";
+    $("m-vat-breakdown").style.display = includeVat ? "flex" : "none";
+    $("m-vat-amount-display").textContent = formatVND(vatAmt);
+    $("m-vat-total-display").textContent = formatVND(total);
+  }
+
+  function handleMobileVatToggle() {
+    const includeVat = $("m-f-include-vat").checked;
+    const wasPaidFull = mState.bookingPayStatus === "paid";
+    if (includeVat) {
+      const currentTotal = parseVND($("m-f-total").value);
+      const calc = calculateVatBreakdown(currentTotal, true);
+      $("m-f-pre-vat").value = formatNumberInput(calc.preVatAmount);
+      $("m-f-total").value = formatNumberInput(calc.totalAmount);
+      if (wasPaidFull) $("m-f-paid").value = formatNumberInput(calc.totalAmount);
+    } else {
+      const base = parseVND($("m-f-pre-vat").value) || extractPreVatFromTotal($("m-f-total").value).preVatAmount;
+      $("m-f-total").value = formatNumberInput(base);
+      $("m-f-pre-vat").value = "";
+      if (wasPaidFull) $("m-f-paid").value = formatNumberInput(base);
+    }
+    syncMobileVatDisplay();
+    updateMobilePaymentPreview();
+    saveMobileDraft();
+  }
+
   function updateMobilePaymentPreview() {
     const total = parseVND($("m-f-total").value);
     const paid = parseVND($("m-f-paid").value);
@@ -1507,6 +1562,7 @@
     }
     mState.bookingPayStatus = total > 0 && paid >= total ? "paid" : paid > 0 ? "deposit" : "unpaid";
     document.querySelectorAll("[data-m-pay]").forEach((t) => t.classList.toggle("active", t.dataset.mPay === mState.bookingPayStatus));
+    syncMobileVatDisplay();
   }
 
   function updateMobileRoomFields() {
@@ -1567,6 +1623,10 @@
     $("m-f-phone").value = lead.phone || "";
     if (force || !$("m-f-total").value.trim()) {
       $("m-f-total").value = formatNumberInput(lead.totalAmount);
+      $("m-f-include-vat").checked = Boolean(lead.includeVat);
+      $("m-f-pre-vat").value = lead.includeVat
+        ? formatNumberInput(lead.preVatAmount || extractPreVatFromTotal(lead.totalAmount).preVatAmount)
+        : "";
     }
     setMobileConfirmerSelect($("m-f-confirmed-by"), lead.confirmedBy || "");
     if (lead.confirmationPdf && lead.confirmationPdf.dataUrl) {
@@ -1693,6 +1753,10 @@
       $("m-f-phone").value = existing.phone || "";
       $("m-f-guests").value = existing.guestCount || 2;
       $("m-f-total").value = formatNumberInput(existing.totalAmount);
+      $("m-f-include-vat").checked = Boolean(existing.includeVat);
+      $("m-f-pre-vat").value = existing.includeVat
+        ? formatNumberInput(existing.preVatAmount || extractPreVatFromTotal(existing.totalAmount).preVatAmount)
+        : "";
       $("m-f-paid").value = formatNumberInput(existing.paidAmount);
       $("m-f-merge-bed").checked = Boolean(existing.mergeBed);
       $("m-f-extra-bed").value = String(existing.extraBed || 0);
@@ -1723,6 +1787,11 @@
       $("m-f-phone").value = (draft && draft.phone) || "";
       $("m-f-guests").value = (draft && draft.guestCount) || room.defaultGuests;
       $("m-f-total").value = prefill ? formatNumberInput(prefill.totalAmount) : ((draft && draft.totalAmount) || "");
+      const initVat = Boolean(draft && draft.includeVat);
+      $("m-f-include-vat").checked = initVat;
+      $("m-f-pre-vat").value = initVat
+        ? (prefill ? formatNumberInput(prefill.preVatAmount || extractPreVatFromTotal(prefill.totalAmount).preVatAmount) : (draft.preVatAmount || ""))
+        : "";
       $("m-f-paid").value = prefill ? formatNumberInput(prefill.paidAmount) : ((draft && draft.paidAmount) || "");
       $("m-f-merge-bed").checked = Boolean(draft && draft.mergeBed);
       $("m-f-extra-bed").value = String((draft && draft.extraBed) || "0");
@@ -1801,6 +1870,8 @@
         phone: $("m-f-phone").value.trim(),
         guestCount: $("m-f-guests").value,
         totalAmount: $("m-f-total").value,
+        includeVat: $("m-f-include-vat").checked,
+        preVatAmount: $("m-f-include-vat").checked ? $("m-f-pre-vat").value : $("m-f-total").value,
         paidAmount: $("m-f-paid").value,
         paymentStatus: mState.bookingPayStatus,
         mergeBed: $("m-f-merge-bed").checked,
@@ -2396,10 +2467,28 @@
       inp.addEventListener("input", () => {
         const raw = parseVND(inp.value);
         inp.value = raw > 0 ? raw.toLocaleString("vi-VN") : "";
-        if (inp === $("m-f-total") && mState.bookingPayStatus === "paid") $("m-f-paid").value = inp.value;
+        if (inp === $("m-f-total")) {
+          if ($("m-f-include-vat").checked) {
+            const rev = extractPreVatFromTotal(raw);
+            $("m-f-pre-vat").value = formatNumberInput(rev.preVatAmount);
+          }
+          if (mState.bookingPayStatus === "paid") $("m-f-paid").value = inp.value;
+        }
         updateMobilePaymentPreview();
         saveMobileDraft();
       });
+    });
+    $("m-f-include-vat").addEventListener("change", handleMobileVatToggle);
+    $("m-f-pre-vat").addEventListener("input", () => {
+      const base = parseVND($("m-f-pre-vat").value);
+      $("m-f-pre-vat").value = base > 0 ? base.toLocaleString("vi-VN") : "";
+      if ($("m-f-include-vat").checked) {
+        const calc = calculateVatBreakdown(base, true);
+        $("m-f-total").value = formatNumberInput(calc.totalAmount);
+        if (mState.bookingPayStatus === "paid") $("m-f-paid").value = $("m-f-total").value;
+      }
+      updateMobilePaymentPreview();
+      saveMobileDraft();
     });
 
     // Mobile Group Summary Box events inside Booking Form

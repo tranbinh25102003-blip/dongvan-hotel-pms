@@ -1468,6 +1468,123 @@ html, body {
 .balance-amount.owing { color: var(--status-unpaid); }
 .balance-amount.settled { color: var(--status-paid); }
 
+/* Optional VAT 8% Toggle & Breakdown (PC & Mobile) */
+.vat-box {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.vat-box.active {
+  border-color: var(--accent-gold, #c2872b);
+  background: #fffbeb;
+}
+
+.vat-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  user-select: none;
+}
+
+.vat-toggle-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vat-toggle-left input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent-gold, #b45309);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.vat-toggle-left small {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.vat-pill {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #f59e0b;
+}
+
+.vat-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 8px;
+  border-top: 1px dashed #e5c687;
+}
+
+.vat-base-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.vat-base-row label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.vat-base-input {
+  width: 155px;
+  max-width: 100%;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.vat-summary-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.vat-summary-line strong {
+  color: #92400e;
+}
+
+.vat-mini-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #f59e0b;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+
 /* Toggle Cards (Ghép giường & Extra Bed) */
 .options-row {
   display: grid;

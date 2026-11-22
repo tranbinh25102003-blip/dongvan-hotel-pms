@@ -43,6 +43,8 @@
     getRoomById,
     getRemaining,
     getPaymentStatus,
+    calculateVatBreakdown,
+    extractPreVatFromTotal,
     getCellPaymentBadge,
     getGroupCellPaymentBadge,
     detectChannelKey,
@@ -590,14 +592,14 @@
       ${bk.phone ? `<div class="tt-row"><span class="tt-label">SĐT:</span><span class="tt-val">${escapeHtml(bk.phone)}</span></div>` : ""}
       <div class="tt-row"><span class="tt-label">Lưu trú:</span><span class="tt-val">${formatDateVN(bk.checkin)} → ${formatDateVN(bk.checkout)}</span></div>
       ${isGroup ? `
-        <div class="tt-row"><span class="tt-label">Giá phòng này:</span><span class="tt-val">${formatVND(bk.totalAmount)}</span></div>
+        <div class="tt-row"><span class="tt-label">Giá phòng này:</span><span class="tt-val">${formatVND(bk.totalAmount)}${bk.includeVat ? ' <span class="vat-mini-tag">+VAT 8%</span>' : ""}</span></div>
         <div style="margin-top:6px; padding:6px 7px; border-radius:6px; background:rgba(79,70,229,0.1); border:1px solid rgba(79,70,229,0.28); font-size:11px;">
           <div style="font-weight:800; color:#4338ca; margin-bottom:2px;">👥 Thanh toán gộp cả đoàn (${groupSummary.roomCount} phòng)</div>
           <div>Tổng tiền đoàn: <strong>${formatVND(groupSummary.totalAmount)}</strong></div>
           <div>${grpStatusLabel}: <strong style="color:var(--status-paid);">${formatVND(groupSummary.paidAmount)}</strong></div>
           <div>Còn nợ cả đoàn: <strong style="color:${groupSummary.remaining > 0 ? "var(--status-unpaid)" : "var(--status-paid)"};">${formatVND(groupSummary.remaining)}</strong></div>
         </div>` : `
-        <div class="tt-row"><span class="tt-label">Tổng tiền:</span><span class="tt-val">${formatVND(bk.totalAmount)}</span></div>
+        <div class="tt-row"><span class="tt-label">Tổng tiền:</span><span class="tt-val">${formatVND(bk.totalAmount)}${bk.includeVat ? ' <span class="vat-mini-tag">+VAT 8%</span>' : ""}</span></div>
         <div class="tt-row"><span class="tt-label">${statusLabel}:</span><span class="tt-val" style="color:var(--status-paid);">${formatVND(bk.paidAmount)}</span></div>
         <div class="tt-row"><span class="tt-label">Còn nợ:</span><span class="tt-val" style="color:${rem > 0 ? "var(--status-unpaid)" : "var(--status-paid)"};">${formatVND(rem)}</span></div>`}
       ${extras.length ? `<div class="tt-row"><span class="tt-label">Yêu cầu:</span><span class="tt-val">${escapeHtml(extras.join(", "))}</span></div>` : ""}
@@ -654,6 +656,8 @@
         phone: $("field-phone").value,
         guestCount: $("field-guest-count").value,
         totalAmount: $("field-total-amount").value,
+        includeVat: $("field-include-vat").checked,
+        preVatAmount: $("field-pre-vat-amount").value,
         paidAmount: $("field-paid-amount").value,
         mergeBed: $("field-merge-bed").checked,
         extraBed: $("field-extra-bed").value,
@@ -745,6 +749,38 @@
     updatePaymentPreview();
   }
 
+  function syncPcVatDisplay() {
+    const includeVat = $("field-include-vat").checked;
+    const total = parseVND($("field-total-amount").value);
+    const preVat = includeVat ? Math.min(total, parseVND($("field-pre-vat-amount").value)) : total;
+    const vatAmt = includeVat ? Math.max(0, total - preVat) : 0;
+    $("pc-vat-box").classList.toggle("active", includeVat);
+    $("pc-vat-badge").style.display = includeVat ? "inline-flex" : "none";
+    $("pc-vat-breakdown").style.display = includeVat ? "flex" : "none";
+    $("pc-vat-amount-display").textContent = formatVND(vatAmt);
+    $("pc-vat-total-display").textContent = formatVND(total);
+  }
+
+  function handlePcVatToggle() {
+    const includeVat = $("field-include-vat").checked;
+    const wasPaidFull = state.activePayStatus === "paid";
+    if (includeVat) {
+      const currentTotal = parseVND($("field-total-amount").value);
+      const calc = calculateVatBreakdown(currentTotal, true);
+      $("field-pre-vat-amount").value = formatNumberInput(calc.preVatAmount);
+      $("field-total-amount").value = formatNumberInput(calc.totalAmount);
+      if (wasPaidFull) $("field-paid-amount").value = formatNumberInput(calc.totalAmount);
+    } else {
+      const base = parseVND($("field-pre-vat-amount").value) || extractPreVatFromTotal($("field-total-amount").value).preVatAmount;
+      $("field-total-amount").value = formatNumberInput(base);
+      $("field-pre-vat-amount").value = "";
+      if (wasPaidFull) $("field-paid-amount").value = formatNumberInput(base);
+    }
+    syncPcVatDisplay();
+    updatePaymentPreview();
+    saveDraft();
+  }
+
   function updatePaymentPreview() {
     const total = parseVND($("field-total-amount").value), paid = parseVND($("field-paid-amount").value);
     const overpaid = total > 0 && paid > total;
@@ -758,6 +794,7 @@
     }
     state.activePayStatus = total > 0 && paid >= total ? "paid" : paid > 0 ? "deposit" : "unpaid";
     document.querySelectorAll(".pay-tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.pay === state.activePayStatus));
+    syncPcVatDisplay();
   }
 
   function updateRoomSpecificFields() {
@@ -927,6 +964,10 @@
     $("field-phone").value = lead.phone || "";
     if (force || !$("field-total-amount").value.trim()) {
       $("field-total-amount").value = formatNumberInput(lead.totalAmount);
+      $("field-include-vat").checked = Boolean(lead.includeVat);
+      $("field-pre-vat-amount").value = lead.includeVat
+        ? formatNumberInput(lead.preVatAmount || extractPreVatFromTotal(lead.totalAmount).preVatAmount)
+        : "";
     }
     setConfirmerValue($("field-confirmed-by"), lead.confirmedBy || "");
     if (lead.confirmationPdf && lead.confirmationPdf.dataUrl) {
@@ -1143,6 +1184,10 @@
       $("field-phone").value = existing.phone || "";
       $("field-guest-count").value = existing.guestCount || 2;
       $("field-total-amount").value = formatNumberInput(existing.totalAmount);
+      $("field-include-vat").checked = Boolean(existing.includeVat);
+      $("field-pre-vat-amount").value = existing.includeVat
+        ? formatNumberInput(existing.preVatAmount || extractPreVatFromTotal(existing.totalAmount).preVatAmount)
+        : "";
       $("field-paid-amount").value = formatNumberInput(existing.paidAmount);
       setPaymentStatusTab(getPaymentStatus(existing), false);
       $("field-merge-bed").checked = !!existing.mergeBed;
@@ -1174,6 +1219,11 @@
       $("field-phone").value = (draft && draft.phone) || "";
       $("field-guest-count").value = (draft && draft.guestCount) || room.defaultGuests;
       $("field-total-amount").value = prefill ? formatNumberInput(prefill.totalAmount) : ((draft && draft.totalAmount) || "");
+      const initVat = Boolean(draft && draft.includeVat);
+      $("field-include-vat").checked = initVat;
+      $("field-pre-vat-amount").value = initVat
+        ? (prefill ? formatNumberInput(prefill.preVatAmount || extractPreVatFromTotal(prefill.totalAmount).preVatAmount) : (draft.preVatAmount || ""))
+        : "";
       $("field-paid-amount").value = prefill ? formatNumberInput(prefill.paidAmount) : ((draft && draft.paidAmount) || "");
       setPaymentStatusTab(prefill ? getPaymentStatus(prefill) : "deposit", false);
       $("field-merge-bed").checked = Boolean(draft && draft.mergeBed);
@@ -1239,6 +1289,8 @@
         phone: $("field-phone").value.trim(),
         guestCount: $("field-guest-count").value,
         totalAmount: $("field-total-amount").value,
+        includeVat: $("field-include-vat").checked,
+        preVatAmount: $("field-include-vat").checked ? $("field-pre-vat-amount").value : $("field-total-amount").value,
         paidAmount: $("field-paid-amount").value,
         paymentStatus: state.activePayStatus,
         mergeBed: $("field-merge-bed").checked,
@@ -2256,10 +2308,28 @@
       inp.addEventListener("input", () => {
         const raw = parseVND(inp.value);
         inp.value = raw > 0 ? raw.toLocaleString("vi-VN") : "";
-        if (inp === $("field-total-amount") && state.activePayStatus === "paid") $("field-paid-amount").value = inp.value;
+        if (inp === $("field-total-amount")) {
+          if ($("field-include-vat").checked) {
+            const rev = extractPreVatFromTotal(raw);
+            $("field-pre-vat-amount").value = formatNumberInput(rev.preVatAmount);
+          }
+          if (state.activePayStatus === "paid") $("field-paid-amount").value = inp.value;
+        }
         updatePaymentPreview();
         saveDraft();
       });
+    });
+    $("field-include-vat").addEventListener("change", handlePcVatToggle);
+    $("field-pre-vat-amount").addEventListener("input", () => {
+      const base = parseVND($("field-pre-vat-amount").value);
+      $("field-pre-vat-amount").value = base > 0 ? base.toLocaleString("vi-VN") : "";
+      if ($("field-include-vat").checked) {
+        const calc = calculateVatBreakdown(base, true);
+        $("field-total-amount").value = formatNumberInput(calc.totalAmount);
+        if (state.activePayStatus === "paid") $("field-paid-amount").value = $("field-total-amount").value;
+      }
+      updatePaymentPreview();
+      saveDraft();
     });
 
     // Live Group Lump-Sum Controls inside Booking Modal

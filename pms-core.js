@@ -267,6 +267,36 @@
     return null;
   }
 
+  const VAT_RATE = 0.08;
+
+  function calculateVatBreakdown(baseAmount, includeVat) {
+    const preVatAmount = parseVND(baseAmount);
+    if (!includeVat) {
+      return {
+        includeVat: false,
+        vatRate: 0,
+        preVatAmount,
+        vatAmount: 0,
+        totalAmount: preVatAmount
+      };
+    }
+    const vatAmount = Math.round(preVatAmount * VAT_RATE);
+    return {
+      includeVat: true,
+      vatRate: 8,
+      preVatAmount,
+      vatAmount,
+      totalAmount: preVatAmount + vatAmount
+    };
+  }
+
+  function extractPreVatFromTotal(totalAmount) {
+    const total = parseVND(totalAmount);
+    const preVatAmount = Math.round(total / (1 + VAT_RATE));
+    const vatAmount = Math.max(0, total - preVatAmount);
+    return { preVatAmount, vatAmount, totalAmount: total };
+  }
+
   function getCellPaymentBadge(bk, isStart, hasNext) {
     const total = parseVND(bk.totalAmount);
     const paid = parseVND(bk.paidAmount);
@@ -553,6 +583,17 @@
       return { ok: false, error: payErr };
     }
 
+    const includeVat = Boolean(obj.includeVat);
+    const vatRate = includeVat ? 8 : 0;
+    let preVatAmount = totalAmount;
+    let vatAmount = 0;
+    if (includeVat) {
+      const hasExplicitPreVat = obj.preVatAmount !== undefined && obj.preVatAmount !== null && String(obj.preVatAmount).trim() !== "";
+      const parsedPre = hasExplicitPreVat ? parseVND(obj.preVatAmount) : extractPreVatFromTotal(totalAmount).preVatAmount;
+      preVatAmount = Math.min(totalAmount, parsedPre);
+      vatAmount = Math.max(0, totalAmount - preVatAmount);
+    }
+
     let slots = [];
     let dormBeds = 0;
     let guestCount = room.defaultGuests;
@@ -608,6 +649,10 @@
       dormBeds,
       slots: room.isDorm ? slots : undefined,
       totalAmount,
+      includeVat,
+      vatRate,
+      preVatAmount,
+      vatAmount,
       paidAmount,
       paymentStatus,
       mergeBed,
@@ -930,6 +975,10 @@
       phone: sourceBooking.phone || "",
       guestCount: Math.min(12, Math.max(1, Number(sourceBooking.guestCount) || targetRoom.defaultGuests)),
       totalAmount: parseVND(sourceBooking.totalAmount),
+      includeVat: Boolean(sourceBooking.includeVat),
+      vatRate: sourceBooking.includeVat ? 8 : 0,
+      preVatAmount: sourceBooking.includeVat ? parseVND(sourceBooking.preVatAmount || extractPreVatFromTotal(sourceBooking.totalAmount).preVatAmount) : parseVND(sourceBooking.totalAmount),
+      vatAmount: sourceBooking.includeVat ? parseVND(sourceBooking.vatAmount || extractPreVatFromTotal(sourceBooking.totalAmount).vatAmount) : 0,
       paidAmount: keepPaidAmount ? parseVND(sourceBooking.paidAmount) : 0,
       paymentStatus: keepPaidAmount ? getPaymentStatus(sourceBooking) : "unpaid",
       mergeBed: targetRoom.type === "Twins" ? Boolean(sourceBooking.mergeBed) : false,
@@ -1025,7 +1074,7 @@
     const headers = [
       "Phòng", "Tầng", "Hạng phòng", "View", "Ngày nhận", "Ngày trả", "Số đêm",
       "Đơn vị book", "Tên tour", "Mã đặt phòng", "Tên khách", "Số điện thoại",
-      "Số khách / Slot Dorm", "Tổng tiền (VNĐ)", "Đã thanh toán/Cọc (VNĐ)", "Còn lại (VNĐ)",
+      "Số khách / Slot Dorm", "Tổng tiền (VNĐ)", "VAT 8%", "Đã thanh toán/Cọc (VNĐ)", "Còn lại (VNĐ)",
       "Ghép giường", "Extra bed", "Người xác nhận", "Xác nhận PDF", "Ghi chú"
     ];
 
@@ -1036,10 +1085,11 @@
         const r = getRoomById(b.roomId) || { name: b.roomId, floor: "", type: "", view: "", isDorm: false };
         const slotDesc = r.isDorm ? `Slot ${(b.slots || []).join(", ")} (${b.dormBeds || (b.slots || []).length} chỗ)` : b.guestCount;
         const pdfLabel = b.confirmationPdf && b.confirmationPdf.name ? b.confirmationPdf.name : "";
+        const vatLabel = b.includeVat ? `Có (+${parseVND(b.vatAmount)})` : "Không";
         return [
           r.name, r.floor, r.type, r.view, b.checkin, b.checkout, diffNights(b.checkin, b.checkout),
           b.sourceName, b.tourName || "", b.bookingCode || "", b.guestName, b.phone,
-          slotDesc, parseVND(b.totalAmount), parseVND(b.paidAmount), getRemaining(b),
+          slotDesc, parseVND(b.totalAmount), vatLabel, parseVND(b.paidAmount), getRemaining(b),
           b.mergeBed ? "Có" : "Không", b.extraBed || 0, b.confirmedBy || "", pdfLabel, b.notes || ""
         ];
       });
@@ -1075,6 +1125,7 @@
       pushIfDiff("Extra bed", Number(before.extraBed) || 0, Number(after.extraBed) || 0);
     }
     pushIfDiff("Tổng tiền", formatVND(before.totalAmount), formatVND(after.totalAmount));
+    pushIfDiff("VAT 8%", before.includeVat ? `Có (+${formatVND(before.vatAmount)})` : "Không", after.includeVat ? `Có (+${formatVND(after.vatAmount)})` : "Không");
     pushIfDiff("Đã TT/Cọc", formatVND(before.paidAmount), formatVND(after.paidAmount));
     pushIfDiff("Người xác nhận", before.confirmedBy || "", after.confirmedBy || "");
     const oldPdf = before.confirmationPdf && before.confirmationPdf.name ? `${before.confirmationPdf.name} (${formatFileSize(before.confirmationPdf.size)})` : "";
@@ -2001,6 +2052,9 @@
     getRemaining,
     getPaymentStatus,
     validatePaymentAmounts,
+    VAT_RATE,
+    calculateVatBreakdown,
+    extractPreVatFromTotal,
     getCellPaymentBadge,
     getGroupCellPaymentBadge,
     detectChannelKey,

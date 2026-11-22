@@ -267,6 +267,26 @@
             </div>
           </div>
 
+          <div class="vat-box" id="pc-vat-box">
+            <label class="vat-toggle-row" for="field-include-vat">
+              <span class="vat-toggle-left">
+                <input id="field-include-vat" type="checkbox" />
+                <span><strong>Cộng thêm VAT 8%</strong> <small>(nếu khách yêu cầu)</small></span>
+              </span>
+              <span id="pc-vat-badge" class="vat-pill" style="display:none;">+ VAT 8%</span>
+            </label>
+            <div id="pc-vat-breakdown" class="vat-breakdown" style="display:none;">
+              <div class="vat-base-row">
+                <label for="field-pre-vat-amount">Giá phòng trước VAT (VNĐ)</label>
+                <input id="field-pre-vat-amount" class="input vat-base-input" type="text" inputmode="numeric" placeholder="0" />
+              </div>
+              <div class="vat-summary-line">
+                <span>VAT 8%: <strong id="pc-vat-amount-display">0 đ</strong></span>
+                <span>Tổng sau VAT: <strong id="pc-vat-total-display">0 đ</strong></span>
+              </div>
+            </div>
+          </div>
+
           <div class="balance-banner">
             <span>Còn lại chưa thanh toán:</span>
             <span id="display-remaining" class="balance-amount settled">0 đ</span>
