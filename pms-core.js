@@ -91,7 +91,7 @@
     { key: "agoda", label: "Agoda", short: "Agoda", hex: "#ea580c", colorVar: "var(--ch-agoda-solid)", bgVar: "var(--ch-agoda-bg)", fgVar: "var(--ch-agoda-fg)" },
     { key: "airbnb", label: "Airbnb", short: "Airbnb", hex: "#e11d48", colorVar: "var(--ch-airbnb-solid)", bgVar: "var(--ch-airbnb-bg)", fgVar: "var(--ch-airbnb-fg)" },
     { key: "walkin", label: "Khách lẻ", short: "Khách lẻ", hex: "#059669", colorVar: "var(--ch-walkin-solid)", bgVar: "var(--ch-walkin-bg)", fgVar: "var(--ch-walkin-fg)" },
-    { key: "tour", label: "Tour", short: "Tour", hex: "#d97706", colorVar: "var(--ch-tour-solid)", bgVar: "var(--ch-tour-bg)", fgVar: "var(--ch-tour-fg)" },
+    { key: "tour", label: "Gmail", short: "Gmail", hex: "#d97706", colorVar: "var(--ch-tour-solid)", bgVar: "var(--ch-tour-bg)", fgVar: "var(--ch-tour-fg)" },
     { key: "zalo", label: "Zalo", short: "Zalo", hex: "#0284c7", colorVar: "var(--ch-zalo-solid)", bgVar: "var(--ch-zalo-bg)", fgVar: "var(--ch-zalo-fg)" },
     { key: "other", label: "Nền tảng khác", short: "Khác", hex: "#6366f1", colorVar: "var(--ch-other-solid)", bgVar: "var(--ch-other-bg)", fgVar: "var(--ch-other-fg)" }
   ]);
@@ -335,8 +335,8 @@
     if (s.includes("agoda")) return "agoda";
     if (s.includes("airbnb")) return "airbnb";
     if (s.includes("khách lẻ") || s.includes("khach le") || s.includes("nội bộ")) return "walkin";
-    if (s.includes("tour") || s.includes("đoàn")) return "tour";
     if (s.includes("zalo")) return "zalo";
+    if (s.includes("gmail") || s.includes("mail") || s.includes("tour") || s.includes("đoàn")) return "tour";
     return fallback;
   }
 
@@ -536,12 +536,14 @@
       channelKey = detectChannelKey(obj.sourceName, "other");
     }
 
-    const tourName = channelKey === "tour" ? sanitizeText(obj.tourName, 100) : "";
+    const tourName = (channelKey === "tour" || channelKey === "zalo") ? sanitizeText(obj.tourName, 100) : "";
     const bookingCode = sanitizeText(obj.bookingCode, 60);
     let sourceName = sanitizeText(obj.sourceName, 100);
     if (!sourceName) {
       const ch = CHANNELS.find((c) => c.key === channelKey);
-      sourceName = channelKey === "tour" && tourName ? `Tour ${tourName}` : (ch ? ch.label : "Khác");
+      if (channelKey === "tour") sourceName = tourName ? `Gmail ${tourName}` : "Gmail";
+      else if (channelKey === "zalo") sourceName = tourName ? `Zalo ${tourName}` : "Zalo";
+      else sourceName = ch ? ch.label : "Khác";
     }
 
     const totalAmount = parseVND(obj.totalAmount);
@@ -1113,12 +1115,12 @@
       { id: "bk_sample_1", roomId: "102", checkin: addDaysISO(base, -1), checkout: addDaysISO(base, 2), channelKey: "booking", sourceName: "Booking.com", tourName: "", bookingCode: "4829103847", guestName: "Nguyễn Minh Quân", phone: "0912 456 789", guestCount: 2, dormBeds: 0, totalAmount: 2700000, paidAmount: 2700000, paymentStatus: "paid", mergeBed: true, extraBed: 0, confirmedBy: "Ngọc", notes: "Khách yêu cầu ghép 2 giường đơn thành 1 giường đôi. Ăn buffet sáng tầng 5 lúc 7h30.", revision: 1, createdAt: nowISO, updatedAt: nowISO },
       { id: "bk_sample_2", roomId: "101", checkin: base, checkout: addDaysISO(base, 3), channelKey: "agoda", sourceName: "Agoda", tourName: "", bookingCode: "129384756", guestName: "Trần Thị Mai Hương", phone: "0988 221 334", guestCount: 2, dormBeds: 0, totalAmount: 2850000, paidAmount: 1000000, paymentStatus: "deposit", mergeBed: false, extraBed: 0, confirmedBy: "Tường Vi", notes: "Đã chuyển khoản cọc 1 triệu, thu phần còn lại khi check-in.", revision: 1, createdAt: nowISO, updatedAt: nowISO },
       { id: "bk_sample_3", roomId: "201", checkin: base, checkout: addDaysISO(base, 2), channelKey: "zalo", sourceName: "Zalo", tourName: "", bookingCode: "ZL-2111-01", guestName: "Gia đình anh Hoàng Nam", phone: "0904 778 912", guestCount: 4, dormBeds: 0, totalAmount: 3200000, paidAmount: 1500000, paymentStatus: "deposit", mergeBed: false, extraBed: 1, confirmedBy: "Trần Bình", notes: "Kê thêm 1 extra bed cho bé lớn. Có trẻ em 6 tuổi ăn buffet sáng.", revision: 1, createdAt: nowISO, updatedAt: nowISO },
-      { id: "bk_sample_4", roomId: "204", checkin: addDaysISO(base, 1), checkout: addDaysISO(base, 4), channelKey: "tour", sourceName: "Tour Vietravel", tourName: "Vietravel", bookingCode: "VR-2026-204", guestName: "Đoàn chị Lan Anh (3 khách)", phone: "0977 112 889", guestCount: 3, dormBeds: 0, totalAmount: 4200000, paidAmount: 4200000, paymentStatus: "paid", mergeBed: false, extraBed: 0, confirmedBy: "Lan Anh", notes: "Công ty tour đã thanh toán chuyển khoản công ty. Xuất hóa đơn VAT.", revision: 1, createdAt: nowISO, updatedAt: nowISO },
+      { id: "bk_sample_4", roomId: "204", checkin: addDaysISO(base, 1), checkout: addDaysISO(base, 4), channelKey: "tour", sourceName: "Gmail Vietravel", tourName: "Vietravel", bookingCode: "VR-2026-204", guestName: "Đoàn chị Lan Anh (3 khách)", phone: "0977 112 889", guestCount: 3, dormBeds: 0, totalAmount: 4200000, paidAmount: 4200000, paymentStatus: "paid", mergeBed: false, extraBed: 0, confirmedBy: "Lan Anh", notes: "Công ty tour đã thanh toán chuyển khoản công ty. Xuất hóa đơn VAT.", revision: 1, createdAt: nowISO, updatedAt: nowISO },
       { id: "bk_sample_5", roomId: "303", checkin: addDaysISO(base, -2), checkout: addDaysISO(base, 1), channelKey: "airbnb", sourceName: "Airbnb", tourName: "", bookingCode: "HM4K9X2P8Q", guestName: "David Miller", phone: "+84 934 556 771", guestCount: 2, dormBeds: 0, totalAmount: 2900000, paidAmount: 2900000, paymentStatus: "paid", mergeBed: true, extraBed: 0, confirmedBy: "Trần Minh", notes: "Vegetarian breakfast request at Floor 5. Late check-out 13:00.", revision: 1, createdAt: nowISO, updatedAt: nowISO },
       { id: "bk_sample_6", roomId: "404", checkin: base, checkout: addDaysISO(base, 2), channelKey: "walkin", sourceName: "Khách lẻ", tourName: "", bookingCode: "KL-2111-04", guestName: "Lê Quốc Bảo", phone: "0963 880 124", guestCount: 3, dormBeds: 0, totalAmount: 3000000, paidAmount: 0, paymentStatus: "unpaid", mergeBed: false, extraBed: 0, confirmedBy: "Ngọc", notes: "Khách đi xe riêng, check-in khoảng 18h tối. Thanh toán tiền mặt khi nhận phòng.", revision: 1, createdAt: nowISO, updatedAt: nowISO },
       { id: "bk_sample_7", roomId: "402", checkin: addDaysISO(base, 2), checkout: addDaysISO(base, 5), channelKey: "other", sourceName: "Traveloka", tourName: "", bookingCode: "TVK-993812", guestName: "Phạm Thu Hà", phone: "0919 332 456", guestCount: 2, dormBeds: 0, totalAmount: 2650000, paidAmount: 1000000, paymentStatus: "deposit", mergeBed: false, extraBed: 0, confirmedBy: "Tường Vi", notes: "Giữ nguyên 2 giường đơn, cần thêm gối mềm.", revision: 1, createdAt: nowISO, updatedAt: nowISO },
-      { id: "bk_sample_8", roomId: "DORM", checkin: base, checkout: addDaysISO(base, 3), channelKey: "tour", sourceName: "Tour Vietravel", tourName: "Vietravel", bookingCode: "VR-2026-204", guestName: "Anh Hùng (HDV) + Anh Tuấn (Lái xe)", phone: "0915 667 432", guestCount: 2, dormBeds: 2, slots: [1, 3], totalAmount: 600000, paidAmount: 600000, paymentStatus: "paid", mergeBed: false, extraBed: 0, confirmedBy: "Trần Bình", notes: "2 chỗ giường tầng dưới cho HDV và lái xe đoàn 204.", revision: 1, createdAt: nowISO, updatedAt: nowISO },
-      { id: "bk_sample_9", roomId: "DORM", checkin: base, checkout: addDaysISO(base, 2), channelKey: "tour", sourceName: "Tour Saigontourist", tourName: "Saigontourist", bookingCode: "SGT-1121-09", guestName: "Anh Phong (Lái xe 45 chỗ)", phone: "0908 119 220", guestCount: 1, dormBeds: 1, slots: [5], totalAmount: 200000, paidAmount: 0, paymentStatus: "unpaid", mergeBed: false, extraBed: 0, confirmedBy: "Lan Anh", notes: "Đỗ xe bãi trước sảnh, thanh toán sáng hôm sau.", revision: 1, createdAt: nowISO, updatedAt: nowISO }
+      { id: "bk_sample_8", roomId: "DORM", checkin: base, checkout: addDaysISO(base, 3), channelKey: "tour", sourceName: "Gmail Vietravel", tourName: "Vietravel", bookingCode: "VR-2026-204", guestName: "Anh Hùng (HDV) + Anh Tuấn (Lái xe)", phone: "0915 667 432", guestCount: 2, dormBeds: 2, slots: [1, 3], totalAmount: 600000, paidAmount: 600000, paymentStatus: "paid", mergeBed: false, extraBed: 0, confirmedBy: "Trần Bình", notes: "2 chỗ giường tầng dưới cho HDV và lái xe đoàn 204.", revision: 1, createdAt: nowISO, updatedAt: nowISO },
+      { id: "bk_sample_9", roomId: "DORM", checkin: base, checkout: addDaysISO(base, 2), channelKey: "tour", sourceName: "Gmail Saigontourist", tourName: "Saigontourist", bookingCode: "SGT-1121-09", guestName: "Anh Phong (Lái xe 45 chỗ)", phone: "0908 119 220", guestCount: 1, dormBeds: 1, slots: [5], totalAmount: 200000, paidAmount: 0, paymentStatus: "unpaid", mergeBed: false, extraBed: 0, confirmedBy: "Lan Anh", notes: "Đỗ xe bãi trước sảnh, thanh toán sáng hôm sau.", revision: 1, createdAt: nowISO, updatedAt: nowISO }
     ];
   }
 

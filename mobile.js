@@ -472,8 +472,8 @@
               <input id="m-f-source-custom" class="m-input" type="text" placeholder="VD: Traveloka, Facebook..." />
             </div>
             <div id="m-wrap-tour-name" class="m-field" style="display:none;">
-              <label for="m-f-tour-name">Tên Tour / Công ty lữ hành</label>
-              <input id="m-f-tour-name" class="m-input" type="text" placeholder="VD: Vietravel, Saigontourist..." />
+              <label for="m-f-tour-name">Tên tour / Công ty tour</label>
+              <input id="m-f-tour-name" class="m-input" type="text" placeholder="VD: Vietravel, Saigontourist, Đoàn công ty..." />
             </div>
             <div class="m-field">
               <label for="m-f-booking-code">Mã đặt phòng</label>
@@ -651,7 +651,7 @@
             <div class="m-field">
               <label for="m-df-source">Đơn vị / Nguồn</label>
               <select id="m-df-source" class="m-select">
-                <option value="tour">Tour / Công ty du lịch</option>
+                <option value="tour">Gmail / Công ty tour</option>
                 <option value="walkin">Nội bộ / Khách lẻ</option>
                 <option value="zalo">Zalo</option>
                 <option value="other">Nguồn khác</option>
@@ -1476,7 +1476,7 @@
     mState.bookingChannelKey = chKey;
     $("m-f-channels").querySelectorAll(".m-chip").forEach((c) => c.classList.toggle("active", c.dataset.mCh === chKey));
     $("m-wrap-custom-source").style.display = chKey === "other" ? "flex" : "none";
-    $("m-wrap-tour-name").style.display = chKey === "tour" ? "flex" : "none";
+    $("m-wrap-tour-name").style.display = (chKey === "tour" || chKey === "zalo") ? "flex" : "none";
     $("m-f-booking-code").placeholder = CODE_PLACEHOLDERS[chKey] || "Nhập mã đặt phòng";
     if (customText !== null) $("m-f-source-custom").value = customText;
     if (tourName !== null) $("m-f-tour-name").value = tourName;
@@ -1558,7 +1558,7 @@
     if (!force && $("m-f-guest-name").value.trim()) return false;
 
     const chKey = lead.channelKey || detectChannelKey(lead.sourceName);
-    const inferredTour = lead.tourName !== undefined ? lead.tourName : (chKey === "tour" ? String(lead.sourceName || "").replace(/^Tour\s*/i, "") : "");
+    const inferredTour = lead.tourName !== undefined ? lead.tourName : ((chKey === "tour" || chKey === "zalo") ? String(lead.sourceName || "").replace(/^(?:Tour|Gmail|Zalo)\s*/i, "") : "");
     setMobileChannel(chKey, {
       customText: chKey === "other" ? (lead.sourceName || "") : "",
       tourName: inferredTour
@@ -1686,7 +1686,7 @@
       $("m-f-checkin").value = existing.checkin;
       $("m-f-checkout").value = existing.checkout;
       const chKey = existing.channelKey || detectChannelKey(existing.sourceName);
-      const inferredTour = existing.tourName !== undefined ? existing.tourName : (chKey === "tour" ? String(existing.sourceName || "").replace(/^Tour\s*/i, "") : "");
+      const inferredTour = existing.tourName !== undefined ? existing.tourName : ((chKey === "tour" || chKey === "zalo") ? String(existing.sourceName || "").replace(/^(?:Tour|Gmail|Zalo)\s*/i, "") : "");
       setMobileChannel(chKey, { customText: chKey === "other" ? (existing.sourceName || "") : "", tourName: inferredTour });
       $("m-f-booking-code").value = existing.bookingCode || "";
       $("m-f-guest-name").value = existing.guestName || "";
@@ -1774,7 +1774,7 @@
       const shouldSyncGroup = Boolean(existingId && (!$("chk-m-sync-group") || $("chk-m-sync-group").checked));
       const chKey = mState.bookingChannelKey;
       const chObj = CHANNELS.find((c) => c.key === chKey);
-      const tourName = chKey === "tour" ? $("m-f-tour-name").value.trim() : "";
+      const tourName = (chKey === "tour" || chKey === "zalo") ? $("m-f-tour-name").value.trim() : "";
       let sourceName = chObj ? chObj.label : "";
       if (chKey === "other") {
         sourceName = $("m-f-source-custom").value.trim();
@@ -1783,7 +1783,9 @@
           return;
         }
       } else if (chKey === "tour") {
-        sourceName = tourName ? `Tour ${tourName}` : "Tour";
+        sourceName = tourName ? `Gmail ${tourName}` : "Gmail";
+      } else if (chKey === "zalo") {
+        sourceName = tourName ? `Zalo ${tourName}` : "Zalo";
       }
 
       const payload = {
@@ -1948,7 +1950,8 @@
 
   function syncMobileDormFormUI() {
     const src = $("m-df-source").value;
-    $("m-df-tour-wrap").style.display = (src === "tour" || src === "other") ? "flex" : "none";
+    $("m-df-tour-wrap").style.display = (src === "tour" || src === "zalo" || src === "other") ? "flex" : "none";
+    $("m-df-tour").placeholder = src === "other" ? "Nhập tên đơn vị / nguồn..." : "VD: Vietravel, Saigontourist...";
     const total = parseVND($("m-df-total").value);
     const paid = parseVND($("m-df-paid").value);
     const remEl = $("m-df-remaining");
@@ -1993,7 +1996,7 @@
       mState.dormSelectedSlots = [...(ex.slots || [1])];
       const srcKey = ["tour", "walkin", "zalo", "other"].includes(ex.channelKey) ? ex.channelKey : "tour";
       $("m-df-source").value = srcKey;
-      $("m-df-tour").value = ex.tourName || (srcKey === "other" ? ex.sourceName : String(ex.sourceName || "").replace(/^Tour\s*/i, ""));
+      $("m-df-tour").value = ex.tourName || (srcKey === "other" ? ex.sourceName : String(ex.sourceName || "").replace(/^(?:Tour|Gmail|Zalo)\s*/i, ""));
       $("m-df-code").value = ex.bookingCode || "";
       $("m-df-guest").value = ex.guestName || "";
       $("m-df-phone").value = ex.phone || "";
@@ -2045,9 +2048,9 @@
       const chKey = $("m-df-source").value;
       const tourOrCustom = $("m-df-tour").value.trim();
       let sourceName = "Dorm nội bộ", tourName = "";
-      if (chKey === "tour") { tourName = tourOrCustom; sourceName = tourOrCustom ? `Tour ${tourOrCustom}` : "Tour"; }
+      if (chKey === "tour") { tourName = tourOrCustom; sourceName = tourOrCustom ? `Gmail ${tourOrCustom}` : "Gmail"; }
       else if (chKey === "walkin") sourceName = "Nội bộ / Khách lẻ";
-      else if (chKey === "zalo") sourceName = "Zalo";
+      else if (chKey === "zalo") { tourName = tourOrCustom; sourceName = tourOrCustom ? `Zalo ${tourOrCustom}` : "Zalo"; }
       else sourceName = tourOrCustom || "Nguồn khác";
 
       const res = await client.saveBooking({
