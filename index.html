@@ -2,14 +2,19 @@
 <html lang="vi">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Dongvan Ville du H'mong Hotel — Quản Lý Đặt Phòng</title>
-  <meta name="description" content="Ứng dụng nhập tay quản lý đặt phòng khách sạn 26 phòng + 1 phòng Dorm nội bộ 8 chỗ theo lịch tháng dành cho nhân viên lễ tân." />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Dongvan Hotel — Quản Lý Đặt Phòng</title>
+  <meta name="description" content="Ứng dụng quản lý đặt phòng Dongvan Ville du H'mong Hotel — 26 phòng + 1 Dorm nội bộ 8 chỗ đồng bộ trực tiếp PC và điện thoại." />
   <meta name="theme-color" content="#1e40af" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Dongvan Hotel" />
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" type="image/png" href="icon-192.png" />
   <link rel="apple-touch-icon" href="icon-192.png" />
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="mobile.css" />
 </head>
 <body>
   <div class="app-shell">
@@ -34,6 +39,10 @@
       </nav>
 
       <div class="header-actions">
+        <span id="pc-sync-status" class="pc-sync-pill" title="Trạng thái đồng bộ dữ liệu">
+          <span class="sync-dot"></span>
+          <span id="pc-sync-text">Đang tải...</span>
+        </span>
         <button id="btn-new-booking" class="btn btn-primary" type="button">+ Đặt phòng</button>
         <button id="btn-open-dorm-today" class="btn btn-sm" type="button">🛏️ Đặt slot Dorm</button>
         <button id="btn-open-history" class="btn btn-sm btn-history" type="button" title="Xem lịch sử chỉnh sửa & cấu hình sao lưu tự động">
@@ -47,6 +56,7 @@
           <input id="input-restore-json" type="file" accept=".json" hidden />
         </label>
         <button id="btn-theme-toggle" class="btn btn-sm" type="button" title="Đổi giao diện Sáng / Tối">🌙</button>
+        <button id="btn-pc-logout" class="btn btn-sm" type="button" title="Đăng xuất tài khoản lễ tân" style="display:none;">Đăng xuất</button>
       </div>
     </header>
 
@@ -145,6 +155,12 @@
 
       <form id="booking-form" class="modal-body" novalidate>
         <input type="hidden" id="field-booking-id" />
+        <div id="pc-edit-conflict-banner" class="conflict-banner" role="alert">
+          <div id="pc-conflict-text">⚠️ Đơn này vừa được cập nhật từ thiết bị khác. Nội dung bạn đang nhập vẫn được giữ lại.</div>
+          <div class="conflict-banner-actions">
+            <button id="btn-pc-reload-latest" class="btn btn-sm btn-primary" type="button">Tải lại bản mới nhất</button>
+          </div>
+        </div>
         <div id="form-error" class="form-error"></div>
 
         <!-- Room & Dates -->
@@ -329,6 +345,12 @@
         </div>
 
         <input type="hidden" id="dorm-field-id" />
+        <div id="pc-dorm-conflict-banner" class="conflict-banner" role="alert">
+          <div>⚠️ Lượt đặt Dorm này vừa được cập nhật từ thiết bị khác. Nội dung bạn đang nhập vẫn được giữ lại.</div>
+          <div class="conflict-banner-actions">
+            <button id="btn-pc-dorm-reload-latest" class="btn btn-sm btn-primary" type="button">Tải lại bản mới nhất</button>
+          </div>
+        </div>
         <div id="dorm-form-error" class="form-error"></div>
 
         <div class="form-grid-3">
@@ -528,10 +550,50 @@
     </div>
   </div>
 
+  <!-- Dedicated Mobile Front Desk App Container (activated automatically on <= 768px or ?view=mobile) -->
+  <div id="mobile-shell" aria-label="Giao diện điện thoại Dongvan Hotel PMS"></div>
+
+  <!-- Non-blocking Live App Update Banner (shown when a new release arrives while editing) -->
+  <div id="app-update-banner" class="app-update-banner" role="status" aria-live="polite">
+    <span id="app-update-text">🔄 Đã có phiên bản mới — nội dung bạn đang nhập vẫn được giữ, sẽ tự cập nhật ngay sau khi lưu/đóng.</span>
+    <button id="btn-app-update-now" class="btn btn-sm btn-primary" type="button">Cập nhật ngay</button>
+  </div>
+
+  <!-- Unified Staff Authentication Overlay (protects API + SSE in production mode) -->
+  <div id="auth-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <img src="logo.jpg" alt="Dongvan Hotel" class="auth-logo" />
+        <h2 id="auth-title" class="auth-title">Dongvan Hotel</h2>
+        <p class="auth-sub">Đăng nhập sổ đặt phòng trực tuyến (PC &amp; Điện thoại)</p>
+      </div>
+      <div id="auth-error" class="form-error" role="alert"></div>
+      <form id="auth-form" class="auth-form" novalidate>
+        <div class="auth-field">
+          <label for="auth-staff">Nhân viên trực ca</label>
+          <select id="auth-staff" class="auth-input" required></select>
+        </div>
+        <div class="auth-field">
+          <label for="auth-passcode">Mật khẩu khách sạn</label>
+          <input id="auth-passcode" class="auth-input" type="password" autocomplete="current-password" placeholder="Nhập mật khẩu..." required />
+        </div>
+        <button id="auth-submit" class="btn btn-primary auth-submit-btn" type="submit">Đăng nhập vào sổ phòng</button>
+      </form>
+      <div class="auth-foot">
+        <span>Phiên đăng nhập tự động lưu an toàn 30 ngày</span>
+        <span id="auth-version-label"></span>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast -->
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="pms-core.js"></script>
+  <script src="supabase-config.js"></script>
+  <script src="pms-supabase.js"></script>
+  <script src="pms-client.js"></script>
   <script src="app.js"></script>
+  <script src="mobile.js"></script>
 </body>
 </html>

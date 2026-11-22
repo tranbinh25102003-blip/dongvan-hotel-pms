@@ -47,11 +47,10 @@
     computeMonthlyFinancials,
     generateCsvContent,
     generateAuditCsvContent,
-    runWithCrossTabLock,
-    createBookingStore
+    diffBookingChanges
   } = Core;
 
-  const store = createBookingStore(window.localStorage);
+  const store = window.pmsClient || window.PMSClient.createUnifiedClient();
 
   // Structured diagnostic ring-buffer logger
   const runtimeErrors = [];
@@ -754,12 +753,15 @@
         idempotencyKey: existingId ? undefined : state.activeIdempotencyKey
       };
 
-      const res = await runWithCrossTabLock(() => store.saveBooking(payload, saveOpts));
+      const res = await store.saveBooking(payload, saveOpts);
 
       if (!res.ok) {
         showFormError(res.error);
+        if (res.code === "CONFLICT_STALE_EDIT") {
+          showPcBookingConflict(res.currentBooking);
+        }
         if (res.code === "CONFLICT_STALE_EDIT" || res.code === "CONFLICT_OVERBOOKING" || res.code === "CONFLICT_CONCURRENT_WRITE") {
-          state.bookings = store.refreshLatest();
+          state.bookings = store.getBookings();
           renderAll();
         }
         return;
@@ -780,6 +782,7 @@
       renderAll();
       onDataMutated("save");
       showToast(res.isUpdate ? `Đã cập nhật phòng ${room.name} (đã sao lưu tự động)` : `Đã đặt phòng ${room.name} cho ${res.booking.guestName} (đã sao lưu tự động)`);
+      if (typeof store.notifyIdleCheck === "function") store.notifyIdleCheck();
     } finally {
       state.isSubmitting = false;
       $("btn-save-booking").disabled = false;
@@ -1068,7 +1071,7 @@
     }
     const reader = new FileReader();
     reader.onload = async () => {
-      const res = await runWithCrossTabLock(() => store.restoreFromImport(reader.result));
+      const res = await store.restoreFromImport(reader.result);
       if (!res.ok) {
         alert("Không thể khôi phục dữ liệu (dữ liệu hiện tại vẫn an toàn):\n" + res.error);
         return;
@@ -1362,21 +1365,221 @@
     }
   }
 
+  function updatePcSyncPill() {
+    const status = store.getStatus ? store.getStatus() : { mode: "local", connectionStatus: "local", lastSyncedAt: null };
+    const pill = $("pc-sync-status");
+    const txt = $("pc-sync-text");
+    if (!pill || !txt) return;
+    pill.classList.remove("offline", "reconnecting");
+    const t = status.lastSyncedAt ? formatTimestampVN(status.lastSyncedAt).slice(11) : "";
+    const ver = status.runningVersion && status.runningVersion.appVersion
+      ? `v${status.runningVersion.appVersion} (${status.runningVersion.buildId || ""})`
+      : "";
+    const staff = status.user && status.user.staffName ? ` • ${status.user.staffName}` : "";
+    pill.title = `Trạng thái đồng bộ dữ liệu${ver ? ` • ${ver}` : ""}${staff}`;
+    if (status.mode === "local") {
+      txt.textContent = "Offline cục bộ";
+    } else if (status.connectionStatus === "auth_required") {
+      pill.classList.add("offline");
+      txt.textContent = "Cần đăng nhập";
+    } else if (status.connectionStatus === "connected") {
+      txt.textContent = t ? `Đồng bộ ${t}` : "Đã đồng bộ";
+    } else if (status.connectionStatus === "reconnecting") {
+      pill.classList.add("reconnecting");
+      txt.textContent = "Đang nối lại...";
+    } else {
+      pill.classList.add("offline");
+      txt.textContent = t ? `Mất mạng (${t})` : "Mất mạng";
+    }
+
+    const logoutBtn = $("btn-pc-logout");
+    if (logoutBtn) {
+      logoutBtn.style.display = status.mode === "server" && status.authRequired && status.authenticated ? "" : "none";
+      if (status.user && status.user.staffName) {
+        logoutBtn.title = `Đăng xuất (${status.user.staffName})`;
+      }
+    }
+  }
+
+  function syncAuthOverlay(errorMessage) {
+    const overlay = $("auth-overlay");
+    if (!overlay || typeof store.getAuthState !== "function") return;
+    const auth = store.getAuthState();
+    const ver = store.getVersionInfo ? store.getVersionInfo() : {};
+    const verEl = $("auth-version-label");
+    if (verEl) {
+      verEl.textContent = ver.appVersion ? `v${ver.appVersion}${ver.buildId ? ` • ${ver.buildId}` : ""}` : "";
+    }
+
+    const staffSelect = $("auth-staff");
+    if (staffSelect && Array.isArray(auth.staffList) && auth.staffList.length > 0) {
+      const prev = staffSelect.value;
+      staffSelect.innerHTML = auth.staffList.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
+      if (prev && auth.staffList.includes(prev)) staffSelect.value = prev;
+    }
+
+    const errEl = $("auth-error");
+    if (errEl) {
+      if (errorMessage) {
+        errEl.textContent = errorMessage;
+        errEl.classList.add("show");
+      } else if (!auth.authConfigured) {
+        errEl.textContent = "Máy chủ chưa được cấu hình mật khẩu vận hành (PMS_AUTH_PASSCODE).";
+        errEl.classList.add("show");
+      } else {
+        errEl.textContent = "";
+        errEl.classList.remove("show");
+      }
+    }
+
+    const shouldShow = auth.authRequired && !auth.authenticated;
+    overlay.classList.toggle("open", shouldShow);
+  }
+
+  function syncAppUpdateBanner(type, pending) {
+    const banner = $("app-update-banner");
+    const txt = $("app-update-text");
+    if (!banner || !txt) return;
+    const ver = pending && pending.appVersion ? `v${pending.appVersion}` : "mới";
+    if (type === "update_applying") {
+      txt.textContent = `🔄 Đang cập nhật ứng dụng lên phiên bản ${ver}...`;
+      banner.classList.add("show");
+      $("btn-app-update-now").style.display = "none";
+    } else if (type === "update_pending" && pending) {
+      txt.textContent = `🔄 Đã có phiên bản mới (${ver}) — nội dung bạn đang nhập vẫn được giữ, sẽ tự cập nhật ngay sau khi lưu/đóng.`;
+      $("btn-app-update-now").style.display = "";
+      banner.classList.add("show");
+    } else {
+      banner.classList.remove("show");
+    }
+  }
+
+  function showPcBookingConflict(latestBooking) {
+    const banner = $("pc-edit-conflict-banner");
+    const textEl = $("pc-conflict-text");
+    if (!banner || !textEl) return;
+    if (!latestBooking) {
+      textEl.textContent = "⚠️ Đặt phòng này vừa bị xóa từ thiết bị khác. Nội dung bạn đang nhập vẫn được giữ lại để đối chiếu.";
+    } else {
+      textEl.textContent = `⚠️ Đặt phòng này vừa được cập nhật từ thiết bị khác (rev ${latestBooking.revision}, đã TT ${formatVND(latestBooking.paidAmount)} / ${formatVND(latestBooking.totalAmount)}). Nội dung bạn đang gõ vẫn được giữ nguyên.`;
+    }
+    banner.classList.add("show");
+  }
+
   /* -------------------- Event Binding & Boot -------------------- */
 
   function bindEvents() {
     bindDelegatedCalendarEvents();
 
-    // Cross-tab live sync
-    window.addEventListener("storage", (e) => {
-      if (e.key === Core.STORAGE_KEY) {
-        state.bookings = store.refreshLatest();
+    // Register PC busy check so live A -> B auto-updates NEVER interrupt an open booking/Dorm form
+    if (typeof store.registerBusyCheck === "function") {
+      store.registerBusyCheck(() =>
+        state.isSubmitting ||
+        $("booking-modal").classList.contains("open") ||
+        $("dorm-modal").classList.contains("open")
+      );
+    }
+
+    // Unified Login Overlay & Update Banner handlers (shared by PC and Mobile)
+    $("auth-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = $("auth-submit");
+      const staffName = $("auth-staff").value;
+      const passcode = $("auth-passcode").value;
+      btn.disabled = true;
+      btn.textContent = "Đang xác thực...";
+      try {
+        const res = await store.login(staffName, passcode);
+        if (!res.ok) {
+          syncAuthOverlay(res.error || "Đăng nhập thất bại.");
+          return;
+        }
+        $("auth-passcode").value = "";
+        syncAuthOverlay("");
+        state.bookings = res.bookings || store.getBookings() || [];
         renderAll();
+        updateAutoBackupUI();
+        updatePcSyncPill();
+        showToast(`Xin chào ${res.user.staffName} — đã kết nối sổ đặt phòng!`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Đăng nhập vào sổ phòng";
+      }
+    });
+
+    $("btn-pc-logout").addEventListener("click", async () => {
+      if (!confirm("Đăng xuất tài khoản lễ tân trên thiết bị này?")) return;
+      await store.logout();
+      syncAuthOverlay("");
+      updatePcSyncPill();
+    });
+
+    $("btn-app-update-now").addEventListener("click", () => {
+      if (typeof store.applyPendingUpdateNow === "function") {
+        store.applyPendingUpdateNow();
+      }
+    });
+
+    // Realtime bidirectional sync from shared SQLite/SSE server or cross-tab storage
+    if (typeof store.subscribe === "function") {
+      store.subscribe((ev) => {
+        const { type, state: snap } = ev;
+        updatePcSyncPill();
+        if (type === "auth_required") {
+          syncAuthOverlay(ev.error || "");
+          return;
+        }
+        if (type === "auth_login") {
+          syncAuthOverlay("");
+        }
+        if (type === "update_pending" || type === "update_applying") {
+          syncAppUpdateBanner(type, ev.pendingUpdate);
+          return;
+        }
+        if (type === "version") {
+          syncAuthOverlay("");
+          return;
+        }
+        if (type === "status" || !snap) return;
+        state.bookings = snap.bookings || [];
+
+        if (type === "remote_change") {
+          const openBkId = $("booking-modal").classList.contains("open") ? $("field-booking-id").value : "";
+          if (openBkId) {
+            const latest = state.bookings.find((b) => b.id === openBkId);
+            if (!latest || Number(latest.revision) !== Number(state.editingBookingRevision)) {
+              showPcBookingConflict(latest);
+            }
+          }
+          const openDormId = ($("dorm-modal").classList.contains("open") && $("dorm-slot-form").style.display !== "none") ? $("dorm-field-id").value : "";
+          if (openDormId) {
+            const latestDorm = state.bookings.find((b) => b.id === openDormId);
+            if (!latestDorm || Number(latestDorm.revision) !== Number(state.editingDormRevision)) {
+              $("pc-dorm-conflict-banner").classList.add("show");
+            }
+          }
+        }
+
+        renderAll();
+        updateAutoBackupUI();
         if ($("dorm-modal").classList.contains("open") && $("dorm-board-view").style.display !== "none") {
           renderDormBoard();
         }
-        showToast("Đã đồng bộ dữ liệu mới từ cửa sổ khác");
-      }
+        if ($("history-modal").classList.contains("open")) {
+          renderHistoryModal();
+        }
+      });
+    }
+
+    $("btn-pc-reload-latest").addEventListener("click", () => {
+      const id = $("field-booking-id").value;
+      $("pc-edit-conflict-banner").classList.remove("show");
+      if (id) openBookingModal({ bookingId: id });
+    });
+    $("btn-pc-dorm-reload-latest").addEventListener("click", () => {
+      const id = $("dorm-field-id").value;
+      $("pc-dorm-conflict-banner").classList.remove("show");
+      if (id) openDormSlotForm({ bookingId: id });
     });
 
     // Global error boundary
@@ -1422,7 +1625,7 @@
       if (restoreBtn) {
         const snapId = restoreBtn.dataset.restoreSnap;
         if (!confirm("Khôi phục toàn bộ bảng đặt phòng về đúng trạng thái tại mốc lịch sử này? (Trạng thái hiện tại sẽ tự động được sao lưu trước khi khôi phục)")) return;
-        const res = await runWithCrossTabLock(() => store.restoreFromAutoBackup(snapId));
+        const res = await store.restoreFromAutoBackup(snapId);
         if (!res.ok) return alert(res.error);
         state.bookings = res.bookings;
         renderAll();
@@ -1472,9 +1675,10 @@
       const id = $("field-booking-id").value;
       const bk = state.bookings.find((b) => b.id === id);
       if (!bk || !confirm(`Xác nhận xóa đặt phòng của "${bk.guestName}" tại phòng ${getRoomById(bk.roomId)?.name || bk.roomId}?`)) return;
-      const res = await runWithCrossTabLock(() => store.deleteBooking(id, { expectedRevision: state.editingBookingRevision }));
+      const res = await store.deleteBooking(id, { expectedRevision: state.editingBookingRevision });
       if (!res.ok) return showFormError(res.error);
       state.bookings = res.bookings;
+      $("pc-edit-conflict-banner").classList.remove("show");
       $("booking-modal").classList.remove("open");
       renderAll();
       onDataMutated("delete");
@@ -1530,9 +1734,10 @@
       const id = $("dorm-field-id").value;
       const bk = state.bookings.find((b) => b.id === id);
       if (!bk || !confirm(`Xóa lượt đặt Dorm của "${bk.guestName}" (Slot ${(bk.slots || []).join(", ")})?`)) return;
-      const res = await runWithCrossTabLock(() => store.deleteBooking(id, { expectedRevision: state.editingDormRevision }));
+      const res = await store.deleteBooking(id, { expectedRevision: state.editingDormRevision });
       if (!res.ok) return showDormError(res.error);
       state.bookings = res.bookings;
+      $("pc-dorm-conflict-banner").classList.remove("show");
       setDormModalMode("board");
       renderDormBoard();
       renderAll();
@@ -1579,12 +1784,15 @@
           idempotencyKey: existingId ? undefined : state.activeDormIdempotencyKey
         };
 
-        const res = await runWithCrossTabLock(() => store.saveBooking(payload, saveOpts));
+        const res = await store.saveBooking(payload, saveOpts);
 
         if (!res.ok) {
           showDormError(res.error);
+          if (res.code === "CONFLICT_STALE_EDIT") {
+            $("pc-dorm-conflict-banner").classList.add("show");
+          }
           if (res.code === "CONFLICT_STALE_EDIT" || res.code === "CONFLICT_OVERBOOKING" || res.code === "CONFLICT_CONCURRENT_WRITE") {
-            state.bookings = store.refreshLatest();
+            state.bookings = store.getBookings();
             renderDormSlotPicker();
             renderAll();
           }
@@ -1593,6 +1801,7 @@
 
         state.bookings = res.bookings;
         state.activeDormDate = res.booking.checkin;
+        $("pc-dorm-conflict-banner").classList.remove("show");
         setDormModalMode("board");
         renderDormBoard();
         renderAll();
@@ -1604,7 +1813,12 @@
       }
     });
 
-    const closeModal = (id) => $(id).classList.remove("open");
+    const closeModal = (id) => {
+      $(id).classList.remove("open");
+      if (id === "booking-modal") $("pc-edit-conflict-banner").classList.remove("show");
+      if (id === "dorm-modal") $("pc-dorm-conflict-banner").classList.remove("show");
+      if (typeof store.notifyIdleCheck === "function") store.notifyIdleCheck();
+    };
     $("btn-close-modal").onclick = $("btn-cancel-modal").onclick = () => { clearDraft(); closeModal("booking-modal"); };
     $("booking-modal").addEventListener("click", (e) => { if (e.target === $("booking-modal")) closeModal("booking-modal"); });
     $("btn-close-dorm").onclick = $("btn-close-dorm-2").onclick = () => closeModal("dorm-modal");
@@ -1616,7 +1830,7 @@
 
     const doRollbackLast = async (modalToClose) => {
       if (!confirm("Hoàn tác dữ liệu về trạng thái ngay trước thay đổi gần nhất?")) return;
-      const res = await runWithCrossTabLock(() => store.rollbackLastChange());
+      const res = await store.rollbackLastChange();
       if (!res.ok) return alert(res.error);
       state.bookings = res.bookings;
       if (modalToClose) closeModal(modalToClose);
@@ -1630,7 +1844,7 @@
 
     $("btn-reset-sample").onclick = async () => {
       if (!confirm("Khôi phục lại danh sách đặt phòng mẫu ban đầu? (Hệ thống tự lưu bản dự phòng trước khi đặt lại)")) return;
-      const res = await runWithCrossTabLock(() => store.resetToSample());
+      const res = await store.resetToSample();
       if (!res.ok) return alert(res.error);
       state.bookings = res.bookings;
       closeModal("day-report-modal");
@@ -1655,59 +1869,41 @@
     if (!("serviceWorker" in navigator)) return;
     if (window.location.protocol !== "https:" && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") return;
 
-    let pendingReload = false;
-    let refreshing = false;
-
-    const isEditingModalOpen = () =>
-      $("booking-modal").classList.contains("open") ||
-      $("dorm-modal").classList.contains("open");
-
-    const triggerSafeReload = () => {
-      if (refreshing) return;
-      if (isEditingModalOpen()) {
-        pendingReload = true;
-        showToast("Đã có bản cập nhật mới — đóng khung nhập sẽ tự động cập nhật!");
-        return;
-      }
-      refreshing = true;
-      showToast("Đang cập nhật phiên bản mới nhất...");
-      setTimeout(() => window.location.reload(), 650);
-    };
-
-    navigator.serviceWorker.addEventListener("controllerchange", triggerSafeReload);
-
-    // If an update arrived while user was typing in a modal, apply smoothly once modal closes
-    setInterval(() => {
-      if (pendingReload && !isEditingModalOpen()) {
-        pendingReload = false;
-        triggerSafeReload();
-      }
-    }, 2000);
-
-    navigator.serviceWorker.register("./sw.js").then((reg) => {
-      const checkUpdate = () => reg.update().catch(() => {});
-      setInterval(checkUpdate, 5 * 60 * 1000);
+    navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" }).then((reg) => {
+      const checkUpdate = () => {
+        reg.update().catch(() => {});
+        if (typeof store.checkAppVersion === "function") store.checkAppVersion();
+      };
+      setInterval(checkUpdate, 2 * 60 * 1000);
       document.addEventListener("visibilitychange", () => {
         if (!document.hidden) checkUpdate();
       });
     }).catch(() => {});
   }
 
-  function boot() {
+  async function boot() {
     initTheme();
     initRoomDropdown();
     initConfirmersDropdown();
     initPlatformChips();
-    const loadRes = store.load();
-    state.bookings = loadRes.bookings || [];
     bindEvents();
+
+    if (!window.__pmsClientInitPromise) {
+      window.__pmsClientInitPromise = store.init();
+    }
+    const loadRes = await window.__pmsClientInitPromise;
+    state.bookings = (loadRes && loadRes.bookings) || store.getBookings() || [];
     renderAll();
     updateAutoBackupUI();
+    updatePcSyncPill();
+    syncAuthOverlay("");
     registerAutoUpdateServiceWorker();
-    if (!loadRes.ok) {
+    if (loadRes && !loadRes.ok && !loadRes.offline) {
       alert("CẢNH BÁO AN TOÀN DỮ LIỆU:\n" + loadRes.error);
       showToast("Lỗi bộ nhớ trình duyệt — đã khóa ghi để bảo vệ dữ liệu gốc!");
-    } else if (loadRes.recoveredFromBackup) {
+    } else if (loadRes && loadRes.offline) {
+      showToast("Đang mất kết nối tới máy chủ khách sạn — chờ kết nối lại.");
+    } else if (loadRes && loadRes.recoveredFromBackup) {
       showToast("Phát hiện lỗi bộ nhớ — đã tự động khôi phục từ bản dự phòng!");
     }
     setTimeout(() => scrollToToday(false), 60);

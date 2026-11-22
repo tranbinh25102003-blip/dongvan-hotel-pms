@@ -1,16 +1,23 @@
 /* ==========================================================================
-   Dongvan Ville du H'mong Hotel PMS — Auto-Updating Offline Service Worker
-   Strategy: Network-First for instant updates whenever online, falling back
-   seamlessly to local cache whenever Internet is unavailable.
+   Dongvan Hotel PMS — Auto-Updating Service Worker (sw.js)
+   - Works identically on root HTTPS domains and GitHub Pages subpaths (./)
+   - Strictly bypasses all /api/* and version.json requests
+   - Network-First with cache: "no-store" + CLEAR_APP_CACHE message handling
+     so existing home-screen icons ALWAYS load the newest deployed version.
    ========================================================================== */
 
-const CACHE_NAME = "dongvan-pms-app-v1";
+const CACHE_NAME = "dongvan-hotel-shell-v5";
 const PRECACHE_URLS = [
   "./",
   "./index.html",
   "./styles.css",
+  "./mobile.css",
   "./pms-core.js",
+  "./supabase-config.js",
+  "./pms-supabase.js",
+  "./pms-client.js",
   "./app.js",
+  "./mobile.js",
   "./logo.jpg",
   "./icon-192.png",
   "./icon-512.png",
@@ -20,7 +27,11 @@ const PRECACHE_URLS = [
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(PRECACHE_URLS))
+      .then((cache) => Promise.all(
+        PRECACHE_URLS.map((u) => fetch(u, { cache: "no-store" })
+          .then((res) => (res && res.ok ? cache.put(u, res) : null))
+          .catch(() => null))
+      ))
       .then(() => self.skipWaiting())
   );
 });
@@ -33,12 +44,25 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+self.addEventListener("message", (event) => {
+  const data = event && event.data ? event.data : {};
+  if (data.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  } else if (data.type === "CLEAR_APP_CACHE") {
+    event.waitUntil(
+      caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+    );
+  }
+});
+
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   const reqUrl = new URL(event.request.url);
   if (reqUrl.origin !== self.location.origin) return;
+  // Never intercept or cache API calls, auth endpoints, version checks, or SSE streams
+  if (reqUrl.pathname.startsWith("/api/") || reqUrl.pathname.endsWith("/version.json")) return;
 
-  // Network-first: always get newest deployed version when online; fallback to cache offline
+  // Network-first with no-store: always pick up newly deployed version immediately when online
   event.respondWith(
     fetch(event.request, { cache: "no-store" })
       .then((networkRes) => {
@@ -48,6 +72,6 @@ self.addEventListener("fetch", (event) => {
         }
         return networkRes;
       })
-      .catch(() => caches.match(event.request).then((cached) => cached || caches.match("./index.html")))
+      .catch(() => caches.match(event.request).then((cached) => cached || caches.match("./") || caches.match("./index.html")))
   );
 });

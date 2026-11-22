@@ -1,0 +1,1096 @@
+/* ==========================================================================
+   Dongvan Ville du H'mong Hotel PMS — Dedicated Mobile Front Desk UI (mobile.css)
+   Purpose-built for 360px / 390px / 430px smartphones.
+   Never shrinks the PC monthly table; uses floor-grouped room cards,
+   2-column Dorm 8-slot grid, 4-tab bottom nav, and full-screen touch forms.
+   ========================================================================== */
+
+/* Desktop default: hide mobile shell completely */
+#mobile-shell {
+  display: none;
+}
+
+/* Mobile activation: <= 768px (unless forced PC) OR explicit ?view=mobile */
+@media (max-width: 768px) {
+  body:not([data-view-mode="pc"]) .app-shell,
+  body:not([data-view-mode="pc"]) #cell-tooltip {
+    display: none !important;
+  }
+  body:not([data-view-mode="pc"]) #mobile-shell {
+    display: flex;
+  }
+}
+
+body[data-view-mode="mobile"] .app-shell,
+body[data-view-mode="mobile"] #cell-tooltip {
+  display: none !important;
+}
+body[data-view-mode="mobile"] #mobile-shell {
+  display: flex;
+}
+
+/* PC Sync Status Pill & Conflict Banner */
+.pc-sync-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.pc-sync-pill .sync-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #10b981;
+  flex-shrink: 0;
+}
+.pc-sync-pill.offline {
+  background: rgba(220, 38, 38, 0.12);
+  border-color: rgba(220, 38, 38, 0.35);
+  color: #b91c1c;
+}
+.pc-sync-pill.offline .sync-dot { background: #dc2626; }
+.pc-sync-pill.reconnecting {
+  background: rgba(217, 119, 6, 0.14);
+  border-color: rgba(217, 119, 6, 0.35);
+  color: #b45309;
+}
+.pc-sync-pill.reconnecting .sync-dot { background: #d97706; }
+
+.conflict-banner {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1.5px solid #d97706;
+  background: rgba(245, 158, 11, 0.14);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.conflict-banner.show {
+  display: flex;
+}
+.conflict-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* -------------------- Mobile Shell Layout -------------------- */
+#mobile-shell {
+  flex-direction: column;
+  width: 100%;
+  max-width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  position: relative;
+}
+
+#mobile-shell *,
+#mobile-shell *::before,
+#mobile-shell *::after {
+  box-sizing: border-box;
+}
+
+/* Top App Bar */
+.m-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  padding-top: max(8px, env(safe-area-inset-top));
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+  min-height: 54px;
+}
+
+.m-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.m-brand-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.m-brand-text {
+  min-width: 0;
+}
+
+.m-brand-title {
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.m-brand-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.m-sync-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(5, 150, 105, 0.12);
+  color: #047857;
+  border: 1px solid rgba(5, 150, 105, 0.25);
+  flex-shrink: 0;
+  max-width: 150px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+[data-theme="dark"] .m-sync-chip { color: #6ee7b7; }
+.m-sync-chip .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #10b981;
+  flex-shrink: 0;
+}
+.m-sync-chip.offline {
+  background: rgba(220, 38, 38, 0.14);
+  color: #b91c1c;
+  border-color: rgba(220, 38, 38, 0.35);
+}
+[data-theme="dark"] .m-sync-chip.offline { color: #fca5a5; }
+.m-sync-chip.offline .dot { background: #dc2626; }
+.m-sync-chip.reconnecting {
+  background: rgba(217, 119, 6, 0.15);
+  color: #b45309;
+  border-color: rgba(217, 119, 6, 0.35);
+}
+.m-sync-chip.reconnecting .dot { background: #d97706; }
+
+/* Offline Sticky Alert Banner */
+.m-offline-banner {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #fef2f2;
+  border-bottom: 1px solid #fecaca;
+  color: #991b1b;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+[data-theme="dark"] .m-offline-banner {
+  background: rgba(220, 38, 38, 0.2);
+  border-bottom-color: rgba(220, 38, 38, 0.4);
+  color: #fecaca;
+}
+.m-offline-banner.show {
+  display: flex;
+}
+
+/* Main Scrollable Body */
+.m-main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding: 10px 12px 18px;
+}
+
+.m-tab-view {
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+.m-tab-view.active {
+  display: flex;
+}
+
+/* Date Control Bar */
+.m-date-bar {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 44px auto;
+  gap: 6px;
+  align-items: center;
+  background: var(--bg-surface);
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+}
+
+.m-date-btn {
+  min-height: 44px;
+  min-width: 44px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.m-date-picker-wrap {
+  position: relative;
+  min-height: 44px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-page);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 6px;
+  overflow: hidden;
+}
+
+.m-date-label-main {
+  font-size: 13.5px;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.m-date-label-sub {
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.m-date-native {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+  font-size: 16px;
+}
+
+.m-today-btn {
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--accent-primary);
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--accent-primary);
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* Quick Stats 2x2 Grid */
+.m-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.m-stat-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.m-stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.m-stat-val {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.m-stat-val.ok { color: var(--status-paid); }
+.m-stat-val.warn { color: var(--status-unpaid); }
+
+/* Range Availability Finder Card */
+.m-range-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.m-range-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.m-range-toggle {
+  min-height: 40px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.m-range-body {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-subtle);
+}
+.m-range-body.open {
+  display: flex;
+}
+
+.m-range-inputs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.m-range-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Search & Filter Bar */
+.m-search-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.m-input,
+.m-select,
+.m-textarea {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 16px; /* Prevents iOS Safari auto-zoom */
+  font-family: inherit;
+}
+
+.m-textarea {
+  min-height: 84px;
+  resize: vertical;
+}
+
+.m-filter-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.m-filter-btn.has-filter {
+  border-color: var(--accent-primary);
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--accent-primary);
+}
+
+.m-filter-drawer {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+}
+.m-filter-drawer.open {
+  display: flex;
+}
+
+.m-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+/* Floor Groups & Room Cards */
+.m-floor-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.m-floor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--bg-subtle);
+  font-size: 12.5px;
+  font-weight: 800;
+  color: var(--text-secondary);
+}
+
+.m-room-card {
+  background: var(--bg-surface);
+  border: 1.5px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 11px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+}
+.m-room-card.vacant {
+  border-left: 4px solid #10b981;
+}
+.m-room-card.occupied {
+  border-left: 4px solid #2563eb;
+}
+.m-room-card.turnover {
+  border-left: 4px solid #d97706;
+}
+.m-room-card.dorm-card {
+  border-left: 4px solid #7c3aed;
+}
+
+.m-room-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.m-room-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.m-room-num {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.m-room-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.m-status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.m-status-pill.vacant { background: rgba(16, 185, 129, 0.14); color: #047857; }
+.m-status-pill.occupied { background: rgba(37, 99, 235, 0.14); color: #1d4ed8; }
+.m-status-pill.turnover { background: rgba(217, 119, 6, 0.16); color: #b45309; }
+.m-status-pill.full { background: rgba(220, 38, 38, 0.14); color: #b91c1c; }
+[data-theme="dark"] .m-status-pill.vacant { color: #6ee7b7; }
+[data-theme="dark"] .m-status-pill.occupied { color: #93c5fd; }
+[data-theme="dark"] .m-status-pill.turnover { color: #fcd34d; }
+[data-theme="dark"] .m-status-pill.full { color: #fca5a5; }
+
+/* Booking Turn Block inside Room Card */
+.m-turn-box {
+  background: var(--bg-page);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  cursor: pointer;
+}
+.m-turn-box.checkout-turn {
+  border-left: 3px solid #d97706;
+  background: rgba(245, 158, 11, 0.06);
+}
+.m-turn-box.checkin-turn {
+  border-left: 3px solid #2563eb;
+  background: rgba(37, 99, 235, 0.06);
+}
+
+.m-turn-label {
+  font-size: 10.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+.m-turn-box.checkout-turn .m-turn-label { color: #b45309; }
+.m-turn-box.checkin-turn .m-turn-label { color: #1d4ed8; }
+[data-theme="dark"] .m-turn-box.checkout-turn .m-turn-label { color: #fcd34d; }
+[data-theme="dark"] .m-turn-box.checkin-turn .m-turn-label { color: #93c5fd; }
+
+.m-guest-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.m-guest-name {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-badges-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.m-channel-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+}
+.m-channel-tag.ch-booking { background: var(--ch-booking-bg); color: var(--ch-booking-fg); }
+.m-channel-tag.ch-agoda { background: var(--ch-agoda-bg); color: var(--ch-agoda-fg); }
+.m-channel-tag.ch-airbnb { background: var(--ch-airbnb-bg); color: var(--ch-airbnb-fg); }
+.m-channel-tag.ch-walkin { background: var(--ch-walkin-bg); color: var(--ch-walkin-fg); }
+.m-channel-tag.ch-tour { background: var(--ch-tour-bg); color: var(--ch-tour-fg); }
+.m-channel-tag.ch-zalo { background: var(--ch-zalo-bg); color: var(--ch-zalo-fg); }
+.m-channel-tag.ch-other { background: var(--ch-other-bg); color: var(--ch-other-fg); }
+
+/* Vivid red G badge matching PC invariant #dc2626 */
+.m-badge-g {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: #dc2626;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.m-badge-eb {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(217, 119, 6, 0.18);
+  color: #b45309;
+  font-size: 11px;
+  font-weight: 800;
+}
+[data-theme="dark"] .m-badge-eb { color: #fcd34d; }
+
+.m-pay-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+
+.m-pay-pill {
+  font-weight: 800;
+  font-size: 12px;
+}
+.m-pay-pill.paid { color: var(--status-paid); }
+.m-pay-pill.deposit { color: #b45309; }
+.m-pay-pill.unpaid { color: var(--status-unpaid); }
+[data-theme="dark"] .m-pay-pill.deposit { color: #fcd34d; }
+
+.m-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.m-btn {
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.m-btn-primary {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: #ffffff;
+}
+.m-btn-success {
+  background: rgba(5, 150, 105, 0.14);
+  border-color: rgba(5, 150, 105, 0.35);
+  color: #047857;
+}
+[data-theme="dark"] .m-btn-success { color: #6ee7b7; }
+.m-btn-danger {
+  background: rgba(220, 38, 38, 0.12);
+  border-color: rgba(220, 38, 38, 0.35);
+  color: #dc2626;
+}
+.m-btn-block {
+  width: 100%;
+  flex: 1;
+}
+.m-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Bottom Navigation Bar (4 Main Tabs) */
+.m-bottom-nav {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-subtle);
+  padding: 4px 4px max(6px, env(safe-area-inset-bottom));
+  flex-shrink: 0;
+  z-index: 40;
+}
+
+.m-nav-item {
+  min-height: 50px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.m-nav-item .m-nav-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+.m-nav-item.active {
+  color: var(--accent-primary);
+  background: rgba(37, 99, 235, 0.1);
+}
+
+/* Full-Screen Mobile Sheets / Overlays */
+.m-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: var(--bg-page);
+  display: none;
+  flex-direction: column;
+  width: 100%;
+  max-width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+.m-sheet.open {
+  display: flex;
+}
+
+.m-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  padding-top: max(10px, env(safe-area-inset-top));
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.m-sheet-title {
+  font-size: 16px;
+  font-weight: 800;
+  margin: 0;
+  line-height: 1.2;
+}
+.m-sheet-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.m-sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.m-sheet-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+/* Form Groups inside Full-Screen Mobile Form */
+.m-form-group {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.m-group-title {
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.m-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.m-field label {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.m-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.m-chip-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.m-chip {
+  min-height: 40px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.m-chip.active {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: #ffffff;
+}
+
+.m-pay-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.m-pay-tab {
+  min-height: 44px;
+  padding: 4px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  cursor: pointer;
+}
+.m-pay-tab.active {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: #ffffff;
+}
+
+.m-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 0;
+}
+.m-toggle-row input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+  accent-color: #dc2626;
+}
+.m-toggle-row.disabled {
+  opacity: 0.45;
+}
+
+.m-form-error {
+  display: none;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(220, 38, 38, 0.12);
+  border: 1px solid rgba(220, 38, 38, 0.4);
+  color: #b91c1c;
+  font-size: 13px;
+  font-weight: 700;
+}
+[data-theme="dark"] .m-form-error { color: #fca5a5; }
+.m-form-error.show {
+  display: block;
+}
+
+/* Per-Room Mini Month Calendar (7-col compact grid — zero horizontal scroll) */
+.m-room-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.m-cal-dow {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  padding: 4px 0;
+}
+
+.m-cal-day {
+  min-height: 44px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 2px;
+}
+.m-cal-day.empty {
+  border: none;
+  background: transparent;
+  cursor: default;
+}
+.m-cal-day.today {
+  border-color: var(--accent-primary);
+  box-shadow: inset 0 0 0 1px var(--accent-primary);
+}
+.m-cal-day.booked {
+  background: rgba(37, 99, 235, 0.16);
+  border-color: rgba(37, 99, 235, 0.4);
+  color: #1d4ed8;
+}
+[data-theme="dark"] .m-cal-day.booked { color: #93c5fd; }
+.m-cal-day.turnover {
+  background: rgba(217, 119, 6, 0.18);
+  border-color: rgba(217, 119, 6, 0.5);
+  color: #b45309;
+}
+.m-cal-day-dot {
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+/* Dorm 8-Slot 2-Column Grid */
+.m-dorm-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.m-dorm-slot {
+  min-height: 76px;
+  border-radius: 10px;
+  border: 1.5px solid var(--border-subtle);
+  background: var(--bg-surface);
+  padding: 9px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 4px;
+  text-align: left;
+  cursor: pointer;
+}
+.m-dorm-slot.free {
+  border-color: rgba(16, 185, 129, 0.45);
+  background: rgba(16, 185, 129, 0.06);
+}
+.m-dorm-slot.occupied {
+  border-color: rgba(124, 58, 237, 0.45);
+  background: rgba(124, 58, 237, 0.08);
+}
+.m-dorm-slot.selected {
+  border-color: var(--accent-primary);
+  background: rgba(37, 99, 235, 0.15);
+  box-shadow: inset 0 0 0 1px var(--accent-primary);
+}
+.m-dorm-slot.conflict {
+  border-color: rgba(220, 38, 38, 0.5);
+  background: rgba(220, 38, 38, 0.1);
+  opacity: 0.78;
+  cursor: not-allowed;
+}
+
+/* More Tab Action Menu */
+.m-menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.m-menu-item {
+  min-height: 52px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+.m-menu-sub {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  display: block;
+}
+
+/* Mobile Booking List & Report Cards */
+.m-section-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.m-section-card h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.m-kv-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--border-subtle);
+}
+.m-kv-row:last-child { border-bottom: none; }
