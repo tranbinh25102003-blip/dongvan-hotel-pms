@@ -433,12 +433,16 @@
 
           <div id="m-bk-error" class="m-form-error" role="alert"></div>
 
-          <!-- Group 1: Room & Dates -->
+          <!-- Group 1: Booking Date & Stay Dates -->
           <div class="m-form-group">
-            <h3 class="m-group-title">1. Phòng &amp; Ngày lưu trú</h3>
-            <div class="m-field">
-              <label for="m-f-room">Phòng (26 phòng khách)</label>
+            <h3 class="m-group-title">1. Ngày đặt &amp; Ngày lưu trú</h3>
+            <div id="m-wrap-room" class="m-field" style="display:none;">
+              <label for="m-f-room">Chọn phòng (26 phòng khách)</label>
               <select id="m-f-room" class="m-select"></select>
+            </div>
+            <div class="m-field">
+              <label for="m-f-booking-date">Ngày đặt phòng</label>
+              <input id="m-f-booking-date" class="m-input" type="date" required />
             </div>
             <div class="m-grid-2">
               <div class="m-field">
@@ -642,7 +646,11 @@
           <div id="m-dorm-error" class="m-form-error" role="alert"></div>
 
           <div class="m-form-group">
-            <h3 class="m-group-title">1. Ngày &amp; Chọn slot giường tầng</h3>
+            <h3 class="m-group-title">1. Ngày đặt &amp; Chọn slot giường tầng</h3>
+            <div class="m-field">
+              <label for="m-df-booking-date">Ngày đặt phòng</label>
+              <input id="m-df-booking-date" class="m-input" type="date" required />
+            </div>
             <div class="m-grid-2">
               <div class="m-field">
                 <label for="m-df-checkin">Ngày nhận *</label>
@@ -967,7 +975,7 @@
         : effRem === 0
           ? `✓ Đã TT đủ cả đoàn (${formatShortVND(gTotal)})`
           : gPaid > 0
-            ? `Đoàn cọc ${formatShortVND(gPaid)} • Còn nợ ${formatShortVND(effRem)}`
+            ? `Còn thiếu cả đoàn ${formatShortVND(effRem)}`
             : `Chưa TT • Nợ đoàn ${formatShortVND(gTotal)}`;
     } else {
       effRem = getRemaining(bk);
@@ -977,9 +985,9 @@
       payText = total === 0
         ? "Chưa nhập giá"
         : effRem === 0
-          ? `✓ Đã thu đủ ${formatShortVND(total)}`
+          ? `✓ Đã TT đủ (${formatShortVND(total)})`
           : paid > 0
-            ? `Cọc ${formatShortVND(paid)} • Nợ ${formatShortVND(effRem)}`
+            ? `Còn thiếu ${formatShortVND(effRem)}`
             : `Chưa TT • Nợ ${formatShortVND(total)}`;
     }
 
@@ -1456,6 +1464,7 @@
     try {
       sessionStorage.setItem(MOBILE_DRAFT_KEY, JSON.stringify({
         roomId: $("m-f-room").value,
+        bookingDate: $("m-f-booking-date").value,
         checkin: $("m-f-checkin").value,
         checkout: $("m-f-checkout").value,
         channelKey: mState.bookingChannelKey,
@@ -1715,7 +1724,7 @@
     }
   }
 
-  function openMobileBookingSheet({ bookingId = null, roomId = "101", checkin = mState.selectedDate, checkout = null, prefill = null } = {}) {
+  function openMobileBookingSheet({ bookingId = null, roomId = "101", checkin = mState.selectedDate, checkout = null, prefill = null, allowRoomSelect = false } = {}) {
     mState.savedScrollTop = $("m-main").scrollTop;
     showMobileBookingError("");
     mState.bookingConflictBooking = null;
@@ -1729,6 +1738,7 @@
     }
 
     mState.bookingIdempotencyKey = newIdemKey("mbk");
+    $("m-wrap-room").style.display = (allowRoomSelect && !existing) ? "flex" : "none";
 
     if (existing) {
       mState.editingBookingId = existing.id;
@@ -1739,6 +1749,7 @@
       };
       $("m-bk-sheet-title").textContent = `Sửa đơn — P.${getRoomById(existing.roomId)?.name || existing.roomId}`;
       $("m-f-room").value = existing.roomId;
+      $("m-f-booking-date").value = existing.bookingDate || (typeof existing.createdAt === "string" && existing.createdAt.length >= 10 ? existing.createdAt.slice(0, 10) : getTodayISO());
       $("m-f-checkin").value = existing.checkin;
       $("m-f-checkout").value = existing.checkout;
       const chKey = existing.channelKey || detectChannelKey(existing.sourceName);
@@ -1771,6 +1782,7 @@
       const draft = prefill || loadMobileDraftFor(room.id, checkin);
       $("m-bk-sheet-title").textContent = prefill ? `Dán phòng — P.${room.name}` : `Đặt phòng mới — P.${room.name}`;
       $("m-f-room").value = room.id;
+      $("m-f-booking-date").value = (draft && draft.bookingDate) || getTodayISO();
       $("m-f-checkin").value = (prefill && prefill.checkin) || checkin;
       $("m-f-checkout").value = (draft && draft.checkout) || checkout || addDaysISO(checkin, 1);
       const chKey = (draft && draft.channelKey) || "booking";
@@ -1836,6 +1848,7 @@
     return {
       id: mState.editingBookingId || undefined,
       roomId: $("m-f-room").value || ROOMS[0].id,
+      bookingDate: $("m-f-booking-date").value || getTodayISO(),
       checkin,
       checkout,
       channelKey: chKey,
@@ -1873,6 +1886,7 @@
     return {
       id: mState.editingDormId || undefined,
       roomId: "DORM",
+      bookingDate: $("m-df-booking-date").value || getTodayISO(),
       checkin,
       checkout,
       channelKey: chKey,
@@ -1923,6 +1937,7 @@
       const payload = {
         id: existingId,
         roomId: $("m-f-room").value,
+        bookingDate: $("m-f-booking-date").value || getTodayISO(),
         checkin: $("m-f-checkin").value,
         checkout: $("m-f-checkout").value,
         channelKey: chKey,
@@ -2144,6 +2159,7 @@
       mState.editingDormId = ex.id;
       mState.editingDormRevision = Number(ex.revision) || 1;
       mState.dormDate = ex.checkin;
+      $("m-df-booking-date").value = ex.bookingDate || (typeof ex.createdAt === "string" && ex.createdAt.length >= 10 ? ex.createdAt.slice(0, 10) : getTodayISO());
       $("m-df-checkin").value = ex.checkin;
       $("m-df-checkout").value = ex.checkout;
       mState.dormSelectedSlots = [...(ex.slots || [1])];
@@ -2164,6 +2180,7 @@
       mState.editingDormRevision = null;
       const ci = mState.dormDate;
       const co = mState.rangeActive ? mState.rangeCheckout : addDaysISO(ci, 1);
+      $("m-df-booking-date").value = getTodayISO();
       $("m-df-checkin").value = ci;
       $("m-df-checkout").value = co;
       const occ = getDormOccupiedSlotsInRange(getBookings(), ci, co, null);
@@ -2209,6 +2226,7 @@
       const res = await client.saveBooking({
         id: mState.editingDormId || undefined,
         roomId: "DORM",
+        bookingDate: $("m-df-booking-date").value || getTodayISO(),
         checkin: $("m-df-checkin").value,
         checkout: $("m-df-checkout").value,
         channelKey: chKey,
@@ -2472,7 +2490,7 @@
     });
 
     // Bookings tab controls
-    $("m-btn-quick-new-booking").addEventListener("click", () => openMobileBookingSheet({ roomId: "101", checkin: mState.selectedDate }));
+    $("m-btn-quick-new-booking").addEventListener("click", () => openMobileBookingSheet({ roomId: "101", checkin: mState.selectedDate, allowRoomSelect: true }));
     $("m-btn-quick-dorm").addEventListener("click", () => openDormSheet(mState.selectedDate));
     $("m-bk-search").addEventListener("input", (e) => { mState.bookingsSearch = e.target.value; renderBookingsTab(); });
     $("m-bk-channel").addEventListener("change", (e) => { mState.bookingsChannel = e.target.value; renderBookingsTab(); });
@@ -2527,7 +2545,13 @@
       const bk = getBookings().find((b) => b.id === mState.editingBookingId);
       if (bk) copyMobileBooking(bk);
     });
-    $("m-f-room").addEventListener("change", () => { updateMobileRoomFields(); saveMobileDraft(); });
+    $("m-f-room").addEventListener("change", () => {
+      const r = getRoomById($("m-f-room").value);
+      if (r && !mState.editingBookingId) $("m-bk-sheet-title").textContent = `Đặt phòng mới — P.${r.name}`;
+      updateMobileRoomFields();
+      saveMobileDraft();
+    });
+    $("m-f-booking-date").addEventListener("change", saveMobileDraft);
     $("m-f-checkin").addEventListener("change", () => {
       if (!$("m-f-checkout").value || $("m-f-checkout").value <= $("m-f-checkin").value) {
         $("m-f-checkout").value = addDaysISO($("m-f-checkin").value, 1);

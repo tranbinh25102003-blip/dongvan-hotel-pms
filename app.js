@@ -649,6 +649,7 @@
     try {
       sessionStorage.setItem(DRAFT_KEY, JSON.stringify({
         roomId: $("field-room").value,
+        bookingDate: $("field-booking-date").value,
         checkin: $("field-checkin").value,
         checkout: $("field-checkout").value,
         channelKey: state.activeChannelKey,
@@ -923,6 +924,7 @@
     return {
       id: existingId,
       roomId: $("field-room").value || ROOMS[0].id,
+      bookingDate: $("field-booking-date").value || getTodayISO(),
       checkin,
       checkout,
       channelKey: chKey,
@@ -961,6 +963,7 @@
     return {
       id: existingId,
       roomId: "DORM",
+      bookingDate: $("dorm-booking-date").value || getTodayISO(),
       checkin,
       checkout,
       channelKey: chKey,
@@ -1358,13 +1361,14 @@
     }).join("");
   }
 
-  function openBookingModal({ bookingId = null, roomId = "101", checkin = getTodayISO(), prefill = null } = {}) {
+  function openBookingModal({ bookingId = null, roomId = "101", checkin = getTodayISO(), prefill = null, allowRoomSelect = false } = {}) {
     showFormError("");
     state.bookings = store.refreshLatest();
     const existing = bookingId ? state.bookings.find((b) => b.id === bookingId) : null;
     state.activeIdempotencyKey = newIdempotencyKey("bk_sub");
     state.lastAutofilledGroupCode = "";
     if ($("chk-pc-sync-group")) $("chk-pc-sync-group").checked = true;
+    $("wrap-field-room").style.display = (allowRoomSelect && !existing) ? "flex" : "none";
 
     if (existing) {
       if (existing.roomId === "DORM") return openDormSlotForm({ bookingId: existing.id });
@@ -1376,6 +1380,7 @@
       $("modal-heading").textContent = `Chi tiết đặt phòng — P.${getRoomById(existing.roomId)?.name || existing.roomId}`;
       $("field-booking-id").value = existing.id;
       $("field-room").value = existing.roomId;
+      $("field-booking-date").value = existing.bookingDate || (typeof existing.createdAt === "string" && existing.createdAt.length >= 10 ? existing.createdAt.slice(0, 10) : getTodayISO());
       $("field-checkin").value = existing.checkin;
       $("field-checkout").value = existing.checkout;
       const chKey = existing.channelKey || detectChannelKey(existing.sourceName);
@@ -1409,6 +1414,7 @@
       $("modal-heading").textContent = prefill ? `Dán đặt phòng — P.${room.name}` : `Đặt phòng mới — P.${room.name}`;
       $("field-booking-id").value = "";
       $("field-room").value = room.id;
+      $("field-booking-date").value = (draft && draft.bookingDate) || getTodayISO();
       $("field-checkin").value = (prefill && prefill.checkin) || checkin;
       $("field-checkout").value = (draft && draft.checkout) || addDaysISO(checkin, 1);
       const chKey = (draft && draft.channelKey) || "booking";
@@ -1485,6 +1491,7 @@
       const payload = {
         id: existingId,
         roomId,
+        bookingDate: $("field-booking-date").value || getTodayISO(),
         checkin: $("field-checkin").value,
         checkout: $("field-checkout").value,
         channelKey: chKey,
@@ -1698,6 +1705,7 @@
       state.activeDormDate = ex.checkin;
       $("dorm-form-mode-label").textContent = `Chỉnh sửa lượt đặt Dorm (Slot ${(ex.slots || []).join(", ")})`;
       $("dorm-field-id").value = ex.id;
+      $("dorm-booking-date").value = ex.bookingDate || (typeof ex.createdAt === "string" && ex.createdAt.length >= 10 ? ex.createdAt.slice(0, 10) : getTodayISO());
       $("dorm-checkin").value = ex.checkin;
       $("dorm-checkout").value = ex.checkout;
       state.dormSelectedSlots = [...(ex.slots || [1])];
@@ -1721,6 +1729,7 @@
       state.activeDormDate = ci;
       $("dorm-form-mode-label").textContent = preselectSlot ? `Đặt nhanh Slot ${preselectSlot} — Dorm nội bộ` : "Đặt slot Dorm mới";
       $("dorm-field-id").value = "";
+      $("dorm-booking-date").value = getTodayISO();
       $("dorm-checkin").value = ci;
       $("dorm-checkout").value = addDaysISO(ci, 1);
       const occ = getDormOccupiedSlotsInRange(state.bookings, ci, addDaysISO(ci, 1), null);
@@ -2454,7 +2463,7 @@
     $("btn-prev-month").addEventListener("click", () => { if (--state.month < 0) { state.month = 11; state.year -= 1; } renderAll(); });
     $("btn-next-month").addEventListener("click", () => { if (++state.month > 11) { state.month = 0; state.year += 1; } renderAll(); });
     $("btn-today").addEventListener("click", () => { const now = new Date(); state.year = now.getFullYear(); state.month = now.getMonth(); renderAll(); setTimeout(() => scrollToToday(true), 30); });
-    $("btn-new-booking").addEventListener("click", () => openBookingModal({ roomId: "101", checkin: getTodayISO() }));
+    $("btn-new-booking").addEventListener("click", () => openBookingModal({ roomId: "101", checkin: getTodayISO(), allowRoomSelect: true }));
     $("btn-open-dorm-today").addEventListener("click", () => openDormBoard(getTodayISO()));
     $("btn-open-groups").addEventListener("click", openGroupReportModal);
     $("btn-open-history").addEventListener("click", openHistoryModal);
@@ -2556,7 +2565,13 @@
     $("btn-reset-filters").addEventListener("click", clearAllFilters);
     $("btn-clear-filter-bar").addEventListener("click", clearAllFilters);
 
-    $("field-room").addEventListener("change", () => { updateRoomSpecificFields(); saveDraft(); });
+    $("field-room").addEventListener("change", () => {
+      const r = getRoomById($("field-room").value);
+      if (r && !$("field-booking-id").value) $("modal-heading").textContent = `Đặt phòng mới — P.${r.name}`;
+      updateRoomSpecificFields();
+      saveDraft();
+    });
+    $("field-booking-date").addEventListener("change", saveDraft);
     $("field-checkin").addEventListener("change", () => { if (!$("field-checkout").value || $("field-checkout").value <= $("field-checkin").value) $("field-checkout").value = addDaysISO($("field-checkin").value, 1); updateNightsDisplay(); saveDraft(); });
     $("field-checkout").addEventListener("change", () => { updateNightsDisplay(); saveDraft(); });
     $("field-booking-code").addEventListener("input", renderModalGroupSummary);
@@ -2755,6 +2770,7 @@
         const payload = {
           id: existingId,
           roomId: "DORM",
+          bookingDate: $("dorm-booking-date").value || getTodayISO(),
           checkin: $("dorm-checkin").value,
           checkout: $("dorm-checkout").value,
           channelKey: chKey,

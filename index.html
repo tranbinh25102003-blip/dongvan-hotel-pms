@@ -184,11 +184,17 @@
         </div>
         <div id="form-error" class="form-error"></div>
 
-        <!-- Room & Dates -->
+        <!-- Room selector (only shown when opened via generic "+ Đặt phòng" toolbar button) -->
+        <div class="field" id="wrap-field-room" style="display: none;">
+          <label for="field-room">Chọn phòng</label>
+          <select id="field-room" class="select" required></select>
+        </div>
+
+        <!-- Booking Date & Stay Dates -->
         <div class="form-grid-3">
           <div class="field">
-            <label for="field-room">Phòng</label>
-            <select id="field-room" class="select" required></select>
+            <label for="field-booking-date">Ngày đặt phòng</label>
+            <input id="field-booking-date" class="input" type="date" required />
           </div>
           <div class="field">
             <label for="field-checkin">Nhận phòng (Check-in)</label>
@@ -431,7 +437,11 @@
         </div>
         <div id="dorm-form-error" class="form-error"></div>
 
-        <div class="form-grid-3">
+        <div class="form-grid-3" style="grid-template-columns: 1fr 1fr 1fr 82px;">
+          <div class="field">
+            <label for="dorm-booking-date">Ngày đặt phòng</label>
+            <input id="dorm-booking-date" class="input" type="date" required />
+          </div>
           <div class="field">
             <label for="dorm-checkin">Ngày nhận chỗ</label>
             <input id="dorm-checkin" class="input" type="date" required />

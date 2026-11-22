@@ -297,7 +297,9 @@
     return { preVatAmount, vatAmount, totalAmount: total };
   }
 
-  function getCellPaymentBadge(bk, isStart, hasNext) {
+  // Unified final payment badge for EVERY day of a single-room or multi-night stay.
+  // Matches getGroupCellPaymentBadge: never splits deposit on day 1 vs remaining debt on day 2+.
+  function getCellPaymentBadge(bk) {
     const total = parseVND(bk.totalAmount);
     const paid = parseVND(bk.paidAmount);
     const rem = getRemaining(bk);
@@ -306,18 +308,16 @@
     if (status === "paid") {
       return {
         cls: "paid",
-        text: isStart && total > 0 ? `✓ Đủ ${formatShortVND(total)}` : "✓ Đã TT",
+        text: total > 0 ? `✓ Đủ ${formatShortVND(total)}` : "✓ Đã TT",
         title: total > 0 ? `Đã thanh toán hết (${formatVND(paid)})` : "Miễn phí / Đã thanh toán"
       };
     }
     if (status === "deposit") {
-      if (isStart && hasNext) {
-        return { cls: "deposit", text: `Cọc ${formatShortVND(paid)}`, title: `Đã cọc ${formatVND(paid)}, còn nợ ${formatVND(rem)}` };
-      }
-      if (!isStart) {
-        return { cls: "unpaid", text: `Nợ ${formatShortVND(rem)}`, title: `Đã cọc ${formatVND(paid)}, còn nợ ${formatVND(rem)}` };
-      }
-      return { cls: "deposit", text: `Cọc -${formatShortVND(rem)}`, title: `Đã cọc ${formatVND(paid)}, còn nợ ${formatVND(rem)}` };
+      return {
+        cls: "deposit",
+        text: `Cọc -${formatShortVND(rem)}`,
+        title: `Tổng ${formatVND(total)} • Đã cọc ${formatVND(paid)} • Còn thiếu ${formatVND(rem)}`
+      };
     }
     return {
       cls: "unpaid",
@@ -633,10 +633,17 @@
 
     const nowISO = new Date().toISOString();
     const id = sanitizeText(obj.id, 64) || `${room.isDorm ? "dorm" : "bk"}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const fallbackBookingDate = (existingRecord && isValidISODate(existingRecord.bookingDate))
+      ? existingRecord.bookingDate
+      : (existingRecord && typeof existingRecord.createdAt === "string" && isValidISODate(existingRecord.createdAt.slice(0, 10)))
+        ? existingRecord.createdAt.slice(0, 10)
+        : getTodayISO();
+    const bookingDate = isValidISODate(obj.bookingDate) ? obj.bookingDate : fallbackBookingDate;
 
     const record = {
       id,
       roomId: room.id,
+      bookingDate,
       checkin,
       checkout,
       channelKey,
@@ -965,6 +972,7 @@
 
     const payload = {
       roomId: targetRoom.id,
+      bookingDate: isValidISODate(sourceBooking.bookingDate) ? sourceBooking.bookingDate : getTodayISO(),
       checkin: targetCheckin,
       checkout: targetCheckout,
       channelKey: sourceBooking.channelKey || detectChannelKey(sourceBooking.sourceName),
@@ -998,7 +1006,7 @@
   }
 
   // Build updated sibling payloads when any room in a group is edited.
-  // Propagates all shared group info (bookingCode, channel/source/tour, guestName, phone, confirmedBy,
+  // Propagates all shared group info (bookingDate, bookingCode, channel/source/tour, guestName, phone, confirmedBy,
   // confirmationPdf, notes) to every sibling in the group while preserving each room's roomId, dates,
   // room pricing, deposit allocation, and bed options (and preserving separate Dorm driver name/phone unless matching).
   function buildGroupSyncUpdates(previousBooking, updatedBooking, allBookings) {
@@ -1021,6 +1029,7 @@
       const isDormSib = sib.roomId === "DORM";
       const next = {
         ...sib,
+        bookingDate: isValidISODate(updatedBooking.bookingDate) ? updatedBooking.bookingDate : (sib.bookingDate || getTodayISO()),
         bookingCode: updatedBooking.bookingCode || "",
         channelKey: updatedBooking.channelKey || sib.channelKey,
         sourceName: updatedBooking.sourceName || sib.sourceName,
@@ -1047,6 +1056,7 @@
       }
 
       const changed =
+        next.bookingDate !== (sib.bookingDate || "") ||
         next.bookingCode !== (sib.bookingCode || "") ||
         next.channelKey !== (sib.channelKey || "") ||
         next.sourceName !== (sib.sourceName || "") ||
@@ -1114,7 +1124,6 @@
   function buildBookingConfirmationData(targetBooking, allBookings = [], options = {}) {
     if (!targetBooking || typeof targetBooking !== "object") return null;
 
-    const issueDateISO = isValidISODate(options.issueDateISO) ? options.issueDateISO : getTodayISO();
     const discountPercent = Math.min(100, Math.max(0, Number(options.discountPercent) || 0));
     const extraBedRate = Math.max(0, parseVND(options.extraBedRate || 0));
     const vatOverride = options.vatOverride === 0 || options.vatOverride === 8 ? options.vatOverride : null;
@@ -1139,6 +1148,13 @@
     const leadRegular = targetBooking.roomId !== "DORM"
       ? targetBooking
       : (scopeBookings.find((b) => b.roomId !== "DORM") || targetBooking);
+    const issueDateISO = isValidISODate(options.issueDateISO)
+      ? options.issueDateISO
+      : isValidISODate(targetBooking.bookingDate)
+        ? targetBooking.bookingDate
+        : isValidISODate(leadRegular && leadRegular.bookingDate)
+          ? leadRegular.bookingDate
+          : getTodayISO();
     const regularBookings = scopeBookings.filter((b) => b.roomId !== "DORM");
     const dormBookings = scopeBookings.filter((b) => b.roomId === "DORM");
 
@@ -1552,7 +1568,7 @@
 
   function generateCsvContent(bookings) {
     const headers = [
-      "Phòng", "Tầng", "Hạng phòng", "View", "Ngày nhận", "Ngày trả", "Số đêm",
+      "Phòng", "Tầng", "Hạng phòng", "View", "Ngày đặt", "Ngày nhận", "Ngày trả", "Số đêm",
       "Đơn vị book", "Tên tour", "Mã đặt phòng", "Tên khách", "Số điện thoại",
       "Số khách / Slot Dorm", "Tổng tiền (VNĐ)", "VAT 8%", "Đã thanh toán/Cọc (VNĐ)", "Còn lại (VNĐ)",
       "Ghép giường", "Extra bed", "Người xác nhận", "Xác nhận PDF", "Ghi chú"
@@ -1567,7 +1583,7 @@
         const pdfLabel = b.confirmationPdf && b.confirmationPdf.name ? b.confirmationPdf.name : "";
         const vatLabel = b.includeVat ? `Có (+${parseVND(b.vatAmount)})` : "Không";
         return [
-          r.name, r.floor, r.type, r.view, b.checkin, b.checkout, diffNights(b.checkin, b.checkout),
+          r.name, r.floor, r.type, r.view, b.bookingDate || "", b.checkin, b.checkout, diffNights(b.checkin, b.checkout),
           b.sourceName, b.tourName || "", b.bookingCode || "", b.guestName, b.phone,
           slotDesc, parseVND(b.totalAmount), vatLabel, parseVND(b.paidAmount), getRemaining(b),
           b.mergeBed ? "Có" : "Không", b.extraBed || 0, b.confirmedBy || "", pdfLabel, b.notes || ""
@@ -1590,6 +1606,7 @@
     const oldRoom = getRoomById(before.roomId);
     const newRoom = getRoomById(after.roomId);
     pushIfDiff("Phòng", oldRoom ? oldRoom.name : before.roomId, newRoom ? newRoom.name : after.roomId);
+    pushIfDiff("Ngày đặt", formatDateVN(before.bookingDate), formatDateVN(after.bookingDate));
     pushIfDiff("Ngày nhận", formatDateVN(before.checkin), formatDateVN(after.checkin));
     pushIfDiff("Ngày trả", formatDateVN(before.checkout), formatDateVN(after.checkout));
     pushIfDiff("Nguồn đặt", before.sourceName || "", after.sourceName || "");
