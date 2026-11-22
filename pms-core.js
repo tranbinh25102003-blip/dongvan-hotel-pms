@@ -296,6 +296,38 @@
     };
   }
 
+  // Unified final payment badge for ALL cells belonging to a multi-room group.
+  // Never displays per-room split amounts; every room cell in the group shows the
+  // exact same final group payment status and total group remaining balance.
+  function getGroupCellPaymentBadge(groupSummary) {
+    if (!groupSummary) return null;
+    const total = parseVND(groupSummary.totalAmount);
+    const paid = parseVND(groupSummary.paidAmount);
+    const rem = Math.max(0, parseVND(groupSummary.remaining));
+    const status = groupSummary.paymentStatus || (total > 0 && rem === 0 ? "paid" : paid > 0 ? "deposit" : "unpaid");
+    const countLabel = `${groupSummary.roomCount} phòng`;
+
+    if (status === "paid") {
+      return {
+        cls: "paid",
+        text: total > 0 ? `✓ Đủ ${formatShortVND(total)}` : "✓ Đã TT",
+        title: `Đoàn ${groupSummary.code} (${countLabel}): Đã thanh toán đủ ${formatVND(total)}`
+      };
+    }
+    if (status === "deposit") {
+      return {
+        cls: "deposit",
+        text: `Cọc -${formatShortVND(rem)}`,
+        title: `Đoàn ${groupSummary.code} (${countLabel}): Tổng ${formatVND(total)} • Đã cọc ${formatVND(paid)} • Còn nợ cả đoàn ${formatVND(rem)}`
+      };
+    }
+    return {
+      cls: "unpaid",
+      text: total > 0 ? `Nợ ${formatShortVND(total)}` : "Chưa TT",
+      title: `Đoàn ${groupSummary.code} (${countLabel}): Chưa thanh toán (${formatVND(total)})`
+    };
+  }
+
   function detectChannelKey(src, fallback = "other") {
     const s = String(src || "").trim().toLowerCase();
     if (!s) return fallback;
@@ -906,6 +938,85 @@
     };
 
     return { ok: true, payload, nights, targetRoom };
+  }
+
+  function samePdfAttachment(a, b) {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    return a.name === b.name && a.size === b.size && a.dataUrl === b.dataUrl;
+  }
+
+  // Build updated sibling payloads when any room in a group is edited.
+  // Propagates all shared group info (bookingCode, channel/source/tour, guestName, phone, confirmedBy,
+  // confirmationPdf, notes) to every sibling in the group while preserving each room's roomId, dates,
+  // room pricing, deposit allocation, and bed options (and preserving separate Dorm driver name/phone unless matching).
+  function buildGroupSyncUpdates(previousBooking, updatedBooking, allBookings) {
+    if (!updatedBooking || typeof updatedBooking !== "object") return [];
+    const newCodeNorm = normalizeGroupCode(updatedBooking.bookingCode);
+    const oldCodeNorm = previousBooking ? normalizeGroupCode(previousBooking.bookingCode) : "";
+
+    // If bookingCode was cleared to detach this room from the group, leave former siblings untouched
+    if (!newCodeNorm) return [];
+
+    const matchCode = oldCodeNorm || newCodeNorm;
+    const list = Array.isArray(allBookings) ? allBookings : [];
+    const updates = [];
+
+    for (const sib of list) {
+      if (!sib || sib.id === updatedBooking.id) continue;
+      const sibNorm = normalizeGroupCode(sib.bookingCode);
+      if (!sibNorm || (sibNorm !== matchCode && sibNorm !== newCodeNorm)) continue;
+
+      const isDormSib = sib.roomId === "DORM";
+      const next = {
+        ...sib,
+        bookingCode: updatedBooking.bookingCode || "",
+        channelKey: updatedBooking.channelKey || sib.channelKey,
+        sourceName: updatedBooking.sourceName || sib.sourceName,
+        tourName: updatedBooking.tourName !== undefined ? updatedBooking.tourName : (sib.tourName || ""),
+        confirmedBy: updatedBooking.confirmedBy !== undefined ? updatedBooking.confirmedBy : (sib.confirmedBy || ""),
+        confirmationPdf: updatedBooking.confirmationPdf ? { ...updatedBooking.confirmationPdf } : null
+      };
+
+      if (!isDormSib) {
+        next.guestName = updatedBooking.guestName || sib.guestName;
+        next.phone = updatedBooking.phone !== undefined ? updatedBooking.phone : (sib.phone || "");
+        next.notes = updatedBooking.notes !== undefined ? updatedBooking.notes : (sib.notes || "");
+      } else {
+        // For Dorm siblings (HDV/driver), preserve separate driver name/phone/notes unless they previously matched the edited room
+        if (previousBooking && sib.guestName === previousBooking.guestName && updatedBooking.guestName) {
+          next.guestName = updatedBooking.guestName;
+        }
+        if (previousBooking && sib.phone === previousBooking.phone) {
+          next.phone = updatedBooking.phone || "";
+        }
+        if (previousBooking && sib.notes === previousBooking.notes) {
+          next.notes = updatedBooking.notes || "";
+        }
+      }
+
+      const changed =
+        next.bookingCode !== (sib.bookingCode || "") ||
+        next.channelKey !== (sib.channelKey || "") ||
+        next.sourceName !== (sib.sourceName || "") ||
+        next.tourName !== (sib.tourName || "") ||
+        next.guestName !== (sib.guestName || "") ||
+        next.phone !== (sib.phone || "") ||
+        next.confirmedBy !== (sib.confirmedBy || "") ||
+        next.notes !== (sib.notes || "") ||
+        !samePdfAttachment(next.confirmationPdf, sib.confirmationPdf);
+
+      if (changed) {
+        updates.push({
+          id: sib.id,
+          roomId: sib.roomId,
+          expectedRevision: Number(sib.revision) || 1,
+          payload: next
+        });
+      }
+    }
+
+    return updates;
   }
 
   function generateCsvContent(bookings) {
@@ -1889,6 +2000,7 @@
     getPaymentStatus,
     validatePaymentAmounts,
     getCellPaymentBadge,
+    getGroupCellPaymentBadge,
     detectChannelKey,
     bookingCoversDate,
     datesOverlap,
@@ -1906,6 +2018,7 @@
     computeAllBookingGroups,
     allocateGroupPayment,
     buildCopiedBookingPayload,
+    buildGroupSyncUpdates,
     generateCsvContent,
     diffBookingChanges,
     generateAuditCsvContent,

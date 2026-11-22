@@ -2156,5 +2156,29 @@ html, body {
   font-size: 12px;
 }
 
+.group-sync-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  background: rgba(79, 70, 229, 0.09);
+  border: 1px solid rgba(79, 70, 229, 0.25);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+}
+.group-sync-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  accent-color: #4f46e5;
+  flex-shrink: 0;
+}
+
+
 
 

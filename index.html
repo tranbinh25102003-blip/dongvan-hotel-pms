@@ -280,6 +280,13 @@
             <span id="pc-group-rooms-count" class="group-pill"></span>
           </div>
           <div id="pc-group-rooms-list" class="group-rooms-list"></div>
+          <label id="pc-group-sync-wrap" class="group-sync-toggle" style="display:none;">
+            <input id="chk-pc-sync-group" type="checkbox" checked />
+            <span id="pc-group-sync-label">Tự động cập nhật thông tin sửa (tên khách, SĐT, nguồn, mã ĐP, người XN, PDF, ghi chú) cho tất cả phòng trong đoàn khi Lưu</span>
+          </label>
+          <div id="pc-group-autofill-wrap" style="display:none;">
+            <button id="btn-pc-group-autofill" type="button" class="btn btn-sm btn-primary">⚡ Lấy thông tin khách &amp; nguồn từ đoàn</button>
+          </div>
           <div class="group-totals-grid">
             <div><span>Tổng tiền đoàn</span><strong id="pc-group-total">0 đ</strong></div>
             <div><span>Đã cọc / TT đoàn</span><strong id="pc-group-paid" class="ok">0 đ</strong></div>
@@ -287,7 +294,7 @@
           </div>
           <div class="group-lump-row">
             <input id="pc-group-lump-input" class="input" type="text" inputmode="numeric" placeholder="Nhập tổng tiền cọc / thu chung cả đoàn (VNĐ)..." />
-            <button id="btn-pc-group-allocate" type="button" class="btn btn-sm btn-primary">Chia tự động</button>
+            <button id="btn-pc-group-allocate" type="button" class="btn btn-sm btn-primary">Cập nhật TT đoàn</button>
             <button id="btn-pc-group-mark-paid" type="button" class="btn btn-sm btn-success">✓ Thu đủ đoàn</button>
           </div>
         </div>
