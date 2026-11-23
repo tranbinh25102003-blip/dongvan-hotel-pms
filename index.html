@@ -51,6 +51,9 @@
           <span>👥 Đoàn</span>
           <span id="groups-count-pill" class="autobackup-pill" style="display:none;">0</span>
         </button>
+        <button id="btn-open-costs" class="btn btn-sm" type="button" title="Chi phí vận hành & giá vốn theo tháng (định mức, chứng từ thực tế, chốt chi phí)">
+          <span>💰 Chi phí &amp; Giá vốn</span>
+        </button>
         <button id="btn-open-history" class="btn btn-sm btn-history" type="button" title="Xem lịch sử chỉnh sửa & cấu hình sao lưu tự động">
           <span>🕒 Lịch sử</span>
           <span id="autobackup-status-pill" class="autobackup-pill">Auto</span>
@@ -761,6 +764,187 @@
         <div class="modal-footer-right">
           <button id="btn-close-confirm-pdf-2" class="btn" type="button">Đóng</button>
           <button id="btn-print-confirm-pdf" class="btn btn-primary" type="button">🖨️ In / Lưu file PDF</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Operating Costs & COGS Modal (Shared PC & Mobile) -->
+  <div id="costs-modal" class="modal-backdrop costs-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="costs-modal-title">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <div>
+          <h2 id="costs-modal-title" class="modal-title">💰 Chi phí vận hành &amp; Giá vốn</h2>
+          <div id="costs-modal-sub" class="modal-subtitle">Theo dõi định mức theo lưu trú, chứng từ thực tế và chốt chi phí theo tháng</div>
+        </div>
+        <button id="btn-close-costs" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Month Switcher & Sub-Tabs -->
+        <div class="costs-toolbar">
+          <div class="costs-month-nav">
+            <button id="btn-costs-prev-month" class="btn btn-icon" type="button" title="Tháng trước">◀</button>
+            <input id="costs-month-picker" class="input costs-month-input" type="month" aria-label="Chọn tháng chi phí" />
+            <button id="btn-costs-next-month" class="btn btn-icon" type="button" title="Tháng sau">▶</button>
+          </div>
+          <div class="costs-tabs" role="tablist">
+            <button id="btn-costs-tab-overview" class="btn btn-sm costs-tab-btn active" type="button">📊 Bảng chi phí tháng</button>
+            <button id="btn-costs-tab-voucher" class="btn btn-sm costs-tab-btn" type="button">+ Nhập chi thực tế</button>
+            <button id="btn-costs-tab-items" class="btn btn-sm costs-tab-btn" type="button">⚙️ Khoản mục &amp; định mức</button>
+          </div>
+        </div>
+
+        <!-- Monthly KPI Summary Strip -->
+        <div class="costs-kpi-grid">
+          <div class="costs-kpi-card highlight">
+            <span class="costs-kpi-label">Tổng chi phí tháng</span>
+            <span id="costs-kpi-total" class="costs-kpi-val">0 đ</span>
+            <span id="costs-kpi-total-sub" class="costs-kpi-sub">Tổng cột Số dùng tính tổng</span>
+          </div>
+          <div class="costs-kpi-card">
+            <span class="costs-kpi-label">Đã có số thực tế (chốt)</span>
+            <span id="costs-kpi-actual" class="costs-kpi-val ok">0 đ</span>
+            <span id="costs-kpi-actual-sub" class="costs-kpi-sub">0 khoản mục đã chốt</span>
+          </div>
+          <div class="costs-kpi-card">
+            <span class="costs-kpi-label">Còn dùng ước tính</span>
+            <span id="costs-kpi-estimated" class="costs-kpi-val warn">0 đ</span>
+            <span id="costs-kpi-estimated-sub" class="costs-kpi-sub">Đang tính theo định mức</span>
+          </div>
+          <div class="costs-kpi-card">
+            <span class="costs-kpi-label">Đêm phòng đã bán</span>
+            <span id="costs-kpi-nights" class="costs-kpi-val">0 đêm phòng</span>
+            <span id="costs-kpi-guests" class="costs-kpi-sub">0 khách-đêm</span>
+          </div>
+          <div class="costs-kpi-card">
+            <span class="costs-kpi-label">CP bình quân / đêm phòng</span>
+            <span id="costs-kpi-avg" class="costs-kpi-val">Chưa có đêm phòng</span>
+            <span class="costs-kpi-sub">Tổng chi phí / Đêm phòng bán</span>
+          </div>
+        </div>
+
+        <!-- Compact Prorated Revenue & Margin Strip -->
+        <div id="costs-pnl-strip" class="costs-pnl-strip" aria-label="Hiệu quả doanh thu và chi phí tháng"></div>
+
+        <!-- Missing Guest Count Notice -->
+        <div id="costs-missing-guests-banner" class="costs-missing-banner" role="status"></div>
+
+        <!-- Pane 1: Monthly Cost Table (Expandable rows + Finalize toggle) -->
+        <div id="costs-pane-overview">
+          <div class="costs-table-wrap">
+            <table class="costs-table">
+              <thead>
+                <tr>
+                  <th>Khoản mục</th>
+                  <th class="num">Ước tính</th>
+                  <th class="num">Thực tế</th>
+                  <th class="num">Số dùng tính tổng</th>
+                  <th style="text-align:center;">Chốt thực tế</th>
+                </tr>
+              </thead>
+              <tbody id="costs-table-body"></tbody>
+            </table>
+          </div>
+          <div style="margin-top:8px; font-size:11.5px; color:var(--text-muted);">
+            Mẹo: Nhấn vào từng dòng khoản mục để xem <strong>số lượng, đơn giá, công thức tính</strong> và danh sách chứng từ đã nhập. Mặc định hệ thống dùng <strong>Ước tính</strong>; khi đã đủ chứng từ, bấm <strong>Chốt theo thực tế</strong> để thay bằng tổng thực tế cho đúng khoản mục đó.
+          </div>
+        </div>
+
+        <!-- Pane 2: Enter Actual Cost Vouchers -->
+        <div id="costs-pane-voucher" style="display:none;">
+          <form id="costs-voucher-form" class="costs-panel-card" novalidate>
+            <input type="hidden" id="cv-id" />
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+              <strong id="cv-form-title" style="font-size:13px;">🧾 Ghi nhận chứng từ chi phí thực tế</strong>
+              <button id="btn-cv-reset" class="btn btn-sm" type="button" style="display:none;">+ Nhập chứng từ mới</button>
+            </div>
+            <div id="cv-error" class="form-error"></div>
+            <div class="form-grid-3">
+              <div class="field">
+                <label for="cv-item-id">Khoản mục *</label>
+                <select id="cv-item-id" class="select" required></select>
+              </div>
+              <div class="field">
+                <label for="cv-expense-date">Ngày phát sinh / hóa đơn *</label>
+                <input id="cv-expense-date" class="input" type="date" required />
+              </div>
+              <div class="field">
+                <label for="cv-accounting-month">Tháng ghi nhận chi phí *</label>
+                <input id="cv-accounting-month" class="input" type="month" required />
+              </div>
+            </div>
+            <div class="form-grid" style="margin-top:8px;">
+              <div class="field">
+                <label for="cv-amount">Số tiền (VNĐ) *</label>
+                <input id="cv-amount" class="input" type="text" inputmode="numeric" placeholder="VD: 3.000.000" required />
+              </div>
+              <div class="field">
+                <label for="cv-note">Ghi chú (số hóa đơn, nhà cung cấp...)</label>
+                <input id="cv-note" class="input" type="text" placeholder="VD: Hóa đơn điện tháng 10 nhận ngày 05/11..." />
+              </div>
+            </div>
+            <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:10px;">
+              <button id="btn-cv-cancel" class="btn btn-sm" type="button">Quay lại bảng</button>
+              <button id="btn-cv-save" class="btn btn-primary btn-sm" type="submit">💾 Lưu chứng từ thực tế</button>
+            </div>
+          </form>
+
+          <div style="font-weight:700; font-size:12.5px; margin-bottom:6px;" id="costs-vouchers-heading">Chứng từ thực tế đã ghi nhận trong tháng</div>
+          <div id="costs-month-vouchers-list" class="costs-voucher-list"></div>
+        </div>
+
+        <!-- Pane 3: Manage Cost Items & Versioned Rate History -->
+        <div id="costs-pane-items" style="display:none;">
+          <form id="costs-item-form" class="costs-panel-card" novalidate>
+            <input type="hidden" id="ci-id" />
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px;">
+              <strong id="ci-form-title" style="font-size:13px;">⚙️ Thêm khoản mục / Cấu hình định mức</strong>
+              <button id="btn-ci-reset" class="btn btn-sm" type="button">+ Tạo khoản mục mới</button>
+            </div>
+            <div id="ci-error" class="form-error"></div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="ci-name">Tên khoản mục *</label>
+                <input id="ci-name" class="input" type="text" placeholder="VD: Ăn sáng, Giặt là, Điện..." required />
+              </div>
+              <div class="field">
+                <label for="ci-calc-mode">Cách tính định mức *</label>
+                <select id="ci-calc-mode" class="select" required>
+                  <option value="guest_night">Theo khách-đêm (VD: 2 khách × 3 đêm = 6 khách-đêm)</option>
+                  <option value="room_night">Theo đêm phòng (VD: 1 phòng × 3 đêm = 3 đêm phòng)</option>
+                  <option value="monthly">Theo tháng (VD: Internet, lương, điện, khấu hao)</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-grid" style="margin-top:8px;">
+              <div class="field">
+                <label for="ci-rate">Đơn giá định mức (VNĐ) — để 0 nếu chỉ nhập thực tế</label>
+                <input id="ci-rate" class="input" type="text" inputmode="numeric" placeholder="VD: 30.000 hoặc 5.000.000" />
+              </div>
+              <div class="field">
+                <label for="ci-effective-month">Tháng bắt đầu áp dụng *</label>
+                <input id="ci-effective-month" class="input" type="month" required />
+              </div>
+            </div>
+            <div style="font-size:11.5px; color:var(--text-muted); margin-top:6px;">
+              Khi đổi đơn giá cho tháng mới (VD áp dụng từ tháng sau), số liệu ước tính của các tháng trước vẫn giữ nguyên đúng mức cũ đã áp dụng.
+            </div>
+            <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:10px;">
+              <button id="btn-ci-save" class="btn btn-primary btn-sm" type="submit">💾 Lưu khoản mục &amp; định mức</button>
+            </div>
+          </form>
+
+          <div style="font-weight:700; font-size:12.5px; margin-bottom:6px;">Danh sách khoản mục &amp; lịch sử định mức</div>
+          <div id="costs-items-list" class="costs-items-list"></div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <span id="costs-footer-status" style="font-size:12px; color:var(--text-muted);">Số liệu tự động đồng bộ cùng dữ liệu lưu trú.</span>
+        <div class="modal-footer-right">
+          <button id="btn-costs-export-csv" class="btn btn-sm" type="button" title="Xuất báo cáo chi phí vận hành tháng này ra Excel (CSV)">📊 Xuất Excel chi phí</button>
+          <button id="btn-close-costs-2" class="btn btn-primary" type="button">Đóng</button>
         </div>
       </div>
     </div>

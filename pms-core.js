@@ -21,6 +21,7 @@
   const META_KEY = "ks_manual_meta_v1";
   const QUARANTINE_KEY = "ks_manual_corrupt_quarantine_v1";
   const LOCK_KEY = "ks_manual_pms_lock_v1";
+  const OPERATING_COSTS_KEY = "ks_pms_operating_costs_v1";
   const MAX_AUDIT_ENTRIES = 300;
   const MAX_AUTOBACKUPS = 30;
   const MAX_AMOUNT_VND = 10000000000; // 10 billion VND safety cap
@@ -214,6 +215,9 @@
 
   // Neutralize Excel/Sheets CSV Formula Injection (CWE-1236)
   function sanitizeCsvCell(val) {
+    if (typeof val === "number" && Number.isFinite(val)) {
+      return `"${val}"`;
+    }
     let str = String(val ?? "");
     if (/^[\t\r\n ]*[=+\-@]/.test(str)) {
       str = "'" + str;
@@ -1681,6 +1685,693 @@
     return Promise.resolve().then(() => fn());
   }
 
+  /* -------------------- Operating Costs & COGS Engine (Chi phí vận hành & Giá vốn) -------------------- */
+
+  const COST_CALC_MODES = Object.freeze({
+    guest_night: Object.freeze({ key: "guest_night", label: "Theo khách-đêm", unitLabel: "đ / khách-đêm" }),
+    room_night: Object.freeze({ key: "room_night", label: "Theo đêm phòng", unitLabel: "đ / đêm phòng" }),
+    monthly: Object.freeze({ key: "monthly", label: "Theo tháng", unitLabel: "đ / tháng" })
+  });
+
+  const DEFAULT_COST_ITEMS = Object.freeze([
+    { id: "ci_room_amenities", name: "Đồ dùng phòng", calcMode: "room_night", active: true, rateHistory: [{ effectiveMonth: "2020-01", rate: 0 }] },
+    { id: "ci_minibar_free", name: "Minibar miễn phí", calcMode: "guest_night", active: true, rateHistory: [{ effectiveMonth: "2020-01", rate: 0 }] },
+    { id: "ci_breakfast", name: "Ăn sáng", calcMode: "guest_night", active: true, rateHistory: [{ effectiveMonth: "2020-01", rate: 0 }] },
+    { id: "ci_laundry", name: "Giặt là", calcMode: "room_night", active: true, rateHistory: [{ effectiveMonth: "2020-01", rate: 0 }] },
+    { id: "ci_booking_fee", name: "Phí Booking", calcMode: "monthly", active: true, rateHistory: [{ effectiveMonth: "2020-01", rate: 0 }] },
+    { id: "ci_electricity", name: "Điện", calcMode: "monthly", active: true, rateHistory: [{ effectiveMonth: "2020-01", rate: 0 }] },
+    { id: "ci_water", name: "Nước", calcMode: "monthly", active: true, rateHistory: [{ effectiveMonth: "2020-01", rate: 0 }] },
+    { id: "ci_internet", name: "Internet", calcMode: "monthly", active: true, rateHistory: [{ effectiveMonth: "2020-01", rate: 0 }] },
+    { id: "ci_salary", name: "Lương", calcMode: "monthly", active: true, rateHistory: [{ effectiveMonth: "2020-01", rate: 0 }] },
+    { id: "ci_maintenance", name: "Sửa chữa", calcMode: "monthly", active: true, rateHistory: [{ effectiveMonth: "2020-01", rate: 0 }] },
+    { id: "ci_depreciation", name: "Khấu hao", calcMode: "monthly", active: true, rateHistory: [{ effectiveMonth: "2020-01", rate: 0 }] },
+    { id: "ci_tools", name: "Công cụ dụng cụ", calcMode: "monthly", active: true, rateHistory: [{ effectiveMonth: "2020-01", rate: 0 }] }
+  ]);
+
+  function isValidMonthKey(val) {
+    return typeof val === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(val.trim());
+  }
+
+  function formatMonthVN(monthKey) {
+    if (!isValidMonthKey(monthKey)) return String(monthKey || "");
+    const [y, m] = monthKey.split("-");
+    return `${m}/${y}`;
+  }
+
+  function getCurrentMonthKey() {
+    return getTodayISO().slice(0, 7);
+  }
+
+  function createDefaultOperatingCostsState() {
+    return {
+      version: 1,
+      items: DEFAULT_COST_ITEMS.map((it) => ({
+        id: it.id,
+        name: it.name,
+        calcMode: it.calcMode,
+        active: true,
+        isDefault: true,
+        rateHistory: it.rateHistory.map((r) => ({ effectiveMonth: r.effectiveMonth, rate: r.rate }))
+      })),
+      actualEntries: [],
+      monthlyFinalized: {},
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  function sanitizeRateHistory(rawHistory) {
+    const byMonth = new Map();
+    if (Array.isArray(rawHistory)) {
+      for (const h of rawHistory) {
+        if (!h || typeof h !== "object") continue;
+        const em = String(h.effectiveMonth || "").trim();
+        if (!isValidMonthKey(em)) continue;
+        const rate = Math.min(MAX_AMOUNT_VND, Math.max(0, parseVND(h.rate)));
+        byMonth.set(em, { effectiveMonth: em, rate });
+      }
+    }
+    if (byMonth.size === 0) {
+      byMonth.set("2020-01", { effectiveMonth: "2020-01", rate: 0 });
+    }
+    return [...byMonth.values()].sort((a, b) => a.effectiveMonth.localeCompare(b.effectiveMonth));
+  }
+
+  function sanitizeOperatingCostsState(raw) {
+    const fallback = createDefaultOperatingCostsState();
+    if (!raw || typeof raw !== "object") return fallback;
+    const obj = stripDangerousKeys(raw);
+
+    const seenItemIds = new Set();
+    const items = [];
+    if (Array.isArray(obj.items) && obj.items.length > 0) {
+      for (const it of obj.items) {
+        if (!it || typeof it !== "object") continue;
+        const id = sanitizeText(it.id, 64);
+        const name = sanitizeText(it.name, 100);
+        if (!id || !name || seenItemIds.has(id)) continue;
+        const calcMode = COST_CALC_MODES[it.calcMode] ? it.calcMode : "monthly";
+        seenItemIds.add(id);
+        items.push({
+          id,
+          name,
+          calcMode,
+          active: it.active !== false,
+          isDefault: Boolean(it.isDefault),
+          rateHistory: sanitizeRateHistory(it.rateHistory)
+        });
+      }
+    }
+    // Ensure all 12 default items exist if items array was empty
+    if (items.length === 0) {
+      for (const def of fallback.items) {
+        seenItemIds.add(def.id);
+        items.push(def);
+      }
+    }
+
+    const actualEntries = [];
+    const seenEntryIds = new Set();
+    if (Array.isArray(obj.actualEntries)) {
+      for (const ent of obj.actualEntries) {
+        if (!ent || typeof ent !== "object") continue;
+        const id = sanitizeText(ent.id, 64) || `ce_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+        if (seenEntryIds.has(id)) continue;
+        const itemId = sanitizeText(ent.itemId, 64);
+        const accountingMonth = String(ent.accountingMonth || "").trim();
+        if (!itemId || !isValidMonthKey(accountingMonth)) continue;
+        const expenseDate = isValidISODate(ent.expenseDate) ? ent.expenseDate : `${accountingMonth}-01`;
+        const amount = Math.min(MAX_AMOUNT_VND, Math.max(0, parseVND(ent.amount)));
+        seenEntryIds.add(id);
+        actualEntries.push({
+          id,
+          itemId,
+          expenseDate,
+          accountingMonth,
+          amount,
+          note: sanitizeText(ent.note, 240),
+          createdBy: sanitizeText(ent.createdBy, 60),
+          createdAt: typeof ent.createdAt === "string" ? ent.createdAt : new Date().toISOString(),
+          ...(typeof ent.updatedAt === "string" ? { updatedAt: ent.updatedAt } : {})
+        });
+      }
+    }
+
+    const monthlyFinalized = {};
+    if (obj.monthlyFinalized && typeof obj.monthlyFinalized === "object") {
+      for (const [mKey, itemMap] of Object.entries(obj.monthlyFinalized)) {
+        if (!isValidMonthKey(mKey) || !itemMap || typeof itemMap !== "object") continue;
+        const cleanMap = {};
+        for (const [iId, meta] of Object.entries(itemMap)) {
+          const cleanId = sanitizeText(iId, 64);
+          if (!cleanId || !meta || typeof meta !== "object") continue;
+          if (meta.finalized) {
+            cleanMap[cleanId] = {
+              finalized: true,
+              finalizedAt: typeof meta.finalizedAt === "string" ? meta.finalizedAt : new Date().toISOString(),
+              finalizedBy: sanitizeText(meta.finalizedBy, 60)
+            };
+          }
+        }
+        if (Object.keys(cleanMap).length > 0) monthlyFinalized[mKey] = cleanMap;
+      }
+    }
+
+    return {
+      version: 1,
+      items,
+      actualEntries,
+      monthlyFinalized,
+      updatedAt: typeof obj.updatedAt === "string" ? obj.updatedAt : new Date().toISOString()
+    };
+  }
+
+  function getEffectiveCostRate(item, monthKey) {
+    if (!item || !Array.isArray(item.rateHistory) || !isValidMonthKey(monthKey)) {
+      return { rate: 0, effectiveMonth: null, hasRate: false };
+    }
+    const sorted = sanitizeRateHistory(item.rateHistory);
+    let chosen = null;
+    for (let i = 0; i < sorted.length; i++) {
+      if (sorted[i].effectiveMonth <= monthKey) chosen = sorted[i];
+      else break;
+    }
+    if (!chosen) return { rate: 0, effectiveMonth: null, hasRate: false };
+    return {
+      rate: chosen.rate,
+      effectiveMonth: chosen.effectiveMonth,
+      hasRate: chosen.rate > 0
+    };
+  }
+
+  function upsertCostItem(costState, rawInput) {
+    const clean = sanitizeOperatingCostsState(costState);
+    if (!rawInput || typeof rawInput !== "object") {
+      return { ok: false, error: "Dữ liệu khoản mục không hợp lệ." };
+    }
+    const name = sanitizeText(rawInput.name, 100);
+    if (!name) return { ok: false, error: "Vui lòng nhập tên khoản mục chi phí." };
+    const calcMode = COST_CALC_MODES[rawInput.calcMode] ? rawInput.calcMode : "monthly";
+    const effectiveMonth = isValidMonthKey(rawInput.effectiveMonth) ? rawInput.effectiveMonth : getCurrentMonthKey();
+    const rate = Math.min(MAX_AMOUNT_VND, Math.max(0, parseVND(rawInput.rate)));
+    const existingId = sanitizeText(rawInput.id, 64);
+
+    const nextItems = clean.items.map((it) => ({
+      ...it,
+      rateHistory: it.rateHistory.map((r) => ({ ...r }))
+    }));
+
+    const idx = existingId ? nextItems.findIndex((it) => it.id === existingId) : -1;
+    let savedItem;
+    if (idx >= 0) {
+      const target = nextItems[idx];
+      target.name = name;
+      target.calcMode = calcMode;
+      if (rawInput.active !== undefined) target.active = Boolean(rawInput.active);
+      if (rawInput.updateRate !== false) {
+        const histMap = new Map(target.rateHistory.map((r) => [r.effectiveMonth, r]));
+        histMap.set(effectiveMonth, { effectiveMonth, rate });
+        target.rateHistory = [...histMap.values()].sort((a, b) => a.effectiveMonth.localeCompare(b.effectiveMonth));
+      }
+      savedItem = target;
+    } else {
+      const newId = existingId || `ci_custom_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+      savedItem = {
+        id: newId,
+        name,
+        calcMode,
+        active: true,
+        isDefault: false,
+        rateHistory: [{ effectiveMonth, rate }]
+      };
+      nextItems.push(savedItem);
+    }
+
+    return {
+      ok: true,
+      item: savedItem,
+      state: {
+        ...clean,
+        items: nextItems,
+        updatedAt: new Date().toISOString()
+      }
+    };
+  }
+
+  function deleteCostRateHistoryEntry(costState, itemId, effectiveMonth) {
+    const clean = sanitizeOperatingCostsState(costState);
+    const cleanId = sanitizeText(itemId, 64);
+    const cleanMonth = String(effectiveMonth || "").trim();
+    if (!cleanId || !isValidMonthKey(cleanMonth)) {
+      return { ok: false, error: "Mốc định mức cần xóa không hợp lệ." };
+    }
+    const nextItems = clean.items.map((it) => ({
+      ...it,
+      rateHistory: it.rateHistory.map((r) => ({ ...r }))
+    }));
+    const target = nextItems.find((it) => it.id === cleanId);
+    if (!target) return { ok: false, error: "Khoản mục chi phí không tồn tại." };
+    if (target.rateHistory.length <= 1) {
+      return { ok: false, error: "Mỗi khoản mục phải giữ lại ít nhất 1 mốc định mức áp dụng." };
+    }
+    const filtered = target.rateHistory.filter((r) => r.effectiveMonth !== cleanMonth);
+    if (filtered.length === target.rateHistory.length) {
+      return { ok: false, error: "Không tìm thấy mốc định mức cần xóa." };
+    }
+    target.rateHistory = filtered;
+    return {
+      ok: true,
+      item: target,
+      state: {
+        ...clean,
+        items: nextItems,
+        updatedAt: new Date().toISOString()
+      }
+    };
+  }
+
+  function toggleCostItemActive(costState, itemId, active) {
+    const clean = sanitizeOperatingCostsState(costState);
+    const cleanId = sanitizeText(itemId, 64);
+    const nextItems = clean.items.map((it) => ({
+      ...it,
+      rateHistory: it.rateHistory.map((r) => ({ ...r }))
+    }));
+    const target = nextItems.find((it) => it.id === cleanId);
+    if (!target) return { ok: false, error: "Khoản mục chi phí không tồn tại." };
+    target.active = Boolean(active);
+    return {
+      ok: true,
+      item: target,
+      state: {
+        ...clean,
+        items: nextItems,
+        updatedAt: new Date().toISOString()
+      }
+    };
+  }
+
+  function addActualCostEntry(costState, rawEntry) {
+    const clean = sanitizeOperatingCostsState(costState);
+    if (!rawEntry || typeof rawEntry !== "object") {
+      return { ok: false, error: "Dữ liệu chứng từ không hợp lệ." };
+    }
+    const itemId = sanitizeText(rawEntry.itemId, 64);
+    const item = clean.items.find((it) => it.id === itemId);
+    if (!item) return { ok: false, error: "Khoản mục chi phí không tồn tại." };
+    const accountingMonth = String(rawEntry.accountingMonth || "").trim();
+    if (!isValidMonthKey(accountingMonth)) {
+      return { ok: false, error: "Tháng ghi nhận chi phí không hợp lệ (YYYY-MM)." };
+    }
+    const expenseDate = isValidISODate(rawEntry.expenseDate) ? rawEntry.expenseDate : getTodayISO();
+    const rawAmtStr = String(rawEntry.amount ?? "").trim();
+    if (rawAmtStr === "") {
+      return { ok: false, error: "Vui lòng nhập số tiền chứng từ (VNĐ)." };
+    }
+    const amount = Math.min(MAX_AMOUNT_VND, Math.max(0, parseVND(rawEntry.amount)));
+    const incomingId = sanitizeText(rawEntry.id, 64);
+    const existing = incomingId ? clean.actualEntries.find((e) => e.id === incomingId) : null;
+    const nowIso = new Date().toISOString();
+    const entry = {
+      id: incomingId || `ce_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      itemId,
+      expenseDate,
+      accountingMonth,
+      amount,
+      note: sanitizeText(rawEntry.note, 240),
+      createdBy: sanitizeText(rawEntry.createdBy, 60) || (existing ? existing.createdBy : ""),
+      createdAt: existing && typeof existing.createdAt === "string" ? existing.createdAt : nowIso,
+      ...(existing ? { updatedAt: nowIso } : {})
+    };
+
+    const nextEntries = [entry, ...clean.actualEntries.filter((e) => e.id !== entry.id)];
+    return {
+      ok: true,
+      isUpdate: Boolean(existing),
+      entry,
+      state: {
+        ...clean,
+        actualEntries: nextEntries,
+        updatedAt: nowIso
+      }
+    };
+  }
+
+  function deleteActualCostEntry(costState, entryId) {
+    const clean = sanitizeOperatingCostsState(costState);
+    const id = sanitizeText(entryId, 64);
+    const nextEntries = clean.actualEntries.filter((e) => e.id !== id);
+    if (nextEntries.length === clean.actualEntries.length) {
+      return { ok: false, error: "Không tìm thấy chứng từ cần xóa." };
+    }
+    return {
+      ok: true,
+      state: {
+        ...clean,
+        actualEntries: nextEntries,
+        updatedAt: new Date().toISOString()
+      }
+    };
+  }
+
+  function setCostItemFinalized(costState, monthKey, itemId, finalized, actor = "") {
+    const clean = sanitizeOperatingCostsState(costState);
+    if (!isValidMonthKey(monthKey)) return { ok: false, error: "Tháng chốt không hợp lệ." };
+    const cleanId = sanitizeText(itemId, 64);
+    if (!clean.items.some((it) => it.id === cleanId)) {
+      return { ok: false, error: "Khoản mục không tồn tại." };
+    }
+    const nextFinalized = { ...clean.monthlyFinalized };
+    const monthMap = { ...(nextFinalized[monthKey] || {}) };
+    if (finalized) {
+      monthMap[cleanId] = {
+        finalized: true,
+        finalizedAt: new Date().toISOString(),
+        finalizedBy: sanitizeText(actor, 60)
+      };
+      nextFinalized[monthKey] = monthMap;
+    } else {
+      delete monthMap[cleanId];
+      if (Object.keys(monthMap).length > 0) nextFinalized[monthKey] = monthMap;
+      else delete nextFinalized[monthKey];
+    }
+    return {
+      ok: true,
+      state: {
+        ...clean,
+        monthlyFinalized: nextFinalized,
+        updatedAt: new Date().toISOString()
+      }
+    };
+  }
+
+  function isBookingCancelled(bk) {
+    if (!bk || typeof bk !== "object") return true;
+    const st = String(bk.status || bk.bookingStatus || "").trim().toLowerCase();
+    return Boolean(bk.cancelled || bk.canceled || bk.deleted || st === "cancelled" || st === "canceled" || st === "huy" || st === "đã hủy");
+  }
+
+  function computeMonthlyStayMetrics(bookings, monthKey) {
+    if (!isValidMonthKey(monthKey)) {
+      return {
+        monthKey: "",
+        soldRoomNights: 0,
+        guestNights: 0,
+        dormNights: 0,
+        missingGuestBookings: [],
+        missingGuestRoomNights: 0
+      };
+    }
+    const [yStr, mStr] = monthKey.split("-");
+    const year = parseInt(yStr, 10);
+    const monthIdx = parseInt(mStr, 10) - 1;
+    const daysCount = getDaysInMonth(year, monthIdx);
+    const monthStart = `${monthKey}-01`;
+    const monthEnd = `${monthKey}-${pad2(daysCount)}`;
+    const nextMonthStart = addDaysISO(monthEnd, 1);
+
+    let soldRoomNights = 0;
+    let guestNights = 0;
+    let dormNights = 0;
+    let missingGuestRoomNights = 0;
+    const missingGuestBookings = [];
+
+    const list = Array.isArray(bookings) ? bookings : [];
+    for (let i = 0; i < list.length; i++) {
+      const bk = list[i];
+      if (!bk || isBookingCancelled(bk)) continue;
+      if (!isValidISODate(bk.checkin) || !isValidISODate(bk.checkout) || bk.checkout <= bk.checkin) continue;
+      // Overlap check: night d satisfies checkin <= d < checkout AND monthStart <= d < nextMonthStart
+      if (bk.checkout <= monthStart || bk.checkin >= nextMonthStart) continue;
+
+      const effStart = bk.checkin < monthStart ? monthStart : bk.checkin;
+      const effEnd = bk.checkout > nextMonthStart ? nextMonthStart : bk.checkout;
+      const nightsInMonth = Math.max(0, diffNights(effStart, effEnd));
+      if (nightsInMonth <= 0) continue;
+
+      if (bk.roomId === "DORM") {
+        const slotsCount = Array.isArray(bk.slots) && bk.slots.length > 0 ? bk.slots.length : Math.max(1, parseInt(bk.dormBeds, 10) || 1);
+        dormNights += nightsInMonth * slotsCount;
+        continue;
+      }
+
+      soldRoomNights += nightsInMonth;
+      const rawGuests = bk.guestCount;
+      const parsedGuests = (rawGuests === null || rawGuests === undefined || String(rawGuests).trim() === "")
+        ? NaN
+        : Number(rawGuests);
+      if (Number.isFinite(parsedGuests) && parsedGuests > 0) {
+        guestNights += nightsInMonth * Math.floor(parsedGuests);
+      } else {
+        missingGuestRoomNights += nightsInMonth;
+        missingGuestBookings.push({
+          id: bk.id || "",
+          roomId: bk.roomId || "",
+          guestName: bk.guestName || "(Chưa rõ tên)",
+          checkin: bk.checkin,
+          checkout: bk.checkout,
+          nightsInMonth
+        });
+      }
+    }
+
+    return {
+      monthKey,
+      soldRoomNights,
+      guestNights,
+      dormNights,
+      missingGuestBookings,
+      missingGuestRoomNights
+    };
+  }
+
+  function computeMonthlyProratedRevenue(bookings, monthKey) {
+    if (!isValidMonthKey(monthKey)) {
+      return { monthKey: "", proratedRoomRevenue: 0, proratedDormRevenue: 0 };
+    }
+    const [yStr, mStr] = monthKey.split("-");
+    const year = parseInt(yStr, 10);
+    const monthIdx = parseInt(mStr, 10) - 1;
+    const daysCount = getDaysInMonth(year, monthIdx);
+    const monthStart = `${monthKey}-01`;
+    const monthEnd = `${monthKey}-${pad2(daysCount)}`;
+    const nextMonthStart = addDaysISO(monthEnd, 1);
+
+    let proratedRoomRevenue = 0;
+    let proratedDormRevenue = 0;
+
+    const list = Array.isArray(bookings) ? bookings : [];
+    for (let i = 0; i < list.length; i++) {
+      const bk = list[i];
+      if (!bk || isBookingCancelled(bk)) continue;
+      if (!isValidISODate(bk.checkin) || !isValidISODate(bk.checkout) || bk.checkout <= bk.checkin) continue;
+      if (bk.checkout <= monthStart || bk.checkin >= nextMonthStart) continue;
+
+      const totalNights = Math.max(1, diffNights(bk.checkin, bk.checkout));
+      const effStart = bk.checkin < monthStart ? monthStart : bk.checkin;
+      const effEnd = bk.checkout > nextMonthStart ? nextMonthStart : bk.checkout;
+      const nightsInMonth = Math.max(0, diffNights(effStart, effEnd));
+      if (nightsInMonth <= 0) continue;
+
+      const totalAmt = parseVND(bk.totalAmount);
+      const share = Math.round((totalAmt * nightsInMonth) / totalNights);
+      if (bk.roomId === "DORM") proratedDormRevenue += share;
+      else proratedRoomRevenue += share;
+    }
+
+    return { monthKey, proratedRoomRevenue, proratedDormRevenue };
+  }
+
+  function computeMonthlyOperatingCosts(costState, bookings, monthKey) {
+    const clean = sanitizeOperatingCostsState(costState);
+    const targetMonth = isValidMonthKey(monthKey) ? monthKey : getCurrentMonthKey();
+    const stay = computeMonthlyStayMetrics(bookings, targetMonth);
+    const rev = computeMonthlyProratedRevenue(bookings, targetMonth);
+
+    const monthFinalizedMap = clean.monthlyFinalized[targetMonth] || {};
+    const entriesByItem = new Map();
+    for (const ent of clean.actualEntries) {
+      if (ent.accountingMonth !== targetMonth) continue;
+      let arr = entriesByItem.get(ent.itemId);
+      if (!arr) {
+        arr = [];
+        entriesByItem.set(ent.itemId, arr);
+      }
+      arr.push(ent);
+    }
+
+    const rows = [];
+    let totalMonthlyCost = 0;
+    let totalActualPortion = 0;
+    let totalEstimatedPortion = 0;
+    let totalEnteredActual = 0;
+    let finalizedCount = 0;
+    let partialActualCount = 0;
+
+    for (const item of clean.items) {
+      const entries = (entriesByItem.get(item.id) || []).slice().sort((a, b) => String(b.expenseDate).localeCompare(String(a.expenseDate)));
+      const finalizedMeta = monthFinalizedMap[item.id] || null;
+      const isFinalized = Boolean(finalizedMeta && finalizedMeta.finalized);
+      if (!item.active && entries.length === 0 && !isFinalized) continue;
+
+      const modeMeta = COST_CALC_MODES[item.calcMode] || COST_CALC_MODES.monthly;
+      const rateInfo = getEffectiveCostRate(item, targetMonth);
+
+      let quantity = 1;
+      let quantityLabel = "1 tháng";
+      if (item.calcMode === "guest_night") {
+        quantity = stay.guestNights;
+        quantityLabel = `${stay.guestNights} khách-đêm`;
+      } else if (item.calcMode === "room_night") {
+        quantity = stay.soldRoomNights;
+        quantityLabel = `${stay.soldRoomNights} đêm phòng`;
+      }
+
+      const estimatedAmount = rateInfo.hasRate ? Math.round(quantity * rateInfo.rate) : 0;
+      const actualAmount = entries.reduce((sum, e) => sum + parseVND(e.amount), 0);
+      const hasActualEntries = entries.length > 0;
+      const isPartialActual = !isFinalized && hasActualEntries;
+      const usedAmount = isFinalized ? actualAmount : estimatedAmount;
+      const usedSource = isFinalized ? "actual" : "estimated";
+
+      const formulaText = rateInfo.hasRate
+        ? `${quantityLabel} × ${formatVND(rateInfo.rate)} = ${formatVND(estimatedAmount)}`
+        : "Chưa cấu hình định mức — nhập trực tiếp chứng từ thực tế rồi chốt";
+
+      totalMonthlyCost += usedAmount;
+      totalEnteredActual += actualAmount;
+      if (isFinalized) {
+        totalActualPortion += usedAmount;
+        finalizedCount += 1;
+      } else {
+        totalEstimatedPortion += usedAmount;
+        if (isPartialActual) partialActualCount += 1;
+      }
+
+      rows.push({
+        itemId: item.id,
+        name: item.name,
+        calcMode: item.calcMode,
+        calcModeLabel: modeMeta.label,
+        unitLabel: modeMeta.unitLabel,
+        quantity,
+        quantityLabel,
+        rate: rateInfo.rate,
+        rateEffectiveMonth: rateInfo.effectiveMonth,
+        hasRate: rateInfo.hasRate,
+        estimatedAmount,
+        formulaText,
+        actualAmount,
+        entries,
+        entriesCount: entries.length,
+        isFinalized,
+        finalizedMeta,
+        isPartialActual,
+        usedAmount,
+        usedSource,
+        variance: actualAmount - estimatedAmount
+      });
+    }
+
+    const costPerRoomNight = stay.soldRoomNights > 0
+      ? Math.round(totalMonthlyCost / stay.soldRoomNights)
+      : null;
+    const proratedRoomRevenue = rev.proratedRoomRevenue;
+    const estimatedGrossProfit = proratedRoomRevenue - totalMonthlyCost;
+    const costToRevenuePercent = proratedRoomRevenue > 0
+      ? Math.round((totalMonthlyCost / proratedRoomRevenue) * 1000) / 10
+      : null;
+
+    return {
+      monthKey: targetMonth,
+      monthLabelVN: formatMonthVN(targetMonth),
+      stay,
+      rows,
+      totalMonthlyCost,
+      totalActualPortion,
+      totalEstimatedPortion,
+      totalEnteredActual,
+      finalizedCount,
+      partialActualCount,
+      soldRoomNights: stay.soldRoomNights,
+      guestNights: stay.guestNights,
+      costPerRoomNight,
+      proratedRoomRevenue,
+      proratedDormRevenue: rev.proratedDormRevenue,
+      estimatedGrossProfit,
+      costToRevenuePercent
+    };
+  }
+
+  function generateOperatingCostsCsvContent(report) {
+    if (!report || typeof report !== "object") return "\uFEFF";
+    const lines = [];
+    const pushRow = (arr) => lines.push(arr.map(sanitizeCsvCell).join(","));
+
+    pushRow([`BÁO CÁO CHI PHÍ VẬN HÀNH & GIÁ VỐN — THÁNG ${report.monthLabelVN || report.monthKey || ""}`]);
+    pushRow(["Chỉ tiêu tổng hợp", "Giá trị"]);
+    pushRow(["Tổng chi phí tháng (VNĐ)", report.totalMonthlyCost || 0]);
+    pushRow(["Phần đã chốt theo thực tế (VNĐ)", report.totalActualPortion || 0]);
+    pushRow(["Phần còn dùng ước tính (VNĐ)", report.totalEstimatedPortion || 0]);
+    pushRow(["Số đêm phòng đã bán", report.soldRoomNights || 0]);
+    pushRow(["Số khách-đêm", report.guestNights || 0]);
+    pushRow(["Chi phí bình quân / đêm phòng (VNĐ)", report.costPerRoomNight !== null && report.costPerRoomNight !== undefined ? report.costPerRoomNight : "Chưa có đêm phòng"]);
+    pushRow(["Doanh thu phòng phân bổ tháng (VNĐ)", report.proratedRoomRevenue || 0]);
+    pushRow(["Lãi gộp ước tính sau chi phí (VNĐ)", report.estimatedGrossProfit || 0]);
+    pushRow(["Tỷ lệ Chi phí / Doanh thu (%)", report.costToRevenuePercent !== null && report.costToRevenuePercent !== undefined ? `${report.costToRevenuePercent}%` : "Chưa có doanh thu"]);
+    pushRow([]);
+
+    pushRow([
+      "Khoản mục",
+      "Cách tính",
+      "Số lượng",
+      "Đơn giá áp dụng (VNĐ)",
+      "Ước tính (VNĐ)",
+      "Thực tế (VNĐ)",
+      "Số dùng tính tổng (VNĐ)",
+      "Trạng thái",
+      "Chênh lệch TT - ƯT (VNĐ)"
+    ]);
+    for (const r of (report.rows || [])) {
+      const statusTxt = r.isFinalized
+        ? "Đã chốt thực tế"
+        : (r.isPartialActual ? "Mới nhập 1 phần (đang dùng ước tính)" : "Ước tính");
+      pushRow([
+        r.name,
+        r.calcModeLabel,
+        r.quantityLabel,
+        r.hasRate ? r.rate : 0,
+        r.estimatedAmount,
+        r.actualAmount,
+        r.usedAmount,
+        statusTxt,
+        r.variance
+      ]);
+    }
+    pushRow([]);
+
+    pushRow(["CHI TIẾT CHỨNG TỪ THỰC TẾ TRONG THÁNG"]);
+    pushRow(["Ngày phát sinh", "Tháng ghi nhận", "Khoản mục", "Số tiền (VNĐ)", "Ghi chú", "Người nhập"]);
+    const allVouchers = [];
+    for (const r of (report.rows || [])) {
+      for (const e of (r.entries || [])) {
+        allVouchers.push({ ...e, itemName: r.name });
+      }
+    }
+    allVouchers.sort((a, b) => String(b.expenseDate || "").localeCompare(String(a.expenseDate || "")));
+    for (const v of allVouchers) {
+      pushRow([
+        v.expenseDate,
+        v.accountingMonth,
+        v.itemName,
+        v.amount,
+        v.note || "",
+        v.createdBy || ""
+      ]);
+    }
+
+    return "\uFEFF" + lines.join("\r\n");
+  }
+
   function createBookingStore(storageAdapter, options = {}) {
     const keys = {
       data: options.storageKey || STORAGE_KEY,
@@ -2491,6 +3182,27 @@
       };
     }
 
+    function getOperatingCosts() {
+      try {
+        const raw = storageAdapter.getItem(OPERATING_COSTS_KEY);
+        if (!raw) return createDefaultOperatingCostsState();
+        return sanitizeOperatingCostsState(JSON.parse(raw));
+      } catch {
+        return createDefaultOperatingCostsState();
+      }
+    }
+
+    function saveOperatingCosts(nextState) {
+      const clean = sanitizeOperatingCostsState(nextState);
+      clean.updatedAt = new Date().toISOString();
+      try {
+        storageAdapter.setItem(OPERATING_COSTS_KEY, JSON.stringify(clean));
+        return { ok: true, operatingCosts: clean };
+      } catch (err) {
+        return { ok: false, error: `Không thể lưu chi phí vận hành: ${err && err.message ? err.message : "lỗi bộ nhớ"}` };
+      }
+    }
+
     return {
       load,
       refreshLatest,
@@ -2499,6 +3211,8 @@
       getAutoBackups,
       hasRollbackBackup,
       getStorageStatus,
+      getOperatingCosts,
+      saveOperatingCosts,
       saveBooking,
       deleteBooking,
       restoreFromImport,
@@ -2517,6 +3231,7 @@
     META_KEY,
     QUARANTINE_KEY,
     LOCK_KEY,
+    OPERATING_COSTS_KEY,
     MAX_AUTOBACKUPS,
     MAX_CONFIRMATION_PDF_BYTES,
     ROOMS,
@@ -2530,6 +3245,9 @@
     pad2,
     formatDateISO,
     isValidISODate,
+    isValidMonthKey,
+    formatMonthVN,
+    getCurrentMonthKey,
     getTodayISO,
     addDaysISO,
     diffNights,
@@ -2575,6 +3293,21 @@
     getConfirmationRoomCategoryName,
     buildBookingConfirmationData,
     renderBookingConfirmationHtml,
+    COST_CALC_MODES,
+    DEFAULT_COST_ITEMS,
+    createDefaultOperatingCostsState,
+    sanitizeOperatingCostsState,
+    getEffectiveCostRate,
+    upsertCostItem,
+    deleteCostRateHistoryEntry,
+    toggleCostItemActive,
+    addActualCostEntry,
+    deleteActualCostEntry,
+    setCostItemFinalized,
+    computeMonthlyStayMetrics,
+    computeMonthlyProratedRevenue,
+    computeMonthlyOperatingCosts,
+    generateOperatingCostsCsvContent,
     generateCsvContent,
     diffBookingChanges,
     generateAuditCsvContent,

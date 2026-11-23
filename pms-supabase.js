@@ -49,6 +49,7 @@
     let connectionStatus = "connecting"; // "connected" | "reconnecting" | "offline" | "auth_required"
     let lastSyncedAt = null;
     let storeVersion = 0;
+    let lastOperatingCostsUpdatedAt = "";
 
     let session = null; // { access_token, refresh_token, expires_at, staffName }
     let refreshInFlight = null;
@@ -81,7 +82,8 @@
       bookings: [],
       auditLogs: [],
       autoBackups: [],
-      hasRollbackBackup: false
+      hasRollbackBackup: false,
+      operatingCosts: Core.createDefaultOperatingCostsState()
     };
 
     function emit(payload) {
@@ -166,6 +168,7 @@
         auditLogs: stateCache.auditLogs,
         autoBackups: stateCache.autoBackups,
         hasRollbackBackup: stateCache.hasRollbackBackup,
+        operatingCosts: stateCache.operatingCosts,
         storeVersion
       };
     }
@@ -504,6 +507,20 @@
       if (!delta || typeof delta !== "object") return;
       if (delta.senderId && delta.senderId === clientId) return;
 
+      if (delta.action === "COSTS_UPDATE" && delta.operatingCosts) {
+        stateCache.operatingCosts = Core.sanitizeOperatingCostsState(delta.operatingCosts);
+        lastOperatingCostsUpdatedAt = stateCache.operatingCosts.updatedAt || delta.ts || new Date().toISOString();
+        lastSyncedAt = new Date().toISOString();
+        connectionStatus = "connected";
+        emit({
+          type: "remote_change",
+          remoteEvent: { action: "COSTS_UPDATE", actor: delta.actor || "", ts: delta.ts || lastSyncedAt },
+          state: getSnapshot(),
+          status: getStatus()
+        });
+        return;
+      }
+
       const remoteVer = typeof delta.storeVersion === "number" ? delta.storeVersion : null;
       if (remoteVer !== null && remoteVer <= storeVersion) return;
 
@@ -578,6 +595,21 @@
         if (!res || !res.ok) {
           return res || { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Không thể tải dữ liệu." };
         }
+        // Also fetch operating_costs_v1 from pms_meta (existing RLS-protected table — zero SQL changes needed)
+        try {
+          const token = await ensureValidAccessToken(false);
+          if (token) {
+            const cRes = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=eq.operating_costs_v1&select=value,updated_at`, {
+              method: "GET",
+              headers: { "Authorization": `Bearer ${token}` },
+              timeoutMs: 6000
+            });
+            if (cRes.httpOk && Array.isArray(cRes.data) && cRes.data[0] && cRes.data[0].value) {
+              stateCache.operatingCosts = Core.sanitizeOperatingCostsState(cRes.data[0].value);
+              lastOperatingCostsUpdatedAt = (cRes.data[0].value && cRes.data[0].value.updatedAt) || cRes.data[0].updated_at || stateCache.operatingCosts.updatedAt || "";
+            }
+          }
+        } catch {}
         connectionStatus = "connected";
         applyCloudState(res, currentMeta);
         return { ok: true, bookings: stateCache.bookings, storeVersion };
@@ -598,8 +630,9 @@
       return inFlightPull;
     }
 
-    // Ultra-lightweight ~120-byte version probe (reads ONLY 1 row from pms_meta).
-    // Triggers full pms_get_state() ONLY when remote storeVersion > local storeVersion.
+    // Ultra-lightweight version probe (reads store_version + operating_costs_v1 from pms_meta).
+    // Triggers full pms_get_state() when remote storeVersion > local storeVersion,
+    // and immediately catches up operating_costs_v1 when modified on another device while sleeping/offline.
     async function checkRemoteVersionAndSync(reason = "VERSION_PROBE") {
       if (!session || !session.access_token || navigator.onLine === false) return false;
       if (inFlightPull || inFlightVersionProbe) return false;
@@ -609,7 +642,7 @@
         if (!token) return false;
         lastProbeAt = Date.now();
         try {
-          const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=eq.store_version&select=value`, {
+          const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=in.(store_version,operating_costs_v1)&select=key,value,updated_at`, {
             method: "GET",
             headers: { "Authorization": `Bearer ${token}` },
             timeoutMs: 6000
@@ -620,7 +653,30 @@
             return false;
           }
           if (!res.httpOk || !Array.isArray(res.data) || res.data.length === 0) return false;
-          const val = res.data[0] && res.data[0].value;
+
+          const svRow = res.data.find((r) => r && r.key === "store_version") || (!res.data[0].key ? res.data[0] : null);
+          const costRow = res.data.find((r) => r && r.key === "operating_costs_v1") || null;
+
+          let costsSynced = false;
+          if (costRow && costRow.value) {
+            const remoteCostTs = (costRow.value && costRow.value.updatedAt) || costRow.updated_at || "";
+            const shouldApplyCosts = !lastOperatingCostsUpdatedAt || (remoteCostTs && remoteCostTs > lastOperatingCostsUpdatedAt);
+            if (shouldApplyCosts) {
+              stateCache.operatingCosts = Core.sanitizeOperatingCostsState(costRow.value);
+              lastOperatingCostsUpdatedAt = remoteCostTs || stateCache.operatingCosts.updatedAt || "";
+              lastSyncedAt = new Date().toISOString();
+              connectionStatus = "connected";
+              costsSynced = true;
+              emit({
+                type: "remote_change",
+                remoteEvent: { action: "COSTS_UPDATE", reason, ts: lastSyncedAt },
+                state: getSnapshot(),
+                status: getStatus()
+              });
+            }
+          }
+
+          const val = svRow && svRow.value;
           const remoteVer = val && typeof val.version === "number" ? val.version : null;
           if (remoteVer !== null && remoteVer > storeVersion) {
             await pullLatestFromCloud({
@@ -634,7 +690,7 @@
             lastSyncedAt = new Date().toISOString();
             emit({ type: "status", status: getStatus() });
           }
-          return false;
+          return costsSynced;
         } catch {
           return false;
         }
@@ -797,6 +853,22 @@
           // Layer 2 (Authoritative DB WAL): postgres_changes on pms_meta
           if (msg.event === "postgres_changes") {
             const rec = msg.payload && msg.payload.data && msg.payload.data.record;
+            if (rec && rec.key === "operating_costs_v1" && rec.value) {
+              const remoteCostTs = (rec.value && rec.value.updatedAt) || rec.updated_at || "";
+              if (!lastOperatingCostsUpdatedAt || !remoteCostTs || remoteCostTs > lastOperatingCostsUpdatedAt) {
+                stateCache.operatingCosts = Core.sanitizeOperatingCostsState(rec.value);
+                lastOperatingCostsUpdatedAt = remoteCostTs || stateCache.operatingCosts.updatedAt || "";
+                lastSyncedAt = new Date().toISOString();
+                connectionStatus = "connected";
+                emit({
+                  type: "remote_change",
+                  remoteEvent: { action: "COSTS_UPDATE", ts: lastSyncedAt },
+                  state: getSnapshot(),
+                  status: getStatus()
+                });
+              }
+              return;
+            }
             const metaVal = rec && rec.key === "store_version" ? rec.value : null;
             const remoteVer = metaVal && typeof metaVal.version === "number" ? metaVal.version : null;
             if (remoteVer === null || remoteVer > storeVersion) {
@@ -991,8 +1063,15 @@
         } catch {}
       }
       saveStoredSession(null);
-      stateCache = { bookings: [], auditLogs: [], autoBackups: [], hasRollbackBackup: false };
+      stateCache = {
+        bookings: [],
+        auditLogs: [],
+        autoBackups: [],
+        hasRollbackBackup: false,
+        operatingCosts: Core.createDefaultOperatingCostsState()
+      };
       storeVersion = 0;
+      lastOperatingCostsUpdatedAt = "";
       connectionStatus = "auth_required";
       emit({ type: "auth_required", auth: getAuthState(), state: getSnapshot(), status: getStatus() });
       return { ok: true };
@@ -1120,6 +1199,56 @@
       return { ...rpcRes, bookings: stateCache.bookings };
     }
 
+    async function saveOperatingCosts(nextState) {
+      if (navigator.onLine === false) {
+        return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Đang mất kết nối mạng — không thể lưu chi phí vận hành." };
+      }
+      const token = await ensureValidAccessToken(false);
+      if (!token) {
+        return { ok: false, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập để lưu chi phí vận hành." };
+      }
+      const clean = Core.sanitizeOperatingCostsState(nextState);
+      clean.updatedAt = new Date().toISOString();
+      try {
+        const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?on_conflict=key`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "Prefer": "resolution=merge-duplicates,return=representation"
+          },
+          body: {
+            key: "operating_costs_v1",
+            value: clean,
+            updated_at: clean.updatedAt
+          },
+          timeoutMs: 10000
+        });
+        if (res.status === 401) {
+          handleAuthExpired("Phiên đăng nhập hết hạn khi lưu chi phí.");
+          return { ok: false, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
+        }
+        if (!res.httpOk) {
+          return { ok: false, code: "SERVER_ERROR", error: "Không thể lưu chi phí vận hành lên Supabase." };
+        }
+        stateCache.operatingCosts = clean;
+        lastOperatingCostsUpdatedAt = clean.updatedAt;
+        lastSyncedAt = clean.updatedAt;
+        connectionStatus = "connected";
+        emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        broadcastDeltaToPeers({
+          senderId: clientId,
+          storeVersion,
+          action: "COSTS_UPDATE",
+          operatingCosts: clean,
+          actor: (session && session.staffName) || "",
+          ts: clean.updatedAt
+        });
+        return { ok: true, operatingCosts: clean };
+      } catch {
+        return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Mất kết nối khi lưu chi phí vận hành." };
+      }
+    }
+
     function runHealthCheck() {
       const consistency = Core.auditBookingConsistency(stateCache.bookings);
       return {
@@ -1159,6 +1288,8 @@
       getAuditLogs: () => stateCache.auditLogs,
       getAutoBackups: () => stateCache.autoBackups,
       hasRollbackBackup: () => stateCache.hasRollbackBackup,
+      getOperatingCosts: () => stateCache.operatingCosts,
+      saveOperatingCosts,
       refreshLatest: () => stateCache.bookings,
       pullLatest: () => pullLatestFromCloud({ type: "manual_refresh", force: true }),
       saveBooking,

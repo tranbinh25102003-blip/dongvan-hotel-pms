@@ -61,7 +61,8 @@
       bookings: [],
       auditLogs: [],
       autoBackups: [],
-      hasRollbackBackup: false
+      hasRollbackBackup: false,
+      operatingCosts: Core.createDefaultOperatingCostsState()
     };
 
     function emit(payload) {
@@ -128,6 +129,7 @@
         auditLogs: stateCache.auditLogs,
         autoBackups: stateCache.autoBackups,
         hasRollbackBackup: stateCache.hasRollbackBackup,
+        operatingCosts: stateCache.operatingCosts,
         storeVersion
       };
     }
@@ -217,6 +219,9 @@
       if (Array.isArray(data.auditLogs)) stateCache.auditLogs = data.auditLogs;
       if (Array.isArray(data.autoBackups)) stateCache.autoBackups = data.autoBackups;
       if (typeof data.hasRollbackBackup === "boolean") stateCache.hasRollbackBackup = data.hasRollbackBackup;
+      if (data.operatingCosts && typeof data.operatingCosts === "object") {
+        stateCache.operatingCosts = Core.sanitizeOperatingCostsState(data.operatingCosts);
+      }
       if (incomingVer !== null) storeVersion = incomingVer;
       if (data.user) authState.user = data.user;
       if (data.appVersion || data.buildId) {
@@ -237,6 +242,9 @@
       stateCache.auditLogs = localStore.getAuditLogs();
       stateCache.autoBackups = localStore.getAutoBackups();
       stateCache.hasRollbackBackup = localStore.hasRollbackBackup();
+      if (typeof localStore.getOperatingCosts === "function") {
+        stateCache.operatingCosts = localStore.getOperatingCosts();
+      }
       lastSyncedAt = new Date().toISOString();
       emit({ type, state: getSnapshot(), status: getStatus() });
     }
@@ -701,6 +709,21 @@
       return res;
     }
 
+    async function saveOperatingCosts(nextState) {
+      const clean = Core.sanitizeOperatingCostsState(nextState);
+      if (mode === "server") {
+        const res = await serverMutate("/api/operating-costs", "PUT", { operatingCosts: clean });
+        if (res && res.ok && res.operatingCosts) {
+          stateCache.operatingCosts = Core.sanitizeOperatingCostsState(res.operatingCosts);
+          emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        }
+        return res;
+      }
+      const res = await Core.runWithCrossTabLock(() => localStore.saveOperatingCosts(clean));
+      if (res && res.ok) syncFromLocalCache("local_commit");
+      return res;
+    }
+
     function runHealthCheck() {
       if (mode === "server") {
         const consistency = Core.auditBookingConsistency(stateCache.bookings);
@@ -742,6 +765,8 @@
       getAuditLogs: () => stateCache.auditLogs,
       getAutoBackups: () => stateCache.autoBackups,
       hasRollbackBackup: () => stateCache.hasRollbackBackup,
+      getOperatingCosts: () => stateCache.operatingCosts,
+      saveOperatingCosts,
       refreshLatest: () => {
         if (mode === "local" && localStore) {
           localStore.refreshLatest();

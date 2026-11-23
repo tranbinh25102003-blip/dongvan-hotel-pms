@@ -60,6 +60,19 @@
     buildGroupSyncUpdates,
     buildBookingConfirmationData,
     renderBookingConfirmationHtml,
+    isValidMonthKey,
+    formatMonthVN,
+    getCurrentMonthKey,
+    COST_CALC_MODES,
+    createDefaultOperatingCostsState,
+    upsertCostItem,
+    deleteCostRateHistoryEntry,
+    toggleCostItemActive,
+    addActualCostEntry,
+    deleteActualCostEntry,
+    setCostItemFinalized,
+    computeMonthlyOperatingCosts,
+    generateOperatingCostsCsvContent,
     generateCsvContent,
     generateAuditCsvContent,
     diffBookingChanges
@@ -1226,6 +1239,360 @@
     open: openConfirmationPdfModal
   };
 
+  /* -------------------- Operating Costs & COGS Controller (Shared PC & Mobile) -------------------- */
+
+  const costsState = {
+    monthKey: getCurrentMonthKey(),
+    activeTab: "overview", // "overview" | "voucher" | "items"
+    expandedItems: new Set(),
+    isSaving: false
+  };
+
+  function getActorStaffName() {
+    const st = typeof store.getStatus === "function" ? store.getStatus() : null;
+    return (st && st.user && st.user.staffName) || "Quản lý";
+  }
+
+  function shiftMonthKey(monthKey, deltaMonths) {
+    const base = isValidMonthKey(monthKey) ? monthKey : getCurrentMonthKey();
+    const [y, m] = base.split("-").map(Number);
+    const d = new Date(y, m - 1 + deltaMonths, 1);
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+  }
+
+  function getCurrentOperatingCosts() {
+    if (typeof store.getOperatingCosts === "function") {
+      return store.getOperatingCosts();
+    }
+    return createDefaultOperatingCostsState();
+  }
+
+  function setCostsTab(tabName) {
+    costsState.activeTab = tabName;
+    $("costs-pane-overview").style.display = tabName === "overview" ? "block" : "none";
+    $("costs-pane-voucher").style.display = tabName === "voucher" ? "block" : "none";
+    $("costs-pane-items").style.display = tabName === "items" ? "block" : "none";
+    $("btn-costs-tab-overview").classList.toggle("active", tabName === "overview");
+    $("btn-costs-tab-voucher").classList.toggle("active", tabName === "voucher");
+    $("btn-costs-tab-items").classList.toggle("active", tabName === "items");
+  }
+
+  function showCostVoucherError(msg) {
+    $("cv-error").textContent = msg || "";
+    $("cv-error").classList.toggle("show", Boolean(msg));
+  }
+
+  function showCostItemError(msg) {
+    $("ci-error").textContent = msg || "";
+    $("ci-error").classList.toggle("show", Boolean(msg));
+  }
+
+  function populateCostVoucherItemOptions(preselectItemId = "") {
+    const costData = getCurrentOperatingCosts();
+    const prevVal = preselectItemId || $("cv-item-id").value;
+    const selectableItems = costData.items.filter((it) => it.active !== false || it.id === prevVal);
+    $("cv-item-id").innerHTML = selectableItems
+      .map((it) => `<option value="${escapeHtml(it.id)}">${escapeHtml(it.name)}${it.active === false ? " [Đã ẩn]" : ""} (${escapeHtml((COST_CALC_MODES[it.calcMode] || COST_CALC_MODES.monthly).label)})</option>`)
+      .join("");
+    if (prevVal && selectableItems.some((it) => it.id === prevVal)) {
+      $("cv-item-id").value = prevVal;
+    }
+  }
+
+  function resetCostVoucherForm(editVoucher = null, preselectItemId = "") {
+    showCostVoucherError("");
+    if (editVoucher) {
+      populateCostVoucherItemOptions(editVoucher.itemId);
+      $("cv-id").value = editVoucher.id;
+      $("cv-form-title").textContent = "✏️ Sửa chứng từ chi phí thực tế";
+      $("btn-cv-reset").style.display = "inline-flex";
+      $("btn-cv-save").textContent = "💾 Cập nhật chứng từ";
+      $("cv-item-id").value = editVoucher.itemId;
+      $("cv-expense-date").value = editVoucher.expenseDate || getTodayISO();
+      $("cv-accounting-month").value = editVoucher.accountingMonth || costsState.monthKey;
+      $("cv-amount").value = formatNumberInput(editVoucher.amount);
+      $("cv-note").value = editVoucher.note || "";
+    } else {
+      populateCostVoucherItemOptions(preselectItemId);
+      $("cv-id").value = "";
+      $("cv-form-title").textContent = "🧾 Ghi nhận chứng từ chi phí thực tế";
+      $("btn-cv-reset").style.display = "none";
+      $("btn-cv-save").textContent = "💾 Lưu chứng từ thực tế";
+      $("cv-expense-date").value = getTodayISO();
+      $("cv-accounting-month").value = costsState.monthKey;
+      $("cv-amount").value = "";
+      $("cv-note").value = "";
+    }
+  }
+
+  function resetCostItemForm(editItem = null) {
+    showCostItemError("");
+    if (editItem) {
+      $("ci-id").value = editItem.id;
+      $("ci-form-title").textContent = `✏️ Sửa khoản mục & định mức — ${editItem.name}`;
+      $("ci-name").value = editItem.name;
+      $("ci-calc-mode").value = editItem.calcMode || "monthly";
+      const eff = Core.getEffectiveCostRate(editItem, costsState.monthKey);
+      $("ci-rate").value = eff.rate > 0 ? formatNumberInput(eff.rate) : "";
+      $("ci-effective-month").value = costsState.monthKey;
+    } else {
+      $("ci-id").value = "";
+      $("ci-form-title").textContent = "⚙️ Thêm khoản mục mới & cấu hình định mức";
+      $("ci-name").value = "";
+      $("ci-calc-mode").value = "guest_night";
+      $("ci-rate").value = "";
+      $("ci-effective-month").value = costsState.monthKey;
+    }
+  }
+
+  function exportOperatingCostsCSV() {
+    const costData = getCurrentOperatingCosts();
+    const bookings = typeof store.getBookings === "function" ? store.getBookings() : state.bookings;
+    const report = computeMonthlyOperatingCosts(costData, bookings, costsState.monthKey);
+    const csv = generateOperatingCostsCsvContent(report);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `chi-phi-van-hanh-${report.monthKey}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast(`Đã xuất báo cáo chi phí tháng ${report.monthLabelVN} ra Excel (CSV)`);
+  }
+
+  function renderOperatingCostsModal() {
+    const costData = getCurrentOperatingCosts();
+    const bookings = typeof store.getBookings === "function" ? store.getBookings() : state.bookings;
+    const report = computeMonthlyOperatingCosts(costData, bookings, costsState.monthKey);
+
+    $("costs-month-picker").value = report.monthKey;
+    const staffName = getActorStaffName();
+    $("costs-modal-sub").textContent = `Tháng ${report.monthLabelVN} • Người thao tác: ${staffName} • Tự động lấy số liệu từ sổ lưu trú`;
+
+    // 5 Monthly KPI Cards
+    $("costs-kpi-total").textContent = formatVND(report.totalMonthlyCost);
+    $("costs-kpi-total-sub").textContent = `${report.rows.length} khoản mục đang theo dõi`;
+    $("costs-kpi-actual").textContent = formatVND(report.totalActualPortion);
+    $("costs-kpi-actual-sub").textContent = report.totalEnteredActual > report.totalActualPortion
+      ? `${report.finalizedCount} khoản đã chốt • Tổng đã nhập: ${formatVND(report.totalEnteredActual)}`
+      : `${report.finalizedCount} khoản mục đã chốt`;
+    $("costs-kpi-estimated").textContent = formatVND(report.totalEstimatedPortion);
+    $("costs-kpi-estimated-sub").textContent = `${report.rows.length - report.finalizedCount} khoản còn dùng ước tính`;
+    $("costs-kpi-nights").textContent = `${report.soldRoomNights} đêm phòng`;
+    $("costs-kpi-guests").textContent = `${report.guestNights} khách-đêm`;
+    $("costs-kpi-avg").textContent = report.costPerRoomNight !== null ? formatVND(report.costPerRoomNight) : "Chưa có đêm phòng";
+
+    // Compact Prorated Room Revenue & Margin Strip
+    const profitNum = Math.round(Number(report.estimatedGrossProfit) || 0);
+    const profitCls = profitNum >= 0 ? "pos" : "neg";
+    const profitText = profitNum < 0
+      ? `-${formatVND(Math.abs(profitNum))}`
+      : (profitNum > 0 ? `+${formatVND(profitNum)}` : formatVND(0));
+    const ratioText = report.costToRevenuePercent !== null ? `${report.costToRevenuePercent}%` : "Chưa có doanh thu";
+    $("costs-pnl-strip").innerHTML = `
+      <span class="costs-pnl-item">Doanh thu phòng (phân bổ T${escapeHtml(report.monthLabelVN)}): <span class="costs-pnl-val">${formatVND(report.proratedRoomRevenue)}</span></span>
+      <span class="costs-pnl-item">Lãi gộp ước tính: <span class="costs-pnl-val ${profitCls}">${profitText}</span></span>
+      <span class="costs-pnl-item">Tỷ lệ Chi phí / Doanh thu: <span class="costs-pnl-val">${escapeHtml(ratioText)}</span></span>
+    `;
+
+    // Missing guest count warning banner with clickable booking chips
+    const missBanner = $("costs-missing-guests-banner");
+    if (report.stay.missingGuestBookings.length > 0) {
+      const chipsHtml = report.stay.missingGuestBookings.map((m) =>
+        m.id
+          ? `<button type="button" class="costs-miss-btn" data-cost-jump-booking="${escapeHtml(m.id)}" title="Mở đơn để bổ sung số khách thực ở">P.${escapeHtml(m.roomId)} • ${escapeHtml(m.guestName)} (${formatDateVN(m.checkin)}→${formatDateVN(m.checkout)}, ${m.nightsInMonth} đêm) ↗</button>`
+          : `<span class="costs-miss-btn">P.${escapeHtml(m.roomId)} • ${escapeHtml(m.guestName)} (${m.nightsInMonth} đêm)</span>`
+      ).join("");
+      missBanner.innerHTML = `<div>⚠️ <strong>Thiếu số khách thực ở</strong> ở ${report.stay.missingGuestBookings.length} đơn (${report.stay.missingGuestRoomNights} đêm phòng) nên các khoản tính <em>Theo khách-đêm</em> chưa cộng đủ. Nhấn vào đơn bên dưới để mở và bổ sung ngay:</div><div style="margin-top:4px;">${chipsHtml}</div>`;
+      missBanner.classList.add("show");
+    } else {
+      missBanner.innerHTML = "";
+      missBanner.classList.remove("show");
+    }
+
+    // Main Table Rows (Expandable)
+    const tbodyParts = [];
+    for (const r of report.rows) {
+      const expanded = costsState.expandedItems.has(r.itemId);
+      const estDisplay = r.hasRate ? formatVND(r.estimatedAmount) : `<span style="color:var(--text-muted);">Chưa có ĐM</span>`;
+      const actDisplay = (r.entriesCount > 0 || r.isFinalized)
+        ? `${formatVND(r.actualAmount)}${r.entriesCount > 0 ? `<div style="font-size:10.5px; color:var(--text-muted);">${r.entriesCount} chứng từ</div>` : ""}`
+        : `<span style="color:var(--text-muted);">—</span>`;
+      const usedBadge = r.isFinalized
+        ? `<span class="costs-status-badge actual">✓ Thực tế</span>`
+        : `<span class="costs-status-badge estimated">Ước tính</span>`;
+      const partialPill = r.isPartialActual
+        ? `<span class="costs-status-badge partial" title="Đã nhập một phần chứng từ nhưng chưa chốt — đang tạm dùng số ước tính">Mới nhập 1 phần</span>`
+        : "";
+
+      tbodyParts.push(`
+        <tr class="costs-row-main" data-cost-expand="${escapeHtml(r.itemId)}">
+          <td>
+            <div class="costs-item-title">
+              <span>${expanded ? "▾" : "▸"}</span>
+              <span>${escapeHtml(r.name)}</span>
+              <span class="costs-mode-pill">${escapeHtml(r.calcModeLabel)}</span>
+              ${partialPill}
+            </div>
+          </td>
+          <td class="num">${estDisplay}</td>
+          <td class="num">${actDisplay}</td>
+          <td class="num">
+            <div style="font-weight:800;">${formatVND(r.usedAmount)}</div>
+            <div>${usedBadge}</div>
+          </td>
+          <td style="text-align:center;">
+            <button type="button" class="btn btn-sm ${r.isFinalized ? "btn-success" : ""}" data-cost-finalize="${escapeHtml(r.itemId)}" data-next-finalized="${r.isFinalized ? "0" : "1"}">
+              ${r.isFinalized ? "✓ Đã chốt" : "Chốt theo thực tế"}
+            </button>
+          </td>
+        </tr>`);
+
+      if (expanded) {
+        const rateInfoTxt = r.hasRate
+          ? `${formatVND(r.rate)} (${escapeHtml(r.unitLabel)} • áp dụng từ ${formatMonthVN(r.rateEffectiveMonth)})`
+          : "Chưa đặt đơn giá (chỉ nhập thực tế)";
+        const vouchersHtml = r.entries.length > 0
+          ? r.entries.map((v) => `
+              <div class="costs-voucher-item">
+                <div>
+                  <strong>${formatVND(v.amount)}</strong>
+                  <span style="color:var(--text-muted); margin-left:6px;">Ngày PS: ${formatDateVN(v.expenseDate)} • Ghi nhận T${formatMonthVN(v.accountingMonth)}</span>
+                  ${v.note ? `<div style="color:var(--text-secondary); margin-top:2px;">📝 ${escapeHtml(v.note)}</div>` : ""}
+                </div>
+                <div class="costs-voucher-actions">
+                  <button type="button" class="btn btn-sm" data-cost-edit-voucher="${escapeHtml(v.id)}">✏️ Sửa</button>
+                  <button type="button" class="btn btn-sm btn-danger" data-cost-del-voucher="${escapeHtml(v.id)}">Xóa</button>
+                </div>
+              </div>`).join("")
+          : `<div style="font-size:11.5px; color:var(--text-muted);">Chưa có chứng từ thực tế nào cho khoản mục này trong tháng ${report.monthLabelVN}.</div>`;
+
+        tbodyParts.push(`
+          <tr class="costs-detail-row">
+            <td colspan="5">
+              <div class="costs-detail-box">
+                <div class="costs-detail-meta">
+                  <span><strong>Số lượng:</strong> ${escapeHtml(r.quantityLabel)}</span>
+                  <span><strong>Đơn giá áp dụng:</strong> ${rateInfoTxt}</span>
+                  <span><strong>Cách tính ước tính:</strong> ${escapeHtml(r.formulaText)}</span>
+                </div>
+                ${r.isPartialActual ? `<div style="color:#c2410c; font-weight:600;">⚠️ Đối chiếu: Đã nhập ${r.entriesCount} chứng từ thực tế (${formatVND(r.actualAmount)}) so với ước tính (${formatVND(r.estimatedAmount)}). Khi đủ chứng từ, bấm "Chốt theo thực tế".</div>` : ""}
+                ${r.isFinalized && r.finalizedMeta ? `<div style="color:var(--status-paid); font-weight:600;">✓ Đã chốt dùng số thực tế (${formatVND(r.actualAmount)})${r.finalizedMeta.finalizedBy ? ` bởi ${escapeHtml(r.finalizedMeta.finalizedBy)}` : ""}.</div>` : ""}
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; margin-top:2px;">
+                  <strong>Chứng từ thực tế tháng ${report.monthLabelVN} (${r.entries.length}):</strong>
+                  <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                    <button type="button" class="btn btn-sm" data-cost-add-voucher="${escapeHtml(r.itemId)}">+ Thêm chứng từ</button>
+                    <button type="button" class="btn btn-sm" data-cost-edit-item="${escapeHtml(r.itemId)}">✏️ Sửa định mức</button>
+                  </div>
+                </div>
+                <div class="costs-voucher-list">${vouchersHtml}</div>
+              </div>
+            </td>
+          </tr>`);
+      }
+    }
+
+    $("costs-table-body").innerHTML = tbodyParts.join("") || `<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted);">Chưa có khoản mục chi phí nào.</td></tr>`;
+
+    // Sync Voucher Tab dropdown & list (preserve active voucher edit fields if user is editing)
+    populateCostVoucherItemOptions();
+    if (!$("cv-id").value) {
+      $("cv-accounting-month").value = report.monthKey;
+      if (!$("cv-expense-date").value) $("cv-expense-date").value = getTodayISO();
+    }
+    const monthVouchers = costData.actualEntries
+      .filter((e) => e.accountingMonth === report.monthKey)
+      .sort((a, b) => String(b.expenseDate).localeCompare(String(a.expenseDate)));
+    const itemNameMap = new Map(costData.items.map((it) => [it.id, it.name]));
+    $("costs-vouchers-heading").textContent = `Chứng từ thực tế ghi nhận cho tháng ${report.monthLabelVN} (${monthVouchers.length} chứng từ • Tổng ${formatVND(report.totalEnteredActual)})`;
+    $("costs-month-vouchers-list").innerHTML = monthVouchers.length > 0
+      ? monthVouchers.map((v) => `
+          <div class="costs-voucher-item">
+            <div>
+              <strong>${escapeHtml(itemNameMap.get(v.itemId) || v.itemId)}</strong> — <strong style="color:var(--accent-primary);">${formatVND(v.amount)}</strong>
+              <span style="color:var(--text-muted); margin-left:6px;">Ngày PS: ${formatDateVN(v.expenseDate)} • Tháng ghi nhận: ${formatMonthVN(v.accountingMonth)}</span>
+              ${v.note ? `<div style="color:var(--text-secondary); margin-top:2px;">📝 ${escapeHtml(v.note)}</div>` : ""}
+            </div>
+            <div class="costs-voucher-actions">
+              <button type="button" class="btn btn-sm" data-cost-edit-voucher="${escapeHtml(v.id)}">✏️ Sửa</button>
+              <button type="button" class="btn btn-sm btn-danger" data-cost-del-voucher="${escapeHtml(v.id)}">Xóa</button>
+            </div>
+          </div>`).join("")
+      : `<div style="font-size:12px; color:var(--text-muted); padding:10px; border:1px dashed var(--border-strong); border-radius:var(--radius-sm);">Chưa có chứng từ nào được ghi nhận cho tháng ${report.monthLabelVN}.</div>`;
+
+    // Sync Items & Rates Config Tab list
+    $("costs-items-list").innerHTML = costData.items.map((it) => {
+      const modeMeta = COST_CALC_MODES[it.calcMode] || COST_CALC_MODES.monthly;
+      const eff = Core.getEffectiveCostRate(it, report.monthKey);
+      const canDelRate = (it.rateHistory || []).length > 1;
+      const histHtml = (it.rateHistory || []).map((h) => `
+        <span class="costs-rate-pill">
+          <span>Từ ${formatMonthVN(h.effectiveMonth)}: <strong>${h.rate > 0 ? formatVND(h.rate) : "0 đ (nhập thực tế)"}</strong></span>
+          ${canDelRate ? `<button type="button" class="costs-rate-del" data-cost-del-rate-item="${escapeHtml(it.id)}" data-cost-del-rate-month="${escapeHtml(h.effectiveMonth)}" title="Xóa mốc định mức từ ${formatMonthVN(h.effectiveMonth)}">✕</button>` : ""}
+        </span>`).join("");
+      const isInactive = it.active === false;
+      return `
+        <div class="costs-item-cfg-row ${isInactive ? "inactive" : ""}">
+          <div>
+            <div style="font-weight:700;">
+              ${escapeHtml(it.name)}
+              <span class="costs-mode-pill">${escapeHtml(modeMeta.label)}</span>
+              ${isInactive ? `<span class="costs-mode-pill">Đã ẩn</span>` : ""}
+            </div>
+            <div style="font-size:11.5px; color:var(--text-secondary); margin-top:2px;">
+              Mức áp dụng T${report.monthLabelVN}: <strong>${eff.hasRate ? `${formatVND(eff.rate)} (${escapeHtml(modeMeta.unitLabel)})` : "Chưa có định mức"}</strong>
+            </div>
+            <div class="costs-rate-hist">${histHtml}</div>
+          </div>
+          <div class="costs-item-actions">
+            <button type="button" class="btn btn-sm" data-cost-edit-item="${escapeHtml(it.id)}">✏️ Sửa / Đổi định mức</button>
+            <button type="button" class="btn btn-sm" data-cost-toggle-active="${escapeHtml(it.id)}" data-next-active="${isInactive ? "1" : "0"}">${isInactive ? "Hiện lại" : "Ẩn"}</button>
+          </div>
+        </div>`;
+    }).join("");
+  }
+
+  async function persistOperatingCosts(nextState, toastMsg) {
+    if (costsState.isSaving) return { ok: false, error: "Đang lưu dữ liệu chi phí..." };
+    costsState.isSaving = true;
+    try {
+      if (typeof store.saveOperatingCosts !== "function") {
+        return { ok: false, error: "Bộ lưu trữ chi phí chưa sẵn sàng." };
+      }
+      const res = await store.saveOperatingCosts(nextState);
+      if (!res || !res.ok) {
+        const errMsg = (res && res.error) || "Lưu chi phí vận hành thất bại.";
+        showToast(errMsg);
+        return { ...(res || {}), ok: false, error: errMsg };
+      }
+      renderOperatingCostsModal();
+      if (toastMsg) showToast(toastMsg);
+      return res;
+    } finally {
+      costsState.isSaving = false;
+      if (typeof store.notifyIdleCheck === "function") store.notifyIdleCheck();
+    }
+  }
+
+  function openOperatingCostsModal(monthKeyOpt) {
+    if (isValidMonthKey(monthKeyOpt)) {
+      costsState.monthKey = monthKeyOpt;
+    } else if (isPcViewActive()) {
+      costsState.monthKey = `${state.year}-${pad2(state.month + 1)}`;
+    } else {
+      costsState.monthKey = getCurrentMonthKey();
+    }
+    setCostsTab("overview");
+    resetCostItemForm(null);
+    resetCostVoucherForm(null);
+    renderOperatingCostsModal();
+    $("costs-modal").classList.add("open");
+  }
+
+  window.PMSOperatingCostsModal = {
+    open: openOperatingCostsModal
+  };
+
   function showFormError(msg) {
     $("form-error").textContent = msg || "";
     $("form-error").classList.toggle("show", !!msg);
@@ -1991,16 +2358,17 @@
   function backupJSON() {
     const payload = {
       exportedAt: new Date().toISOString(),
-      version: 2,
+      version: 3,
       hotel: "Dongvan Ville du H'mong Hotel",
       bookings: state.bookings,
-      auditLogs: store.getAuditLogs()
+      auditLogs: store.getAuditLogs(),
+      operatingCosts: getCurrentOperatingCosts()
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a"); a.href = url; a.download = `backup-dongvan-hotel-${getTodayISO()}.json`; a.click();
     URL.revokeObjectURL(url);
-    showToast("Đã tải file sao lưu JSON");
+    showToast("Đã tải file sao lưu JSON (gồm lịch phòng & chi phí vận hành)");
   }
 
   function restoreJSON(file) {
@@ -2011,15 +2379,31 @@
     }
     const reader = new FileReader();
     reader.onload = async () => {
+      let parsedCosts = null;
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (parsed && typeof parsed === "object" && parsed.operatingCosts && typeof parsed.operatingCosts === "object") {
+          parsedCosts = parsed.operatingCosts;
+        }
+      } catch {}
+
       const res = await store.restoreFromImport(reader.result);
       if (!res.ok) {
         alert("Không thể khôi phục dữ liệu (dữ liệu hiện tại vẫn an toàn):\n" + res.error);
         return;
       }
+      let restoredCosts = false;
+      if (parsedCosts && typeof store.saveOperatingCosts === "function") {
+        const cRes = await store.saveOperatingCosts(parsedCosts);
+        if (cRes && cRes.ok) restoredCosts = true;
+      }
       state.bookings = res.bookings;
       renderAll();
+      if ($("costs-modal").classList.contains("open")) renderOperatingCostsModal();
       onDataMutated("restore");
-      showToast(`Đã khôi phục ${res.bookings.length} lượt đặt phòng (đã lưu bản hoàn tác)`);
+      showToast(restoredCosts
+        ? `Đã khôi phục ${res.bookings.length} lượt đặt phòng & dữ liệu chi phí vận hành`
+        : `Đã khôi phục ${res.bookings.length} lượt đặt phòng (đã lưu bản hoàn tác)`);
     };
     reader.readAsText(file);
   }
@@ -2047,11 +2431,12 @@
   function buildFullBackupPayload(extra = {}) {
     return {
       exportedAt: new Date().toISOString(),
-      version: 2,
+      version: 3,
       hotel: "Dongvan Ville du H'mong Hotel",
       ...extra,
       bookings: state.bookings,
-      auditLogs: store.getAuditLogs()
+      auditLogs: store.getAuditLogs(),
+      operatingCosts: getCurrentOperatingCosts()
     };
   }
 
@@ -2414,12 +2799,14 @@
   function bindEvents() {
     bindDelegatedCalendarEvents();
 
-    // Register PC busy check so live A -> B auto-updates NEVER interrupt an open booking/Dorm form
+    // Register PC busy check so live A -> B auto-updates NEVER interrupt an open booking/Dorm/Costs form
     if (typeof store.registerBusyCheck === "function") {
       store.registerBusyCheck(() =>
         state.isSubmitting ||
+        costsState.isSaving ||
         $("booking-modal").classList.contains("open") ||
-        $("dorm-modal").classList.contains("open")
+        $("dorm-modal").classList.contains("open") ||
+        $("costs-modal").classList.contains("open")
       );
     }
 
@@ -2501,6 +2888,10 @@
               $("pc-dorm-conflict-banner").classList.add("show");
             }
           }
+        }
+
+        if ($("costs-modal").classList.contains("open")) {
+          renderOperatingCostsModal();
         }
 
         if (!isPcViewActive()) {
@@ -2590,6 +2981,7 @@
     $("btn-new-booking").addEventListener("click", () => openBookingModal({ roomId: "101", checkin: getTodayISO(), allowRoomSelect: true }));
     $("btn-open-dorm-today").addEventListener("click", () => openDormBoard(getTodayISO()));
     $("btn-open-groups").addEventListener("click", openGroupReportModal);
+    $("btn-open-costs").addEventListener("click", () => openOperatingCostsModal());
     $("btn-open-history").addEventListener("click", openHistoryModal);
     $("btn-cancel-clipboard").addEventListener("click", () => clearClipboard(false));
     $("btn-export-csv").addEventListener("click", exportCSV);
@@ -2972,8 +3364,252 @@
       if (id === "dorm-modal") $("pc-dorm-conflict-banner").classList.remove("show");
       if (typeof store.notifyIdleCheck === "function") store.notifyIdleCheck();
     };
+    // Operating Costs & COGS Modal Interactions (Shared PC & Mobile)
+    $("btn-costs-prev-month").addEventListener("click", () => {
+      costsState.monthKey = shiftMonthKey(costsState.monthKey, -1);
+      renderOperatingCostsModal();
+    });
+    $("btn-costs-next-month").addEventListener("click", () => {
+      costsState.monthKey = shiftMonthKey(costsState.monthKey, 1);
+      renderOperatingCostsModal();
+    });
+    $("costs-month-picker").addEventListener("change", () => {
+      if (isValidMonthKey($("costs-month-picker").value)) {
+        costsState.monthKey = $("costs-month-picker").value;
+        renderOperatingCostsModal();
+      }
+    });
+    $("btn-costs-tab-overview").addEventListener("click", () => setCostsTab("overview"));
+    $("btn-costs-tab-voucher").addEventListener("click", () => {
+      if (!$("cv-id").value) resetCostVoucherForm(null);
+      else populateCostVoucherItemOptions();
+      showCostVoucherError("");
+      setCostsTab("voucher");
+    });
+    $("btn-costs-tab-items").addEventListener("click", () => {
+      if (!$("ci-effective-month").value) $("ci-effective-month").value = costsState.monthKey;
+      setCostsTab("items");
+    });
+    $("btn-cv-cancel").addEventListener("click", () => {
+      resetCostVoucherForm(null);
+      setCostsTab("overview");
+    });
+    $("btn-cv-reset").addEventListener("click", () => resetCostVoucherForm(null));
+    $("btn-ci-reset").addEventListener("click", () => resetCostItemForm(null));
+    $("btn-costs-export-csv").addEventListener("click", exportOperatingCostsCSV);
+
+    $("costs-missing-guests-banner").addEventListener("click", (e) => {
+      const jumpBtn = e.target.closest("[data-cost-jump-booking]");
+      if (!jumpBtn) return;
+      const bkId = jumpBtn.dataset.costJumpBooking;
+      if (!bkId) return;
+      closeModal("costs-modal");
+      if (isPcViewActive()) {
+        openBookingModal({ bookingId: bkId });
+      } else if (window.PMSMobileApi && typeof window.PMSMobileApi.openBooking === "function") {
+        window.PMSMobileApi.openBooking(bkId);
+      } else {
+        openBookingModal({ bookingId: bkId });
+      }
+    });
+
+    [$("cv-amount"), $("ci-rate")].forEach((inp) => {
+      inp.addEventListener("input", () => {
+        const cleaned = formatNumberInput(inp.value);
+        if (inp.value !== cleaned) inp.value = cleaned;
+      });
+    });
+
+    const handleEditCostVoucher = (voucherId) => {
+      if (!voucherId) return;
+      const cur = getCurrentOperatingCosts();
+      const found = cur.actualEntries.find((v) => v.id === voucherId);
+      if (!found) return;
+      resetCostVoucherForm(found);
+      setCostsTab("voucher");
+      setTimeout(() => $("cv-amount").focus(), 40);
+    };
+
+    const handleDeleteCostVoucher = async (voucherId) => {
+      if (!voucherId) return;
+      const cur = getCurrentOperatingCosts();
+      const delRes = deleteActualCostEntry(cur, voucherId);
+      if (!delRes.ok) return showToast(delRes.error);
+      const saved = await persistOperatingCosts(delRes.state, "Đã xóa chứng từ chi phí thực tế");
+      if (saved && saved.ok && $("cv-id").value === voucherId) {
+        resetCostVoucherForm(null);
+      }
+    };
+
+    $("costs-table-body").addEventListener("click", async (e) => {
+      const finBtn = e.target.closest("[data-cost-finalize]");
+      if (finBtn) {
+        e.stopPropagation();
+        const itemId = finBtn.dataset.costFinalize;
+        const nextFin = finBtn.dataset.nextFinalized === "1";
+        const cur = getCurrentOperatingCosts();
+        const upd = setCostItemFinalized(cur, costsState.monthKey, itemId, nextFin, getActorStaffName());
+        if (!upd.ok) return showToast(upd.error);
+        await persistOperatingCosts(
+          upd.state,
+          nextFin ? "✓ Đã chốt dùng số thực tế cho khoản mục này" : "Đã bỏ chốt — quay về dùng số ước tính"
+        );
+        return;
+      }
+
+      const addVBtn = e.target.closest("[data-cost-add-voucher]");
+      if (addVBtn) {
+        e.stopPropagation();
+        resetCostVoucherForm(null, addVBtn.dataset.costAddVoucher);
+        setCostsTab("voucher");
+        setTimeout(() => $("cv-amount").focus(), 40);
+        return;
+      }
+
+      const editItemBtn = e.target.closest("[data-cost-edit-item]");
+      if (editItemBtn) {
+        e.stopPropagation();
+        const cur = getCurrentOperatingCosts();
+        const found = cur.items.find((it) => it.id === editItemBtn.dataset.costEditItem);
+        if (found) {
+          resetCostItemForm(found);
+          setCostsTab("items");
+          setTimeout(() => $("ci-rate").focus(), 40);
+        }
+        return;
+      }
+
+      const editVBtn = e.target.closest("[data-cost-edit-voucher]");
+      if (editVBtn) {
+        e.stopPropagation();
+        handleEditCostVoucher(editVBtn.dataset.costEditVoucher);
+        return;
+      }
+
+      const delVBtn = e.target.closest("[data-cost-del-voucher]");
+      if (delVBtn) {
+        e.stopPropagation();
+        await handleDeleteCostVoucher(delVBtn.dataset.costDelVoucher);
+        return;
+      }
+
+      const rowMain = e.target.closest("tr[data-cost-expand]");
+      if (rowMain) {
+        const id = rowMain.dataset.costExpand;
+        if (costsState.expandedItems.has(id)) costsState.expandedItems.delete(id);
+        else costsState.expandedItems.add(id);
+        renderOperatingCostsModal();
+      }
+    });
+
+    $("costs-month-vouchers-list").addEventListener("click", async (e) => {
+      const editVBtn = e.target.closest("[data-cost-edit-voucher]");
+      if (editVBtn) {
+        handleEditCostVoucher(editVBtn.dataset.costEditVoucher);
+        return;
+      }
+      const delVBtn = e.target.closest("[data-cost-del-voucher]");
+      if (delVBtn) await handleDeleteCostVoucher(delVBtn.dataset.costDelVoucher);
+    });
+
+    $("costs-items-list").addEventListener("click", async (e) => {
+      const delRateBtn = e.target.closest("[data-cost-del-rate-item]");
+      if (delRateBtn) {
+        const itemId = delRateBtn.dataset.costDelRateItem;
+        const effMonth = delRateBtn.dataset.costDelRateMonth;
+        const cur = getCurrentOperatingCosts();
+        const delRes = deleteCostRateHistoryEntry(cur, itemId, effMonth);
+        if (!delRes.ok) return showToast(delRes.error);
+        await persistOperatingCosts(delRes.state, `Đã xóa mốc định mức từ T${formatMonthVN(effMonth)}`);
+        return;
+      }
+
+      const toggleBtn = e.target.closest("[data-cost-toggle-active]");
+      if (toggleBtn) {
+        const itemId = toggleBtn.dataset.costToggleActive;
+        const nextActive = toggleBtn.dataset.nextActive === "1";
+        const cur = getCurrentOperatingCosts();
+        const togRes = toggleCostItemActive(cur, itemId, nextActive);
+        if (!togRes.ok) return showToast(togRes.error);
+        await persistOperatingCosts(
+          togRes.state,
+          nextActive ? `Đã hiện lại khoản mục "${togRes.item.name}"` : `Đã ẩn khoản mục "${togRes.item.name}" khỏi bảng tháng`
+        );
+        return;
+      }
+
+      const editBtn = e.target.closest("[data-cost-edit-item]");
+      if (!editBtn) return;
+      const cur = getCurrentOperatingCosts();
+      const found = cur.items.find((it) => it.id === editBtn.dataset.costEditItem);
+      if (found) {
+        resetCostItemForm(found);
+        $("ci-rate").focus();
+      }
+    });
+
+    $("costs-voucher-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      showCostVoucherError("");
+      const cur = getCurrentOperatingCosts();
+      const editingId = $("cv-id").value || undefined;
+      const res = addActualCostEntry(cur, {
+        id: editingId,
+        itemId: $("cv-item-id").value,
+        expenseDate: $("cv-expense-date").value,
+        accountingMonth: $("cv-accounting-month").value,
+        amount: $("cv-amount").value,
+        note: $("cv-note").value,
+        createdBy: getActorStaffName()
+      });
+      if (!res.ok) {
+        showCostVoucherError(res.error);
+        return;
+      }
+      const saved = await persistOperatingCosts(
+        res.state,
+        res.isUpdate
+          ? `Đã cập nhật chứng từ ${formatVND(res.entry.amount)} cho tháng ${formatMonthVN(res.entry.accountingMonth)}`
+          : `Đã lưu chứng từ ${formatVND(res.entry.amount)} cho tháng ${formatMonthVN(res.entry.accountingMonth)}`
+      );
+      if (saved && saved.ok) {
+        costsState.monthKey = res.entry.accountingMonth;
+        costsState.expandedItems.add(res.entry.itemId);
+        resetCostVoucherForm(null, res.entry.itemId);
+        renderOperatingCostsModal();
+      } else {
+        showCostVoucherError((saved && saved.error) || "Lưu chứng từ thất bại. Vui lòng thử lại.");
+      }
+    });
+
+    $("costs-item-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      showCostItemError("");
+      const cur = getCurrentOperatingCosts();
+      const res = upsertCostItem(cur, {
+        id: $("ci-id").value || undefined,
+        name: $("ci-name").value,
+        calcMode: $("ci-calc-mode").value,
+        rate: $("ci-rate").value,
+        effectiveMonth: $("ci-effective-month").value
+      });
+      if (!res.ok) {
+        showCostItemError(res.error);
+        return;
+      }
+      const saved = await persistOperatingCosts(res.state, `Đã lưu định mức "${res.item.name}" áp dụng từ T${formatMonthVN($("ci-effective-month").value)}`);
+      if (saved && saved.ok) {
+        resetCostItemForm(null);
+        renderOperatingCostsModal();
+      } else {
+        showCostItemError((saved && saved.error) || "Lưu định mức thất bại. Vui lòng thử lại.");
+      }
+    });
+
     $("btn-close-confirm-pdf").onclick = $("btn-close-confirm-pdf-2").onclick = () => closeModal("confirm-pdf-modal");
     $("confirm-pdf-modal").addEventListener("click", (e) => { if (e.target === $("confirm-pdf-modal")) closeModal("confirm-pdf-modal"); });
+    $("btn-close-costs").onclick = $("btn-close-costs-2").onclick = () => closeModal("costs-modal");
+    $("costs-modal").addEventListener("click", (e) => { if (e.target === $("costs-modal")) closeModal("costs-modal"); });
     $("btn-close-modal").onclick = $("btn-cancel-modal").onclick = () => { clearDraft(); closeModal("booking-modal"); };
     $("booking-modal").addEventListener("click", (e) => { if (e.target === $("booking-modal")) closeModal("booking-modal"); });
     $("btn-close-dorm").onclick = $("btn-close-dorm-2").onclick = () => closeModal("dorm-modal");
@@ -3013,6 +3649,7 @@
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         if ($("confirm-pdf-modal").classList.contains("open")) closeModal("confirm-pdf-modal");
+        else if ($("costs-modal").classList.contains("open")) closeModal("costs-modal");
         else if ($("booking-modal").classList.contains("open")) closeModal("booking-modal");
         else if ($("dorm-modal").classList.contains("open")) {
           if ($("dorm-slot-form").style.display !== "none") { setDormModalMode("board"); renderDormBoard(); }

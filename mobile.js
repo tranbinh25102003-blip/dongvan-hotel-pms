@@ -339,6 +339,10 @@
           </div>
 
           <div class="m-menu-list">
+            <button id="m-menu-costs" type="button" class="m-menu-item">
+              <span>💰 Chi phí vận hành &amp; giá vốn<span class="m-menu-sub">Định mức theo lưu trú, chứng từ thực tế &amp; chốt chi phí tháng</span></span>
+              <span>›</span>
+            </button>
             <button id="m-menu-history" type="button" class="m-menu-item">
               <span>🕒 Lịch sử chỉnh sửa &amp; Sao lưu tự động<span class="m-menu-sub">Xem thay đổi Trước → Sau và khôi phục mốc cũ</span></span>
               <span>›</span>
@@ -2852,6 +2856,11 @@
     });
 
     // More Tab actions (100% PC feature parity)
+    $("m-menu-costs").addEventListener("click", () => {
+      if (window.PMSOperatingCostsModal) {
+        window.PMSOperatingCostsModal.open(mState.selectedDate ? mState.selectedDate.slice(0, 7) : undefined);
+      }
+    });
     $("m-menu-history").addEventListener("click", () => {
       renderMobileHistorySheet();
       $("m-sheet-history").classList.add("open");
@@ -2875,12 +2884,19 @@
       showMobileToast("Đã xuất file Excel (CSV)");
     });
     $("m-menu-backup-json").addEventListener("click", () => {
-      const payload = { exportedAt: new Date().toISOString(), version: 2, hotel: "Dongvan Ville du H'mong Hotel", bookings: getBookings(), auditLogs: client.getAuditLogs() };
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        version: 3,
+        hotel: "Dongvan Ville du H'mong Hotel",
+        bookings: getBookings(),
+        auditLogs: client.getAuditLogs(),
+        operatingCosts: typeof client.getOperatingCosts === "function" ? client.getOperatingCosts() : undefined
+      };
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url; a.download = `backup-dongvan-hotel-${getTodayISO()}.json`; a.click();
       URL.revokeObjectURL(url);
-      showMobileToast("Đã tải file sao lưu JSON");
+      showMobileToast("Đã tải file sao lưu JSON (gồm lịch phòng & chi phí)");
     });
     $("m-input-restore-json").addEventListener("change", (e) => {
       const file = e.target.files[0];
@@ -2888,10 +2904,25 @@
       if (!file) return;
       const reader = new FileReader();
       reader.onload = async () => {
+        let parsedCosts = null;
+        try {
+          const parsed = JSON.parse(reader.result);
+          if (parsed && typeof parsed === "object" && parsed.operatingCosts && typeof parsed.operatingCosts === "object") {
+            parsedCosts = parsed.operatingCosts;
+          }
+        } catch {}
+
         const res = await client.restoreFromImport(reader.result);
         if (!res.ok) return alert("Không thể khôi phục:\n" + res.error);
+        let restoredCosts = false;
+        if (parsedCosts && typeof client.saveOperatingCosts === "function") {
+          const cRes = await client.saveOperatingCosts(parsedCosts);
+          if (cRes && cRes.ok) restoredCosts = true;
+        }
         renderMobileAll();
-        showMobileToast(`Đã khôi phục ${res.bookings.length} lượt đặt phòng`);
+        showMobileToast(restoredCosts
+          ? `Đã khôi phục ${res.bookings.length} lượt đặt phòng & chi phí vận hành`
+          : `Đã khôi phục ${res.bookings.length} lượt đặt phòng`);
       };
       reader.readAsText(file);
     });
@@ -2923,12 +2954,18 @@
       renderSyncStatus();
     });
 
-    // Register mobile busy check so live A -> B auto-updates NEVER interrupt active booking or Dorm typing
+    // Expose Mobile booking sheet opener for shared modals (e.g. missing-guest jump in Operating Costs)
+    window.PMSMobileApi = {
+      openBooking: (bookingId) => openMobileBookingSheet({ bookingId })
+    };
+
+    // Register mobile busy check so live A -> B auto-updates NEVER interrupt active booking, Dorm, or Costs typing
     if (typeof client.registerBusyCheck === "function") {
       client.registerBusyCheck(() =>
         mState.isSubmitting ||
         $("m-sheet-booking").classList.contains("open") ||
-        ($("m-sheet-dorm").classList.contains("open") && mState.dormMode === "form")
+        ($("m-sheet-dorm").classList.contains("open") && mState.dormMode === "form") ||
+        Boolean($("costs-modal") && $("costs-modal").classList.contains("open"))
       );
     }
 
