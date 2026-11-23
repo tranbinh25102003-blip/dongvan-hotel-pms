@@ -51,8 +51,15 @@
           <span>👥 Đoàn</span>
           <span id="groups-count-pill" class="autobackup-pill" style="display:none;">0</span>
         </button>
-        <button id="btn-open-costs" class="btn btn-sm" type="button" title="Chi phí vận hành & giá vốn theo tháng (định mức, chứng từ thực tế, chốt chi phí)">
+        <button id="btn-open-hk" class="btn btn-sm" type="button" title="Buồng phòng, tiến độ dọn, ảnh hoàn tất & báo cáo sự cố">
+          <span>🧹 Buồng phòng</span>
+          <span id="hk-badge-pill" class="autobackup-pill" style="display:none;">0</span>
+        </button>
+        <button id="btn-open-costs" class="btn btn-sm" type="button" title="Chi phí vận hành & giá vốn theo tháng (chỉ Quản lý)">
           <span>💰 Chi phí &amp; Giá vốn</span>
+        </button>
+        <button id="btn-open-accounts" class="btn btn-sm" type="button" title="Quản lý tài khoản nhân viên, vai trò & khóa tài khoản (chỉ Quản lý)" style="display:none;">
+          <span>👤 Tài khoản</span>
         </button>
         <button id="btn-open-history" class="btn btn-sm btn-history" type="button" title="Xem lịch sử chỉnh sửa & cấu hình sao lưu tự động">
           <span>🕒 Lịch sử</span>
@@ -60,14 +67,23 @@
         </button>
         <button id="btn-export-csv" class="btn btn-sm" type="button" title="Xuất file Excel (CSV)">Xuất Excel</button>
         <button id="btn-backup-json" class="btn btn-sm" type="button" title="Sao lưu dữ liệu JSON">Sao lưu</button>
-        <label class="btn btn-sm" for="input-restore-json" title="Khôi phục từ file JSON">
+        <label id="lbl-restore-json" class="btn btn-sm" for="input-restore-json" title="Khôi phục từ file JSON">
           Khôi phục
           <input id="input-restore-json" type="file" accept=".json" hidden />
         </label>
         <button id="btn-theme-toggle" class="btn btn-sm" type="button" title="Đổi giao diện Sáng / Tối">🌙</button>
-        <button id="btn-pc-logout" class="btn btn-sm" type="button" title="Đăng xuất tài khoản lễ tân" style="display:none;">Đăng xuất</button>
+        <button id="btn-pc-logout" class="btn btn-sm" type="button" title="Đăng xuất tài khoản" style="display:none;">Đăng xuất</button>
       </div>
     </header>
+
+    <!-- Live In-App Maintenance Issue Notification Banner (Reception & Manager) -->
+    <div id="issue-alert-banner" class="issue-alert-banner" role="alert" aria-live="polite">
+      <span id="issue-alert-text"></span>
+      <div style="display:flex; gap:6px; align-items:center; flex-shrink:0;">
+        <button id="btn-issue-alert-view" class="btn btn-sm btn-primary" type="button">Xem sự cố</button>
+        <button id="btn-issue-alert-dismiss" class="btn btn-sm" type="button" aria-label="Ẩn thông báo">✕</button>
+      </div>
+    </div>
 
     <!-- Live Summary KPI Strip -->
     <section class="summary-strip" aria-label="Thống kê nhanh">
@@ -186,6 +202,14 @@
           </div>
         </div>
         <div id="form-error" class="form-error"></div>
+        <div id="pc-room-issue-warning" class="room-issue-warning" role="alert" style="display:none;"></div>
+        <div id="pc-checkout-bar" class="checkout-action-bar" style="display:none;">
+          <div id="pc-checkout-status" class="checkout-status-text"></div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button id="btn-request-stayover" class="btn btn-sm" type="button" title="Tạo việc Dọn trong kỳ lưu trú hôm nay (khách vẫn đang ở)">🧹 Dọn trong kỳ lưu trú</button>
+            <button id="btn-checkout-booking" class="btn btn-sm btn-primary" type="button" title="Xác nhận khách trả riêng phòng này và tự động tạo việc Dọn sau trả phòng">🚪 Xác nhận trả phòng (Check-out)</button>
+          </div>
+        </div>
 
         <!-- Room selector (only shown when opened via generic "+ Đặt phòng" toolbar button) -->
         <div class="field" id="wrap-field-room" style="display: none;">
@@ -695,14 +719,18 @@
       <div id="auth-error" class="form-error" role="alert"></div>
       <form id="auth-form" class="auth-form" novalidate>
         <div class="auth-field">
-          <label for="auth-staff">Nhân viên trực ca</label>
+          <label for="auth-staff">Tài khoản nhân viên</label>
           <select id="auth-staff" class="auth-input" required></select>
         </div>
         <div class="auth-field">
-          <label for="auth-passcode">Mật khẩu khách sạn</label>
+          <label for="auth-username">Hoặc nhập tên đăng nhập trực tiếp (nếu cần)</label>
+          <input id="auth-username" class="auth-input" type="text" autocomplete="username" placeholder="Để trống nếu chọn ở danh sách trên..." />
+        </div>
+        <div class="auth-field">
+          <label for="auth-passcode">Mật khẩu tài khoản</label>
           <input id="auth-passcode" class="auth-input" type="password" autocomplete="current-password" placeholder="Nhập mật khẩu..." required />
         </div>
-        <button id="auth-submit" class="btn btn-primary auth-submit-btn" type="submit">Đăng nhập vào sổ phòng</button>
+        <button id="auth-submit" class="btn btn-primary auth-submit-btn" type="submit">Đăng nhập</button>
       </form>
       <div class="auth-foot">
         <span>Phiên đăng nhập tự động lưu an toàn 30 ngày</span>
@@ -947,6 +975,282 @@
           <button id="btn-close-costs-2" class="btn btn-primary" type="button">Đóng</button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Shared Housekeeping & Room Issues Workspace (Full-Screen App for Housekeeping Role, Modal Overlay for Reception & Manager) -->
+  <div id="hk-workspace" class="hk-workspace" role="dialog" aria-modal="true" aria-labelledby="hk-ws-title">
+    <div class="hk-ws-shell">
+      <header class="hk-ws-head">
+        <div style="min-width:0;">
+          <h2 id="hk-ws-title" class="hk-ws-title">🧹 Buồng phòng &amp; Sự cố phòng</h2>
+          <div id="hk-ws-sub" class="hk-ws-sub">Dongvan Ville du H'mong Hotel</div>
+        </div>
+        <div class="hk-ws-head-actions">
+          <span id="hk-sync-pill" class="pc-sync-pill"><span class="sync-dot"></span><span id="hk-sync-text">Đồng bộ</span></span>
+          <button id="btn-hk-logout" class="btn btn-sm" type="button" style="display:none;">Đăng xuất</button>
+          <button id="btn-hk-close" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+        </div>
+      </header>
+
+      <div class="hk-ws-tabs" role="tablist">
+        <button id="btn-hk-tab-tasks" class="btn btn-sm hk-tab-btn active" type="button">🧹 Công việc dọn phòng <span id="hk-tab-tasks-cnt" class="hk-cnt-badge">0</span></button>
+        <button id="btn-hk-tab-issues" class="btn btn-sm hk-tab-btn" type="button">⚠️ Sự cố phòng <span id="hk-tab-issues-cnt" class="hk-cnt-badge">0</span></button>
+      </div>
+
+      <div class="hk-ws-body">
+        <!-- Pane 1: Housekeeping Tasks -->
+        <div id="hk-pane-tasks">
+          <!-- KPI Summary Strip -->
+          <div id="hk-kpi-strip" class="hk-kpi-strip"></div>
+
+          <!-- Filter Bar (Today + History Date/Room Filter for Manager/Reception) -->
+          <div class="hk-filter-bar">
+            <div class="hk-filter-group">
+              <input id="hk-filter-date" class="input" type="date" aria-label="Lọc theo ngày dọn" style="width:146px;" />
+              <select id="hk-filter-room" class="filter-select" aria-label="Lọc theo phòng">
+                <option value="all">Tất cả phòng</option>
+              </select>
+              <select id="hk-filter-status" class="filter-select" aria-label="Lọc theo trạng thái">
+                <option value="all">Mọi trạng thái</option>
+                <option value="dirty">🔴 Cần dọn</option>
+                <option value="in_progress">🟡 Đang dọn</option>
+                <option value="cleaned">✅ Đã dọn</option>
+              </select>
+            </div>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              <button id="btn-hk-today" class="btn btn-sm" type="button">Hôm nay</button>
+              <button id="btn-hk-toggle-create" class="btn btn-sm btn-primary" type="button" style="display:none;">+ Tạo việc dọn phòng</button>
+            </div>
+          </div>
+
+          <!-- Create Stayover / Ad-hoc Cleaning Task Form (Reception & Manager ONLY) -->
+          <form id="hk-create-form" class="hk-create-card" style="display:none;" novalidate>
+            <div style="font-weight:800; font-size:13px; margin-bottom:8px;">🧹 Tạo yêu cầu dọn phòng (Dọn trong kỳ lưu trú / Đột xuất)</div>
+            <div id="hk-create-error" class="form-error"></div>
+            <div class="form-grid-3">
+              <div class="field">
+                <label for="hk-new-room">Số phòng *</label>
+                <select id="hk-new-room" class="select" required></select>
+              </div>
+              <div class="field">
+                <label for="hk-new-type">Loại việc *</label>
+                <select id="hk-new-type" class="select" required>
+                  <option value="stayover">Dọn trong kỳ lưu trú (khách đang ở)</option>
+                  <option value="checkout">Dọn sau trả phòng</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="hk-new-date">Ngày thực hiện *</label>
+                <input id="hk-new-date" class="input" type="date" required />
+              </div>
+            </div>
+            <div class="field" style="margin-top:8px;">
+              <label for="hk-new-note">Ghi chú dọn phòng (không ghi giá/thông tin riêng của khách)</label>
+              <input id="hk-new-note" class="input" type="text" placeholder="VD: Thay khăn tắm, bổ sung 2 chai nước, dọn lúc 10h..." />
+            </div>
+            <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:10px;">
+              <button id="btn-hk-create-cancel" class="btn btn-sm" type="button">Hủy</button>
+              <button id="btn-hk-create-submit" class="btn btn-sm btn-primary" type="submit">✓ Giao việc buồng phòng</button>
+            </div>
+          </form>
+
+          <!-- Tasks Cards List -->
+          <div id="hk-tasks-list" class="hk-cards-list"></div>
+        </div>
+
+        <!-- Pane 2: Maintenance Issues -->
+        <div id="hk-pane-issues" style="display:none;">
+          <div class="hk-filter-bar">
+            <div class="hk-filter-group">
+              <select id="hk-issue-filter-status" class="filter-select" aria-label="Lọc trạng thái sự cố">
+                <option value="active">Đang mở (Mới báo &amp; Đang xử lý)</option>
+                <option value="all">Tất cả sự cố</option>
+                <option value="open">🔴 Mới báo</option>
+                <option value="in_progress">🟡 Đang xử lý</option>
+                <option value="resolved">✅ Đã xử lý</option>
+              </select>
+              <select id="hk-issue-filter-room" class="filter-select" aria-label="Lọc phòng sự cố">
+                <option value="all">Tất cả phòng</option>
+              </select>
+            </div>
+            <button id="btn-open-report-issue" class="btn btn-sm btn-danger" type="button">+ Báo sự cố phòng</button>
+          </div>
+          <div id="hk-issues-list" class="hk-cards-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Complete Housekeeping Task with Mandatory Photo Proof Modal -->
+  <div id="hk-complete-modal" class="modal-backdrop hk-submodal-backdrop" role="dialog" aria-modal="true" aria-labelledby="hk-complete-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="hk-complete-title" class="modal-title">📷 Xác nhận hoàn tất dọn phòng</h2>
+          <div id="hk-complete-sub" class="modal-subtitle">Yêu cầu ít nhất 1 ảnh chụp phòng sau khi dọn của chính lượt dọn này</div>
+        </div>
+        <button id="btn-close-hk-complete" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="hk-complete-task-id" />
+        <div id="hk-complete-error" class="form-error" role="alert"></div>
+
+        <div class="hk-photo-picker-row">
+          <label class="btn btn-primary hk-touch-btn" for="hk-photo-camera">
+            📷 Chụp ảnh bằng camera
+            <input id="hk-photo-camera" type="file" accept="image/*" capture="environment" hidden />
+          </label>
+          <label class="btn hk-touch-btn" for="hk-photo-gallery">
+            🖼️ Chọn ảnh từ điện thoại
+            <input id="hk-photo-gallery" type="file" accept="image/*" multiple hidden />
+          </label>
+        </div>
+
+        <div id="hk-photo-preview-list" class="hk-photo-preview-grid"></div>
+
+        <div class="field">
+          <label for="hk-complete-note">Ghi chú sau khi dọn (không bắt buộc)</label>
+          <input id="hk-complete-note" class="input" type="text" placeholder="VD: Đã thay ga gối, bổ sung đủ khăn và nước suối..." />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-cancel-hk-complete" class="btn" type="button">Đóng</button>
+        <button id="btn-hk-confirm-complete" class="btn btn-success hk-touch-btn" type="button">✓ Xác nhận Đã dọn</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Report Maintenance Issue Modal (accessible anytime, including while cleaning) -->
+  <div id="issue-modal" class="modal-backdrop hk-submodal-backdrop" role="dialog" aria-modal="true" aria-labelledby="issue-modal-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="issue-modal-title" class="modal-title">⚠️ Báo sự cố trong phòng</h2>
+          <div id="issue-reporter-meta" class="modal-subtitle">Tự động điền số phòng, người báo và thời gian</div>
+        </div>
+        <button id="btn-close-issue" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+      <form id="issue-form" class="modal-body" novalidate>
+        <input type="hidden" id="issue-task-id" />
+        <div id="issue-error" class="form-error" role="alert"></div>
+
+        <div class="form-grid">
+          <div class="field">
+            <label for="issue-room-id">Số phòng *</label>
+            <select id="issue-room-id" class="select" required></select>
+          </div>
+          <div class="field">
+            <label for="issue-severity">Mức độ nghiêm trọng *</label>
+            <select id="issue-severity" class="select" required>
+              <option value="low">Thấp (theo dõi / xử lý sau)</option>
+              <option value="medium" selected>Trung bình (cần sửa sớm)</option>
+              <option value="high">Cao (ảnh hưởng trải nghiệm khách)</option>
+              <option value="urgent">Khẩn cấp (ngưng giao phòng ngay)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="issue-description">Mô tả sự cố *</label>
+          <textarea id="issue-description" class="textarea" placeholder="VD: Điều hòa không mát, chảy nước xuống sàn; vòi sen rỉ nước..." required></textarea>
+        </div>
+
+        <label class="toggle-card" for="issue-blocks-room">
+          <div class="toggle-info">
+            <strong>🚫 Phòng chưa thể giao khách mới</strong>
+            <span>Hiện cảnh báo rõ trên lịch phòng cho lễ tân cho đến khi sự cố được xử lý xong</span>
+          </div>
+          <input id="issue-blocks-room" type="checkbox" checked />
+        </label>
+
+        <div class="field">
+          <label>Ảnh minh họa sự cố (không bắt buộc)</label>
+          <div class="hk-photo-picker-row">
+            <label class="btn btn-sm" for="issue-photo-camera">
+              📷 Chụp ảnh
+              <input id="issue-photo-camera" type="file" accept="image/*" capture="environment" hidden />
+            </label>
+            <label class="btn btn-sm" for="issue-photo-gallery">
+              🖼️ Chọn ảnh
+              <input id="issue-photo-gallery" type="file" accept="image/*" hidden />
+            </label>
+          </div>
+          <div id="issue-photo-preview-list" class="hk-photo-preview-grid"></div>
+        </div>
+      </form>
+      <div class="modal-footer">
+        <button id="btn-cancel-issue" class="btn" type="button">Hủy</button>
+        <button id="btn-submit-issue" class="btn btn-danger" type="submit" form="issue-form">🚨 Gửi báo cáo sự cố</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Staff Accounts & Roles Management Modal (Manager ONLY) -->
+  <div id="accounts-modal" class="modal-backdrop costs-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="accounts-modal-title">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <div>
+          <h2 id="accounts-modal-title" class="modal-title">👤 Quản lý Tài khoản &amp; Phân quyền Nhân viên</h2>
+          <div class="modal-subtitle">Tạo tài khoản riêng cho Quản lý, Lễ tân và Buồng phòng • Khóa tài khoản khi nhân viên nghỉ việc</div>
+        </div>
+        <button id="btn-close-accounts" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+      <div class="modal-body">
+        <form id="accounts-form" class="costs-panel-card" novalidate>
+          <input type="hidden" id="acc-id" />
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+            <strong id="acc-form-title" style="font-size:13px;">➕ Tạo tài khoản nhân viên mới</strong>
+            <button id="btn-acc-reset" class="btn btn-sm" type="button" style="display:none;">+ Tạo tài khoản mới</button>
+          </div>
+          <div id="acc-error" class="form-error" role="alert"></div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="acc-staff-name">Họ tên hiển thị *</label>
+              <input id="acc-staff-name" class="input" type="text" placeholder="VD: Chị Lan, Nguyễn Ngọc..." required />
+            </div>
+            <div class="field">
+              <label for="acc-username">Tên đăng nhập (không dấu cách) *</label>
+              <input id="acc-username" class="input" type="text" placeholder="VD: letan1, buongphong1..." required />
+            </div>
+          </div>
+          <div class="form-grid" style="margin-top:8px;">
+            <div class="field">
+              <label for="acc-role">Vai trò phân quyền *</label>
+              <select id="acc-role" class="select" required>
+                <option value="reception">Lễ tân (lịch phòng, tạo/sửa đơn, check-out, xuất PDF, xem buồng phòng)</option>
+                <option value="housekeeping">Buồng phòng (chỉ màn hình dọn phòng &amp; báo sự cố — không thấy giá/khách)</option>
+                <option value="manager">Quản lý (toàn quyền hệ thống, chi phí &amp; quản trị tài khoản)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="acc-passcode" id="acc-passcode-label">Mật khẩu (tối thiểu 4 ký tự) *</label>
+              <input id="acc-passcode" class="input" type="password" placeholder="Nhập mật khẩu..." />
+            </div>
+          </div>
+          <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:10px;">
+            <button id="btn-acc-save" class="btn btn-primary btn-sm" type="submit">💾 Lưu tài khoản</button>
+          </div>
+        </form>
+
+        <div style="font-weight:700; font-size:12.5px; margin-bottom:6px;">Danh sách tài khoản nhân viên (luôn giữ ít nhất 1 Quản lý đang hoạt động)</div>
+        <div id="accounts-list" class="costs-items-list"></div>
+      </div>
+      <div class="modal-footer">
+        <span style="font-size:12px; color:var(--text-muted);">Khóa tài khoản sẽ lập tức thu hồi quyền đăng nhập và phiên đang mở của nhân viên đó.</span>
+        <button id="btn-close-accounts-2" class="btn btn-primary" type="button">Đóng</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Full-Screen Photo Lightbox Viewer -->
+  <div id="photo-lightbox-modal" class="modal-backdrop photo-lightbox-backdrop" role="dialog" aria-modal="true" aria-label="Xem ảnh phóng to">
+    <div class="photo-lightbox-card">
+      <div class="photo-lightbox-head">
+        <span id="photo-lightbox-caption" style="font-size:12.5px; font-weight:600; color:#fff;"></span>
+        <button id="btn-close-lightbox" class="btn btn-sm" type="button">✕ Đóng</button>
+      </div>
+      <img id="photo-lightbox-img" class="photo-lightbox-img" alt="Ảnh kiểm tra phòng" />
     </div>
   </div>
 

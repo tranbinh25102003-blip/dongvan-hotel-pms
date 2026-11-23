@@ -73,6 +73,17 @@
     setCostItemFinalized,
     computeMonthlyOperatingCosts,
     generateOperatingCostsCsvContent,
+    STAFF_ROLES,
+    normalizeRole,
+    getRoleLabel,
+    hasPermission,
+    HK_TASK_TYPES,
+    HK_TASK_STATUSES,
+    ISSUE_SEVERITIES,
+    ISSUE_STATUSES,
+    getHousekeepingTasksForDate,
+    computeRoomOperationalStatus,
+    computeAllRoomOperationalStatuses,
     generateCsvContent,
     generateAuditCsvContent,
     diffBookingChanges
@@ -423,6 +434,12 @@
     });
     state.lastGroupMap = groupMap;
     const pasteMode = Boolean(state.copiedBooking);
+    const roomStatuses = (typeof store.getRoomStatuses === "function" && store.getRoomStatuses())
+      || computeAllRoomOperationalStatuses(
+        typeof store.getHousekeepingTasks === "function" ? store.getHousekeepingTasks() : [],
+        typeof store.getMaintenanceIssues === "function" ? store.getMaintenanceIssues() : [],
+        today
+      );
 
     const headParts = [`<tr><th class="corner-cell">
       <div style="font-weight:700; font-size:13px;">Phòng / Hạng / View</div>
@@ -467,6 +484,32 @@
       if (isCollapsed) return;
 
       sectionRooms.forEach((room) => {
+        const ops = !room.isDorm ? roomStatuses[room.id] : null;
+        let opsHtml = "";
+        if (ops) {
+          const pills = [];
+          if (ops.cleanliness === "dirty") {
+            pills.push(`<button type="button" class="room-hk-pill dirty" data-open-room-hk="${escapeHtml(room.id)}" title="Phòng đang Cần dọn — nhấn xem việc buồng phòng">🔴 Cần dọn</button>`);
+          } else if (ops.cleanliness === "in_progress") {
+            const who = ops.activeTask && ops.activeTask.startedBy ? ` (${ops.activeTask.startedBy})` : "";
+            pills.push(`<button type="button" class="room-hk-pill in_progress" data-open-room-hk="${escapeHtml(room.id)}" title="Đang dọn${escapeHtml(who)} — nhấn xem tiến độ">🟡 Đang dọn</button>`);
+          } else if (ops.cleanliness === "cleaned") {
+            const who = ops.lastCleanedTask && ops.lastCleanedTask.completedBy ? ` bởi ${ops.lastCleanedTask.completedBy}` : "";
+            pills.push(`<button type="button" class="room-hk-pill cleaned" data-open-room-hk="${escapeHtml(room.id)}" title="Đã dọn${escapeHtml(who)} — nhấn xem ảnh hoàn tất">✅ Đã dọn</button>`);
+          }
+          if (ops.isBlocked && ops.blockingIssues.length > 0) {
+            const topIss = ops.blockingIssues[0];
+            const shortDesc = topIss.description.length > 18 ? `${topIss.description.slice(0, 18)}…` : topIss.description;
+            pills.push(`<button type="button" class="room-issue-pill" data-open-room-issues="${escapeHtml(room.id)}" title="Phòng chưa thể giao khách: ${escapeHtml(topIss.description)}">🚫 Sự cố: ${escapeHtml(shortDesc)}</button>`);
+          } else if (ops.hasOpenIssues) {
+            const topIss = ops.activeIssues[0];
+            pills.push(`<button type="button" class="room-issue-pill soft" data-open-room-issues="${escapeHtml(room.id)}" title="Sự cố đang mở: ${escapeHtml(topIss.description)}">⚠️ Sự cố (${ops.activeIssues.length})</button>`);
+          }
+          if (pills.length > 0) {
+            opsHtml = `<div class="room-ops-badges">${pills.join("")}</div>`;
+          }
+        }
+
         bodyParts.push(`<tr class="room-row" data-room-id="${room.id}">
           <td class="room-cell">
             <div class="room-top">
@@ -476,6 +519,7 @@
             <div class="room-meta" title="${escapeHtml(room.view)} • ${escapeHtml(room.bedInfo)}">
               ${escapeHtml(room.view)} • ${escapeHtml(room.bedInfo)}
             </div>
+            ${opsHtml}
           </td>`);
 
         dates.forEach((dt) => {
@@ -577,6 +621,7 @@
     pcRenderDirty = false;
     updateTodayDateLabel();
     updateHeaderGroupPill();
+    updateHkHeaderBadge();
     updateClipboardUI();
     renderLegend();
     renderKPIs();
@@ -600,6 +645,18 @@
     });
 
     $("calendar-tbody").addEventListener("click", (e) => {
+      const hkPill = e.target.closest("[data-open-room-hk]");
+      if (hkPill) {
+        e.stopPropagation();
+        openHousekeepingWorkspace({ tab: "tasks", roomId: hkPill.dataset.openRoomHk });
+        return;
+      }
+      const issPill = e.target.closest("[data-open-room-issues]");
+      if (issPill) {
+        e.stopPropagation();
+        openHousekeepingWorkspace({ tab: "issues", roomId: issPill.dataset.openRoomIssues });
+        return;
+      }
       const floorBtn = e.target.closest("[data-floor-toggle]");
       if (floorBtn) {
         const fl = floorBtn.dataset.floorToggle;
@@ -1166,6 +1223,10 @@
   }
 
   function openConfirmationPdfModal(targetBooking, allBookingsList) {
+    if (!userCan("bookings:pdf")) {
+      showToast("Tài khoản của bạn không có quyền xuất phiếu xác nhận đặt phòng.");
+      return;
+    }
     if (!targetBooking) return;
     const latestBookings = Array.isArray(allBookingsList) && allBookingsList.length
       ? allBookingsList
@@ -1575,6 +1636,10 @@
   }
 
   function openOperatingCostsModal(monthKeyOpt) {
+    if (!userCan("costs:read")) {
+      showToast("Chức năng Chi phí vận hành & giá vốn chỉ dành cho Quản lý.");
+      return;
+    }
     if (isValidMonthKey(monthKeyOpt)) {
       costsState.monthKey = monthKeyOpt;
     } else if (isPcViewActive()) {
@@ -1847,7 +1912,67 @@
     }).join("");
   }
 
+  function renderPcBookingOperationalBars(roomId, bookingObj) {
+    const warnEl = $("pc-room-issue-warning");
+    const coBar = $("pc-checkout-bar");
+    const coStatus = $("pc-checkout-status");
+    const coBtn = $("btn-checkout-booking");
+    const stayBtn = $("btn-request-stayover");
+
+    if (warnEl) {
+      const ops = computeRoomOperationalStatus(
+        roomId,
+        typeof store.getHousekeepingTasks === "function" ? store.getHousekeepingTasks() : [],
+        typeof store.getMaintenanceIssues === "function" ? store.getMaintenanceIssues() : [],
+        getTodayISO()
+      );
+      if (ops && ops.activeIssues.length > 0) {
+        const lines = ops.activeIssues.map((iss) => {
+          const sev = (ISSUE_SEVERITIES[iss.severity] || ISSUE_SEVERITIES.medium).label;
+          const stLbl = (ISSUE_STATUSES[iss.status] || ISSUE_STATUSES.open).label;
+          const blk = iss.blocksRoom ? "<strong>[Chưa thể giao khách]</strong> " : "";
+          return `<div>• ${blk}${escapeHtml(iss.description)} <span style="opacity:0.85;">(${escapeHtml(sev)} • ${escapeHtml(stLbl)})</span></div>`;
+        }).join("");
+        const headerTxt = ops.isBlocked
+          ? `🚫 CẢNH BÁO PHÒNG ${escapeHtml(getRoomById(roomId)?.name || roomId)} CHƯA THỂ GIAO KHÁCH MỚI (${ops.blockingIssues.length} sự cố đang mở)`
+          : `⚠️ Phòng ${escapeHtml(getRoomById(roomId)?.name || roomId)} đang có ${ops.activeIssues.length} sự cố cần lưu ý`;
+        warnEl.innerHTML = `<div style="display:flex; align-items:flex-start; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+          <div><div>${headerTxt}</div><div style="margin-top:3px; font-weight:600;">${lines}</div></div>
+          <button type="button" class="btn btn-sm" data-pc-jump-issues="${escapeHtml(roomId)}">Xem sự cố</button>
+        </div>`;
+        warnEl.style.display = "block";
+      } else {
+        warnEl.innerHTML = "";
+        warnEl.style.display = "none";
+      }
+    }
+
+    if (coBar && coStatus && coBtn && stayBtn) {
+      if (bookingObj && bookingObj.id && bookingObj.roomId !== "DORM" && userCan("bookings:checkout")) {
+        coBar.style.display = "flex";
+        if (bookingObj.checkedOutAt) {
+          coStatus.innerHTML = `<span style="color:var(--status-paid);">✓ Đã xác nhận trả phòng lúc ${escapeHtml(formatTimestampVN(bookingObj.checkedOutAt))}${bookingObj.checkedOutBy ? ` (${escapeHtml(bookingObj.checkedOutBy)})` : ""}</span> • Đã tạo việc Dọn sau trả phòng`;
+          coBtn.textContent = "✓ Đã Check-out";
+          coBtn.classList.remove("btn-primary");
+          coBtn.classList.add("btn-success");
+        } else {
+          coStatus.textContent = "Khách đang ở / chưa check-out phòng này";
+          coBtn.textContent = "🚪 Xác nhận trả phòng (Check-out)";
+          coBtn.classList.add("btn-primary");
+          coBtn.classList.remove("btn-success");
+        }
+        stayBtn.style.display = userCan("housekeeping:create") ? "inline-flex" : "none";
+      } else {
+        coBar.style.display = "none";
+      }
+    }
+  }
+
   function openBookingModal({ bookingId = null, roomId = "101", checkin = getTodayISO(), prefill = null, allowRoomSelect = false } = {}) {
+    if (!userCan("bookings:read")) {
+      showToast("Tài khoản của bạn không có quyền xem hoặc chỉnh sửa đặt phòng.");
+      return;
+    }
     showFormError("");
     state.bookings = store.refreshLatest();
     const existing = bookingId ? state.bookings.find((b) => b.id === bookingId) : null;
@@ -1936,6 +2061,7 @@
     updateNightsDisplay();
     updatePaymentPreview();
     renderModalGroupSummary();
+    renderPcBookingOperationalBars($("field-room").value, existing || null);
     $("booking-modal").classList.add("open");
     setTimeout(() => {
       if ($("booking-modal").classList.contains("open") && document.activeElement !== $("field-booking-code")) {
@@ -2347,6 +2473,10 @@
   /* -------------------- Export CSV / Backup & Validated Restore -------------------- */
 
   function exportCSV() {
+    if (!userCan("admin:backup")) {
+      showToast("Chức năng Xuất Excel tổng hợp chỉ dành cho Quản lý.");
+      return;
+    }
     const csv = generateCsvContent(state.bookings);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -2356,6 +2486,10 @@
   }
 
   function backupJSON() {
+    if (!userCan("admin:backup")) {
+      showToast("Chức năng Sao lưu dữ liệu chỉ dành cho Quản lý.");
+      return;
+    }
     const payload = {
       exportedAt: new Date().toISOString(),
       version: 3,
@@ -2372,6 +2506,10 @@
   }
 
   function restoreJSON(file) {
+    if (!userCan("admin:backup")) {
+      showToast("Chức năng Khôi phục dữ liệu chỉ dành cho Quản lý.");
+      return;
+    }
     if (!file) return;
     if (file.size > 5 * 1024 * 1024) {
       alert("File JSON quá lớn (> 5MB). Vui lòng kiểm tra lại file sao lưu.");
@@ -2693,41 +2831,700 @@
     }
   }
 
+  function getUserRole() {
+    if (typeof store.getRole === "function") return normalizeRole(store.getRole());
+    const auth = typeof store.getAuthState === "function" ? store.getAuthState() : null;
+    if (auth && auth.authRequired && auth.user && auth.user.role) return normalizeRole(auth.user.role);
+    return "manager";
+  }
+
+  function userCan(permission) {
+    if (typeof store.can === "function") return store.can(permission);
+    return hasPermission(getUserRole(), permission);
+  }
+
   function updatePcSyncPill() {
     const status = store.getStatus ? store.getStatus() : { mode: "local", connectionStatus: "local", lastSyncedAt: null };
     const pill = $("pc-sync-status");
     const txt = $("pc-sync-text");
-    if (!pill || !txt) return;
-    pill.classList.remove("offline", "reconnecting");
+    const hkPill = $("hk-sync-pill");
+    const hkTxt = $("hk-sync-text");
     const t = status.lastSyncedAt ? formatTimestampVN(status.lastSyncedAt).slice(11) : "";
     const ver = status.runningVersion && status.runningVersion.appVersion
       ? `v${status.runningVersion.appVersion} (${status.runningVersion.buildId || ""})`
       : "";
-    const staff = status.user && status.user.staffName ? ` • ${status.user.staffName}` : "";
-    pill.title = `Trạng thái đồng bộ dữ liệu${ver ? ` • ${ver}` : ""}${staff}`;
+    const staff = status.user && status.user.staffName
+      ? ` • ${status.user.staffName} (${getRoleLabel(status.user.role)})`
+      : "";
+
+    let labelText = "Đã đồng bộ";
+    let statusCls = "";
     if (status.mode === "local") {
-      txt.textContent = "Offline cục bộ";
+      labelText = "Offline cục bộ";
     } else if (status.connectionStatus === "auth_required") {
-      pill.classList.add("offline");
-      txt.textContent = "Cần đăng nhập";
+      statusCls = "offline";
+      labelText = "Cần đăng nhập";
     } else if (status.connectionStatus === "connected") {
-      txt.textContent = t ? `Đồng bộ ${t}` : "Đã đồng bộ";
+      labelText = t ? `Đồng bộ ${t}` : "Đã đồng bộ";
     } else if (status.connectionStatus === "reconnecting") {
-      pill.classList.add("reconnecting");
-      txt.textContent = "Đang nối lại...";
+      statusCls = "reconnecting";
+      labelText = "Đang nối lại...";
     } else {
-      pill.classList.add("offline");
-      txt.textContent = t ? `Mất mạng (${t})` : "Mất mạng";
+      statusCls = "offline";
+      labelText = t ? `Mất mạng (${t})` : "Mất mạng";
+    }
+
+    if (pill && txt) {
+      pill.classList.remove("offline", "reconnecting");
+      if (statusCls) pill.classList.add(statusCls);
+      pill.title = `Trạng thái đồng bộ dữ liệu${ver ? ` • ${ver}` : ""}${staff}`;
+      txt.textContent = labelText;
+    }
+    if (hkPill && hkTxt) {
+      hkPill.classList.remove("offline", "reconnecting");
+      if (statusCls) hkPill.classList.add(statusCls);
+      hkTxt.textContent = labelText;
     }
 
     const logoutBtn = $("btn-pc-logout");
     if (logoutBtn) {
       logoutBtn.style.display = status.mode === "server" && status.authRequired && status.authenticated ? "" : "none";
       if (status.user && status.user.staffName) {
-        logoutBtn.title = `Đăng xuất (${status.user.staffName})`;
+        logoutBtn.title = `Đăng xuất (${status.user.staffName} • ${getRoleLabel(status.user.role)})`;
       }
     }
   }
+
+  /* -------------------- Housekeeping, Maintenance Issues, Photo Proof & Accounts (v1.4.0) -------------------- */
+
+  const hkState = {
+    activeTab: "tasks", // "tasks" | "issues"
+    filterDate: getTodayISO(),
+    filterRoom: "all",
+    filterStatus: "all",
+    issueFilterStatus: "active",
+    issueFilterRoom: "all",
+    completingTaskId: "",
+    completePhotos: [], // [{ localId, dataUrl, uploadedPhoto }]
+    issuePhotos: [],
+    isSubmitting: false,
+    dismissedAlertIssueId: ""
+  };
+
+  function populateHousekeepingRoomDropdowns() {
+    const regularRooms = ROOMS.filter((r) => !r.isDorm);
+    const allOpts = `<option value="all">Tất cả phòng</option>` +
+      regularRooms.map((r) => `<option value="${escapeHtml(r.id)}">Phòng ${escapeHtml(r.name)} (${escapeHtml(r.type)})</option>`).join("");
+    const roomOnlyOpts = regularRooms
+      .map((r) => `<option value="${escapeHtml(r.id)}">Phòng ${escapeHtml(r.name)} — Tầng ${r.floor} (${escapeHtml(r.type)})</option>`)
+      .join("");
+    if ($("hk-filter-room")) $("hk-filter-room").innerHTML = allOpts;
+    if ($("hk-issue-filter-room")) $("hk-issue-filter-room").innerHTML = allOpts;
+    if ($("hk-new-room")) $("hk-new-room").innerHTML = roomOnlyOpts;
+    if ($("issue-room-id")) $("issue-room-id").innerHTML = roomOnlyOpts;
+  }
+
+  function updateHkHeaderBadge() {
+    const pill = $("hk-badge-pill");
+    if (!pill) return;
+    const tasks = typeof store.getHousekeepingTasks === "function" ? store.getHousekeepingTasks() : [];
+    const issues = typeof store.getMaintenanceIssues === "function" ? store.getMaintenanceIssues() : [];
+    const todayTasks = getHousekeepingTasksForDate(tasks, getTodayISO());
+    const pendingTasks = todayTasks.filter((t) => t.status !== "cleaned").length;
+    const activeIssues = issues.filter((i) => i && i.status !== "resolved").length;
+    const totalPending = pendingTasks + activeIssues;
+    if (totalPending > 0) {
+      pill.textContent = String(totalPending);
+      pill.style.display = "inline-flex";
+    } else {
+      pill.style.display = "none";
+    }
+  }
+
+  function renderIssueBanner() {
+    const banner = $("issue-alert-banner");
+    const txt = $("issue-alert-text");
+    if (!banner || !txt) return;
+    const role = getUserRole();
+    const auth = typeof store.getAuthState === "function" ? store.getAuthState() : { authRequired: false, authenticated: true };
+    if ((auth.authRequired && !auth.authenticated) || role === "housekeeping" || !userCan("bookings:read")) {
+      banner.classList.remove("show");
+      return;
+    }
+    const issues = typeof store.getMaintenanceIssues === "function" ? store.getMaintenanceIssues() : [];
+    const openIssues = issues.filter((i) => i && i.status !== "resolved");
+    if (openIssues.length === 0) {
+      banner.classList.remove("show");
+      return;
+    }
+    const blocking = openIssues.filter((i) => i.blocksRoom);
+    const primary = blocking[0] || openIssues[0];
+    if (hkState.dismissedAlertIssueId && hkState.dismissedAlertIssueId === primary.id) {
+      banner.classList.remove("show");
+      return;
+    }
+    const roomName = getRoomById(primary.roomId)?.name || primary.roomId;
+    const prefix = blocking.length > 0
+      ? `🚫 ${blocking.length} phòng chưa thể giao khách do sự cố:`
+      : `⚠️ Có ${openIssues.length} sự cố phòng đang mở:`;
+    txt.textContent = `${prefix} P.${roomName} — ${primary.description} (Báo bởi ${primary.reportedBy || "Buồng phòng"})`;
+    banner.classList.add("show");
+  }
+
+  function applyRolePermissionsUI() {
+    const auth = typeof store.getAuthState === "function" ? store.getAuthState() : { authRequired: false, authenticated: true };
+    const isAuthed = !auth.authRequired || auth.authenticated;
+    if (!isAuthed) {
+      delete document.body.dataset.userRole;
+      if ($("hk-workspace")) $("hk-workspace").classList.remove("open");
+      if ($("issue-alert-banner")) $("issue-alert-banner").classList.remove("show");
+      return;
+    }
+
+    const role = getUserRole();
+    document.body.dataset.userRole = role;
+
+    const canCosts = userCan("costs:read");
+    const canAccounts = userCan("accounts:manage");
+    const canBackup = userCan("admin:backup");
+    const canHkCreate = userCan("housekeeping:create");
+
+    if ($("btn-open-costs")) $("btn-open-costs").style.display = canCosts ? "" : "none";
+    if ($("btn-open-accounts")) $("btn-open-accounts").style.display = canAccounts ? "" : "none";
+    if ($("btn-backup-json")) $("btn-backup-json").style.display = canBackup ? "" : "none";
+    if ($("lbl-restore-json")) $("lbl-restore-json").style.display = canBackup ? "" : "none";
+    if ($("btn-export-csv")) $("btn-export-csv").style.display = canBackup ? "" : "none";
+    if ($("btn-reset-sample")) $("btn-reset-sample").style.display = canBackup ? "" : "none";
+    if ($("btn-rollback-last")) $("btn-rollback-last").style.display = canBackup ? "" : "none";
+    if ($("btn-history-rollback-last")) $("btn-history-rollback-last").style.display = canBackup ? "" : "none";
+    if ($("btn-open-hk")) $("btn-open-hk").style.display = role === "housekeeping" ? "none" : "";
+
+    if (role === "housekeeping") {
+      // Strictly lock out calendar, booking modals, PDF, costs, and accounts even if ?view=pc was passed
+      delete document.body.dataset.viewMode;
+      ["booking-modal", "dorm-modal", "day-report-modal", "group-report-modal", "history-modal", "confirm-pdf-modal", "costs-modal", "accounts-modal"].forEach((id) => {
+        if ($(id)) $(id).classList.remove("open");
+      });
+      if ($("btn-hk-close")) $("btn-hk-close").style.display = "none";
+      if ($("btn-hk-logout")) $("btn-hk-logout").style.display = "";
+      if ($("btn-hk-toggle-create")) $("btn-hk-toggle-create").style.display = "none";
+      if ($("hk-create-form")) $("hk-create-form").style.display = "none";
+      if ($("hk-workspace")) {
+        $("hk-workspace").classList.add("open");
+        renderHousekeepingWorkspace();
+      }
+      renderIssueBanner();
+    } else {
+      if ($("btn-hk-close")) $("btn-hk-close").style.display = "";
+      if ($("btn-hk-logout")) $("btn-hk-logout").style.display = "none";
+      if ($("btn-hk-toggle-create")) $("btn-hk-toggle-create").style.display = canHkCreate ? "" : "none";
+      if (!canCosts && $("costs-modal")) $("costs-modal").classList.remove("open");
+      if (!canAccounts && $("accounts-modal")) $("accounts-modal").classList.remove("open");
+      updateHkHeaderBadge();
+      renderIssueBanner();
+      if ($("hk-workspace") && $("hk-workspace").classList.contains("open")) {
+        renderHousekeepingWorkspace();
+      }
+    }
+  }
+
+  function compressImageFileToDataUrl(file) {
+    return new Promise((resolve) => {
+      if (!file) return resolve({ ok: false, error: "Chưa chọn ảnh." });
+      if (file.size > 15 * 1024 * 1024) {
+        return resolve({ ok: false, error: "Ảnh quá lớn (> 15MB). Vui lòng chọn ảnh nhẹ hơn." });
+      }
+      const reader = new FileReader();
+      reader.onerror = () => resolve({ ok: false, error: "Không đọc được file ảnh từ thiết bị." });
+      reader.onload = () => {
+        const rawUrl = String(reader.result || "");
+        if (!rawUrl.startsWith("data:image/")) {
+          return resolve({ ok: false, error: "Vui lòng chỉ chọn định dạng hình ảnh (JPG/PNG/WebP)." });
+        }
+        // Keep tiny images as-is (fast and safe for tests & already-compressed images)
+        if (file.size <= 180 * 1024) {
+          return resolve({ ok: true, dataUrl: rawUrl });
+        }
+        const img = new Image();
+        img.onerror = () => resolve({ ok: true, dataUrl: rawUrl });
+        img.onload = () => {
+          try {
+            const maxDim = 1280;
+            let w = img.naturalWidth || img.width || 0;
+            let h = img.naturalHeight || img.height || 0;
+            if (!w || !h) return resolve({ ok: true, dataUrl: rawUrl });
+            if (w > maxDim || h > maxDim) {
+              const scale = maxDim / Math.max(w, h);
+              w = Math.max(1, Math.round(w * scale));
+              h = Math.max(1, Math.round(h * scale));
+            }
+            const canvas = document.createElement("canvas");
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return resolve({ ok: true, dataUrl: rawUrl });
+            ctx.drawImage(img, 0, 0, w, h);
+            const compressed = canvas.toDataURL("image/jpeg", 0.8);
+            resolve({ ok: true, dataUrl: compressed && compressed.length < rawUrl.length ? compressed : rawUrl });
+          } catch {
+            resolve({ ok: true, dataUrl: rawUrl });
+          }
+        };
+        img.src = rawUrl;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function openPhotoLightbox(src, caption = "") {
+    if (!src) return;
+    $("photo-lightbox-img").src = src;
+    $("photo-lightbox-caption").textContent = caption || "Ảnh kiểm tra phòng";
+    $("photo-lightbox-modal").classList.add("open");
+  }
+
+  function setHousekeepingTab(tabName) {
+    hkState.activeTab = tabName === "issues" ? "issues" : "tasks";
+    $("hk-pane-tasks").style.display = hkState.activeTab === "tasks" ? "block" : "none";
+    $("hk-pane-issues").style.display = hkState.activeTab === "issues" ? "block" : "none";
+    $("btn-hk-tab-tasks").classList.toggle("active", hkState.activeTab === "tasks");
+    $("btn-hk-tab-issues").classList.toggle("active", hkState.activeTab === "issues");
+  }
+
+  function openHousekeepingWorkspace({ tab = "tasks", roomId = "all", dateISO = null } = {}) {
+    if (!userCan("housekeeping:read")) {
+      showToast("Bạn không có quyền truy cập mục Buồng phòng.");
+      return;
+    }
+    hkState.filterDate = dateISO || hkState.filterDate || getTodayISO();
+    hkState.filterRoom = roomId || "all";
+    hkState.issueFilterRoom = tab === "issues" ? (roomId || "all") : "all";
+    setHousekeepingTab(tab);
+    renderHousekeepingWorkspace();
+    $("hk-workspace").classList.add("open");
+    if (typeof store.pullLatest === "function" && store.getStatus && store.getStatus().mode === "server") {
+      store.pullLatest().catch(() => {});
+    }
+  }
+
+  function renderHousekeepingWorkspace() {
+    const role = getUserRole();
+    const status = typeof store.getStatus === "function" ? store.getStatus() : {};
+    const staffName = (status.user && status.user.staffName) || "Nhân viên";
+    const allTasks = typeof store.getHousekeepingTasks === "function" ? store.getHousekeepingTasks() : [];
+    const allIssues = typeof store.getMaintenanceIssues === "function" ? store.getMaintenanceIssues() : [];
+
+    $("hk-ws-title").textContent = role === "housekeeping" ? "🧹 Công việc Buồng phòng" : "🧹 Buồng phòng & Sự cố phòng";
+    $("hk-ws-sub").textContent = `${staffName} (${getRoleLabel(role)}) • Dongvan Ville du H'mong Hotel`;
+
+    $("hk-filter-date").value = hkState.filterDate;
+    if ($("hk-filter-room").value !== hkState.filterRoom) $("hk-filter-room").value = hkState.filterRoom;
+    if ($("hk-filter-status").value !== hkState.filterStatus) $("hk-filter-status").value = hkState.filterStatus;
+    if ($("hk-issue-filter-status").value !== hkState.issueFilterStatus) $("hk-issue-filter-status").value = hkState.issueFilterStatus;
+    if ($("hk-issue-filter-room").value !== hkState.issueFilterRoom) $("hk-issue-filter-room").value = hkState.issueFilterRoom;
+
+    // Tasks for selected date (includes unfinished carryover from previous days!)
+    const dayTasks = getHousekeepingTasksForDate(allTasks, hkState.filterDate);
+    const dirtyCnt = dayTasks.filter((t) => t.status === "dirty").length;
+    const inProgCnt = dayTasks.filter((t) => t.status === "in_progress").length;
+    const cleanedCnt = dayTasks.filter((t) => t.status === "cleaned").length;
+    const openIssuesAll = allIssues.filter((i) => i && i.status !== "resolved");
+
+    $("hk-tab-tasks-cnt").textContent = String(dirtyCnt + inProgCnt);
+    $("hk-tab-issues-cnt").textContent = String(openIssuesAll.length);
+
+    $("hk-kpi-strip").innerHTML = `
+      <div class="hk-kpi-box"><strong style="color:#b91c1c;">${dirtyCnt}</strong><span>🔴 Cần dọn</span></div>
+      <div class="hk-kpi-box"><strong style="color:#b45309;">${inProgCnt}</strong><span>🟡 Đang dọn</span></div>
+      <div class="hk-kpi-box"><strong style="color:#15803d;">${cleanedCnt}</strong><span>✅ Đã dọn (${formatDateVN(hkState.filterDate).slice(0, 5)})</span></div>
+      <div class="hk-kpi-box"><strong style="color:${openIssuesAll.length > 0 ? "#dc2626" : "var(--text-primary)"};">${openIssuesAll.length}</strong><span>⚠️ Sự cố đang mở</span></div>
+    `;
+
+    const filteredTasks = dayTasks.filter((t) => {
+      if (hkState.filterRoom !== "all" && t.roomId !== hkState.filterRoom) return false;
+      if (hkState.filterStatus !== "all" && t.status !== hkState.filterStatus) return false;
+      return true;
+    });
+
+    const canAct = userCan("housekeeping:execute");
+    const canReportIssue = userCan("issues:create");
+    const activeIssuesByRoom = new Map();
+    openIssuesAll.forEach((iss) => {
+      const arr = activeIssuesByRoom.get(iss.roomId) || [];
+      arr.push(iss);
+      activeIssuesByRoom.set(iss.roomId, arr);
+    });
+
+    if (filteredTasks.length === 0) {
+      $("hk-tasks-list").innerHTML = `<div style="text-align:center; padding:28px 14px; color:var(--text-muted); font-size:13px; border:1px dashed var(--border-strong); border-radius:var(--radius-md);">
+        Không có công việc dọn phòng nào cho ngày ${escapeHtml(formatDateVN(hkState.filterDate))}${hkState.filterRoom !== "all" ? ` tại P.${escapeHtml(hkState.filterRoom)}` : ""}.
+      </div>`;
+    } else {
+      $("hk-tasks-list").innerHTML = filteredTasks.map((t) => {
+        const room = getRoomById(t.roomId);
+        const typeMeta = HK_TASK_TYPES[t.taskType] || HK_TASK_TYPES.checkout;
+        const stMeta = HK_TASK_STATUSES[t.status] || HK_TASK_STATUSES.dirty;
+        const roomIssues = activeIssuesByRoom.get(t.roomId) || [];
+        const hasBlocking = roomIssues.some((i) => i.blocksRoom);
+        const photosHtml = Array.isArray(t.photos) && t.photos.length > 0
+          ? `<div class="hk-photos-row">${t.photos.map((p, idx) => `<img class="hk-photo-thumb" src="${escapeHtml(p.url)}" alt="Ảnh dọn P.${escapeHtml(t.roomName || t.roomId)} #${idx + 1}" data-lightbox-src="${escapeHtml(p.url)}" data-lightbox-cap="P.${escapeHtml(t.roomName || t.roomId)} • Hoàn tất bởi ${escapeHtml(t.completedBy || "Buồng phòng")} (${escapeHtml(formatTimestampVN(t.completedAt))})" />`).join("")}</div>`
+          : "";
+
+        let primaryBtn = "";
+        if (canAct && t.status === "dirty") {
+          primaryBtn = `<button type="button" class="btn btn-primary hk-touch-btn" data-hk-start="${escapeHtml(t.id)}">▶ Bắt đầu dọn</button>`;
+        } else if (canAct && t.status === "in_progress") {
+          primaryBtn = `<button type="button" class="btn btn-success hk-touch-btn" data-hk-open-complete="${escapeHtml(t.id)}">📷 Chụp/Chọn ảnh &amp; Hoàn tất</button>`;
+        }
+
+        const issueBtn = canReportIssue
+          ? `<button type="button" class="btn btn-sm" data-hk-report-issue-room="${escapeHtml(t.roomId)}" data-hk-report-issue-task="${escapeHtml(t.id)}">⚠️ Báo sự cố</button>`
+          : "";
+
+        const timelineLines = [];
+        if (t.startedBy) {
+          timelineLines.push(`Bắt đầu: <strong>${escapeHtml(t.startedBy)}</strong> lúc ${escapeHtml(formatTimestampVN(t.startedAt))}`);
+        }
+        if (t.completedBy) {
+          timelineLines.push(`Hoàn tất: <strong>${escapeHtml(t.completedBy)}</strong> lúc ${escapeHtml(formatTimestampVN(t.completedAt))} (${(t.photos || []).length} ảnh)`);
+        }
+
+        return `<article class="hk-card ${escapeHtml(t.status)}" data-hk-task-id="${escapeHtml(t.id)}">
+          <div class="hk-card-top">
+            <div>
+              <div class="hk-room-title">
+                <span>Phòng ${escapeHtml(room ? room.name : t.roomId)}</span>
+                <span class="hk-type-pill">${escapeHtml(typeMeta.label)}</span>
+                ${t.isCarryover ? `<span class="hk-carryover-pill">⚠️ Tồn từ ${escapeHtml(formatDateVN(t.serviceDate).slice(0, 5))}</span>` : ""}
+                ${hasBlocking ? `<span class="room-issue-pill">🚫 Có sự cố chặn phòng</span>` : (roomIssues.length > 0 ? `<span class="room-issue-pill soft">⚠️ ${roomIssues.length} sự cố mở</span>` : "")}
+              </div>
+              <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">
+                ${room ? `Tầng ${room.floor} • ${escapeHtml(room.type)} • ${escapeHtml(room.bedInfo)}` : ""} • Ngày việc: ${escapeHtml(formatDateVN(t.serviceDate))}
+              </div>
+            </div>
+            <span class="hk-status-badge ${escapeHtml(t.status)}">${escapeHtml(stMeta.label)}</span>
+          </div>
+          ${t.note ? `<div class="hk-card-meta">📝 ${escapeHtml(t.note)}</div>` : ""}
+          ${timelineLines.length > 0 ? `<div class="hk-card-meta">${timelineLines.join(" • ")}</div>` : ""}
+          ${photosHtml}
+          <div class="hk-card-actions">
+            <div>${primaryBtn}</div>
+            <div>${issueBtn}</div>
+          </div>
+        </article>`;
+      }).join("");
+    }
+
+    // Render Issues List
+    const filteredIssues = allIssues.filter((iss) => {
+      if (!iss) return false;
+      if (hkState.issueFilterStatus === "active" && iss.status === "resolved") return false;
+      if (["open", "in_progress", "resolved"].includes(hkState.issueFilterStatus) && iss.status !== hkState.issueFilterStatus) return false;
+      if (hkState.issueFilterRoom !== "all" && iss.roomId !== hkState.issueFilterRoom) return false;
+      return true;
+    });
+
+    const canUpdateIssues = userCan("issues:manage");
+    if (filteredIssues.length === 0) {
+      $("hk-issues-list").innerHTML = `<div style="text-align:center; padding:28px 14px; color:var(--text-muted); font-size:13px; border:1px dashed var(--border-strong); border-radius:var(--radius-md);">
+        Không có sự cố phòng nào phù hợp bộ lọc hiện tại.
+      </div>`;
+    } else {
+      $("hk-issues-list").innerHTML = filteredIssues.map((iss) => {
+        const room = getRoomById(iss.roomId);
+        const sevMeta = ISSUE_SEVERITIES[iss.severity] || ISSUE_SEVERITIES.medium;
+        const stMeta = ISSUE_STATUSES[iss.status] || ISSUE_STATUSES.open;
+        const stBadgeCls = iss.status === "resolved" ? "cleaned" : (iss.status === "in_progress" ? "in_progress" : "dirty");
+        const photosHtml = Array.isArray(iss.photos) && iss.photos.length > 0
+          ? `<div class="hk-photos-row">${iss.photos.map((p, idx) => `<img class="hk-photo-thumb" src="${escapeHtml(p.url)}" alt="Ảnh sự cố P.${escapeHtml(iss.roomName || iss.roomId)} #${idx + 1}" data-lightbox-src="${escapeHtml(p.url)}" data-lightbox-cap="Sự cố P.${escapeHtml(iss.roomName || iss.roomId)}: ${escapeHtml(iss.description)}" />`).join("")}</div>`
+          : "";
+
+        let statusActions = "";
+        if (canUpdateIssues) {
+          const btns = [];
+          if (iss.status === "open") {
+            btns.push(`<button type="button" class="btn btn-sm" data-issue-set-status="${escapeHtml(iss.id)}" data-next-status="in_progress">🔧 Chuyển Đang xử lý</button>`);
+          }
+          if (iss.status !== "resolved") {
+            btns.push(`<button type="button" class="btn btn-sm btn-success" data-issue-set-status="${escapeHtml(iss.id)}" data-next-status="resolved">✓ Đánh dấu Đã xử lý</button>`);
+          } else {
+            btns.push(`<button type="button" class="btn btn-sm" data-issue-set-status="${escapeHtml(iss.id)}" data-next-status="open">↺ Mở lại sự cố</button>`);
+          }
+          statusActions = `<div class="hk-card-actions"><div style="display:flex; gap:6px; flex-wrap:wrap;">${btns.join("")}</div></div>`;
+        }
+
+        return `<article class="hk-card issue-${escapeHtml(iss.status)}" data-issue-id="${escapeHtml(iss.id)}">
+          <div class="hk-card-top">
+            <div>
+              <div class="hk-room-title">
+                <span>Phòng ${escapeHtml(room ? room.name : iss.roomId)}</span>
+                <span class="hk-type-pill">Mức: ${escapeHtml(sevMeta.label)}</span>
+                ${iss.blocksRoom && iss.status !== "resolved" ? `<span class="room-issue-pill">🚫 Chưa thể giao khách</span>` : ""}
+              </div>
+              <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">
+                Người báo: <strong>${escapeHtml(iss.reportedBy || "Nhân viên")}</strong> • ${escapeHtml(formatTimestampVN(iss.reportedAt))}
+              </div>
+            </div>
+            <span class="hk-status-badge ${stBadgeCls}">${escapeHtml(stMeta.label)}</span>
+          </div>
+          <div style="font-size:13px; font-weight:700; color:var(--text-primary);">${escapeHtml(iss.description)}</div>
+          ${iss.resolvedAt ? `<div class="hk-card-meta" style="color:var(--status-paid);">✓ Đã xử lý bởi <strong>${escapeHtml(iss.resolvedBy || "Quản lý")}</strong> lúc ${escapeHtml(formatTimestampVN(iss.resolvedAt))}</div>` : ""}
+          ${photosHtml}
+          ${statusActions}
+        </article>`;
+      }).join("");
+    }
+  }
+
+  function showHkCompleteError(msg) {
+    $("hk-complete-error").textContent = msg || "";
+    $("hk-complete-error").classList.toggle("show", Boolean(msg));
+  }
+
+  function renderHkCompletePhotoPreviews() {
+    const grid = $("hk-photo-preview-list");
+    if (!grid) return;
+    if (hkState.completePhotos.length === 0) {
+      grid.innerHTML = `<div style="font-size:12px; color:var(--text-muted); padding:8px; border:1px dashed var(--border-strong); border-radius:var(--radius-sm); width:100%;">Chưa có ảnh nào. Hãy chụp bằng camera hoặc chọn ảnh từ điện thoại (bắt buộc tối thiểu 1 ảnh).</div>`;
+      return;
+    }
+    grid.innerHTML = hkState.completePhotos.map((item, idx) => `
+      <div class="hk-preview-item" data-preview-id="${escapeHtml(item.localId)}">
+        <img src="${escapeHtml(item.dataUrl)}" alt="Ảnh dọn phòng #${idx + 1}" data-lightbox-src="${escapeHtml(item.dataUrl)}" data-lightbox-cap="Ảnh hoàn tất dọn phòng #${idx + 1}" />
+        <div class="hk-preview-item-bar">
+          <span style="font-size:10px; font-weight:700; color:${item.uploadedPhoto ? "var(--status-paid)" : "var(--text-muted)"};">${item.uploadedPhoto ? "✓ Đã tải" : "Chờ gửi"}</span>
+          <button type="button" class="btn btn-sm" style="padding:1px 6px; font-size:10.5px;" data-remove-hk-photo="${escapeHtml(item.localId)}">✕</button>
+        </div>
+      </div>`).join("");
+  }
+
+  function openHkCompleteModal(taskId) {
+    const tasks = typeof store.getHousekeepingTasks === "function" ? store.getHousekeepingTasks() : [];
+    const task = tasks.find((t) => t.id === taskId);
+    if (!task) return;
+    hkState.completingTaskId = task.id;
+    hkState.completePhotos = [];
+    $("hk-complete-task-id").value = task.id;
+    $("hk-complete-title").textContent = `📷 Hoàn tất dọn Phòng ${task.roomName || task.roomId}`;
+    $("hk-complete-sub").textContent = "Yêu cầu ít nhất 1 ảnh chụp phòng sau khi dọn của chính lượt dọn này";
+    $("hk-complete-note").value = task.note || "";
+    $("btn-hk-confirm-complete").textContent = "✓ Xác nhận Đã dọn";
+    $("btn-hk-confirm-complete").disabled = false;
+    showHkCompleteError("");
+    renderHkCompletePhotoPreviews();
+    $("hk-complete-modal").classList.add("open");
+  }
+
+  async function addFilesToPhotoDraft(files, targetArray, onUpdated, errFn) {
+    if (!files || files.length === 0) return;
+    errFn("");
+    for (const f of Array.from(files)) {
+      if (targetArray.length >= 6) {
+        errFn("Tối đa 6 ảnh cho mỗi lượt.");
+        break;
+      }
+      const res = await compressImageFileToDataUrl(f);
+      if (!res.ok) {
+        errFn(res.error);
+        continue;
+      }
+      targetArray.push({
+        localId: `loc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        dataUrl: res.dataUrl,
+        uploadedPhoto: null
+      });
+    }
+    onUpdated();
+  }
+
+  async function submitHkTaskCompletion() {
+    if (hkState.isSubmitting) return;
+    const taskId = $("hk-complete-task-id").value;
+    if (!taskId) return;
+    showHkCompleteError("");
+
+    if (hkState.completePhotos.length === 0) {
+      showHkCompleteError("Bắt buộc chụp hoặc chọn ít nhất 1 ảnh hoàn tất của chính lượt dọn này trước khi chuyển sang Đã dọn.");
+      return;
+    }
+
+    hkState.isSubmitting = true;
+    const btn = $("btn-hk-confirm-complete");
+    btn.disabled = true;
+    btn.textContent = "⏳ Đang tải ảnh lên máy chủ...";
+    try {
+      // 1. Upload every pending photo FIRST; if any fails, keep task strictly in_progress and preserve photos for retry!
+      for (const item of hkState.completePhotos) {
+        if (item.uploadedPhoto) continue;
+        const upRes = await store.uploadPhoto(item.dataUrl, "housekeeping");
+        if (!upRes || !upRes.ok || !upRes.photo) {
+          showHkCompleteError((upRes && upRes.error) || "Tải ảnh thất bại — công việc vẫn giữ ở trạng thái Đang dọn. Vui lòng thử lại.");
+          btn.textContent = "↻ Thử tải lại ảnh & Hoàn tất";
+          renderHkCompletePhotoPreviews();
+          return;
+        }
+        item.uploadedPhoto = upRes.photo;
+        renderHkCompletePhotoPreviews();
+      }
+
+      btn.textContent = "⏳ Đang xác nhận Đã dọn...";
+      const uploadedList = hkState.completePhotos.map((p) => p.uploadedPhoto).filter(Boolean);
+      const photoIds = uploadedList.map((p) => p.id);
+      const note = $("hk-complete-note").value.trim();
+
+      const res = await store.completeHousekeepingTask(taskId, { photoIds, photos: uploadedList, note });
+      if (!res || !res.ok) {
+        showHkCompleteError((res && res.error) || "Chưa thể hoàn tất công việc — vui lòng thử lại.");
+        btn.textContent = "↻ Thử lại hoàn tất";
+        return;
+      }
+
+      $("hk-complete-modal").classList.remove("open");
+      hkState.completePhotos = [];
+      hkState.completingTaskId = "";
+      renderHousekeepingWorkspace();
+      updateHkHeaderBadge();
+      if (isPcViewActive() && userCan("bookings:read")) renderCalendar();
+      showToast(`✅ Đã hoàn tất dọn phòng P.${(res.task && res.task.roomName) || ""}!`);
+    } finally {
+      hkState.isSubmitting = false;
+      btn.disabled = false;
+      if (typeof store.notifyIdleCheck === "function") store.notifyIdleCheck();
+    }
+  }
+
+  function showIssueError(msg) {
+    $("issue-error").textContent = msg || "";
+    $("issue-error").classList.toggle("show", Boolean(msg));
+  }
+
+  function renderIssuePhotoPreviews() {
+    const grid = $("issue-photo-preview-list");
+    if (!grid) return;
+    if (hkState.issuePhotos.length === 0) {
+      grid.innerHTML = "";
+      return;
+    }
+    grid.innerHTML = hkState.issuePhotos.map((item, idx) => `
+      <div class="hk-preview-item">
+        <img src="${escapeHtml(item.dataUrl)}" alt="Ảnh sự cố #${idx + 1}" data-lightbox-src="${escapeHtml(item.dataUrl)}" data-lightbox-cap="Ảnh minh họa sự cố #${idx + 1}" />
+        <div class="hk-preview-item-bar">
+          <span style="font-size:10px; color:var(--text-muted);">${item.uploadedPhoto ? "✓ Đã tải" : "Ảnh"}</span>
+          <button type="button" class="btn btn-sm" style="padding:1px 6px; font-size:10.5px;" data-remove-issue-photo="${escapeHtml(item.localId)}">✕</button>
+        </div>
+      </div>`).join("");
+  }
+
+  function openReportIssueModal({ roomId = "101", taskId = "" } = {}) {
+    if (!userCan("issues:create")) {
+      showToast("Bạn không có quyền báo sự cố.");
+      return;
+    }
+    hkState.issuePhotos = [];
+    showIssueError("");
+    $("issue-task-id").value = taskId || "";
+    if ($("issue-room-id") && roomId) $("issue-room-id").value = roomId;
+    $("issue-severity").value = "high";
+    $("issue-description").value = "";
+    $("issue-blocks-room").checked = true;
+    const status = typeof store.getStatus === "function" ? store.getStatus() : {};
+    const reporter = (status.user && status.user.staffName) || "Nhân viên";
+    $("issue-reporter-meta").textContent = `Người báo: ${reporter} • Thời gian: ${formatTimestampVN(new Date().toISOString())}`;
+    renderIssuePhotoPreviews();
+    $("issue-modal").classList.add("open");
+    setTimeout(() => { if ($("issue-description")) $("issue-description").focus(); }, 40);
+  }
+
+  /* -------------------- Staff Accounts & Roles Manager (Manager ONLY) -------------------- */
+
+  function showAccountError(msg) {
+    $("acc-error").textContent = msg || "";
+    $("acc-error").classList.toggle("show", Boolean(msg));
+  }
+
+  function resetAccountForm(editAcc = null) {
+    showAccountError("");
+    if (editAcc) {
+      $("acc-id").value = editAcc.id;
+      $("acc-form-title").textContent = `✏️ Sửa tài khoản — ${editAcc.staffName} (@${editAcc.username})`;
+      $("btn-acc-reset").style.display = "inline-flex";
+      $("acc-staff-name").value = editAcc.staffName || "";
+      $("acc-username").value = editAcc.username || "";
+      $("acc-username").disabled = true;
+      $("acc-role").value = normalizeRole(editAcc.role);
+      $("acc-passcode").value = "";
+      $("acc-passcode-label").textContent = "Đổi mật khẩu mới (để trống nếu giữ nguyên)";
+      $("btn-acc-save").textContent = "💾 Cập nhật tài khoản";
+    } else {
+      $("acc-id").value = "";
+      $("acc-form-title").textContent = "➕ Tạo tài khoản nhân viên mới";
+      $("btn-acc-reset").style.display = "none";
+      $("acc-staff-name").value = "";
+      $("acc-username").value = "";
+      $("acc-username").disabled = false;
+      $("acc-role").value = "reception";
+      $("acc-passcode").value = "";
+      $("acc-passcode-label").textContent = "Mật khẩu (tối thiểu 4 ký tự) *";
+      $("btn-acc-save").textContent = "💾 Tạo tài khoản";
+    }
+  }
+
+  function renderAccountsList(accounts) {
+    const list = Array.isArray(accounts) ? accounts : [];
+    const activeManagers = list.filter((a) => a.role === "manager" && a.active).length;
+    if (list.length === 0) {
+      $("accounts-list").innerHTML = `<div style="padding:14px; font-size:12.5px; color:var(--text-muted); text-align:center;">Chưa có tài khoản nhân viên nào trong cơ sở dữ liệu. Hãy tạo tài khoản mới ở biểu mẫu phía trên.</div>`;
+      return;
+    }
+    $("accounts-list").innerHTML = list.map((acc) => {
+      const isLastActiveMgr = acc.role === "manager" && acc.active && activeManagers <= 1;
+      const statusBadge = acc.active
+        ? `<span class="costs-status-badge actual">Đang hoạt động</span>`
+        : `<span class="costs-status-badge partial">🔒 Đã khóa</span>`;
+      return `<div class="costs-item-cfg-row ${acc.active ? "" : "inactive"}">
+        <div>
+          <div style="font-weight:800; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+            <span>${escapeHtml(acc.staffName)}</span>
+            <span style="font-family:monospace; font-size:11.5px; color:var(--text-muted);">@${escapeHtml(acc.username)}</span>
+            <span class="role-badge ${escapeHtml(acc.role)}">${escapeHtml(getRoleLabel(acc.role))}</span>
+            ${statusBadge}
+          </div>
+          <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">
+            Tạo lúc: ${escapeHtml(formatTimestampVN(acc.createdAt))}${isLastActiveMgr ? " • Quản lý duy nhất đang hoạt động (được bảo vệ)" : ""}
+          </div>
+        </div>
+        <div class="costs-item-actions">
+          <button type="button" class="btn btn-sm" data-acc-edit="${escapeHtml(acc.id)}">✏️ Sửa / Đổi MK</button>
+          <button type="button" class="btn btn-sm ${acc.active ? "btn-danger" : "btn-success"}" data-acc-toggle-active="${escapeHtml(acc.id)}" data-next-active="${acc.active ? "0" : "1"}">${acc.active ? "🔒 Khóa" : "🔓 Mở khóa"}</button>
+        </div>
+      </div>`;
+    }).join("");
+  }
+
+  async function openAccountsModal() {
+    if (!userCan("accounts:manage")) {
+      showToast("Chức năng quản trị tài khoản chỉ dành cho Quản lý.");
+      return;
+    }
+    resetAccountForm(null);
+    $("accounts-modal").classList.add("open");
+    const res = await store.listAccounts();
+    if (!res || !res.ok) {
+      showAccountError((res && res.error) || "Không tải được danh sách tài khoản.");
+      renderAccountsList(store.getAccounts ? store.getAccounts() : []);
+      return;
+    }
+    renderAccountsList(res.accounts || []);
+  }
+
+  window.PMSHousekeepingApp = {
+    open: openHousekeepingWorkspace,
+    openIssues: (roomId = "all") => openHousekeepingWorkspace({ tab: "issues", roomId }),
+    openReportIssue: openReportIssueModal,
+    openAccounts: openAccountsModal,
+    applyRolePermissionsUI,
+    renderIssueBanner
+  };
 
   function syncAuthOverlay(errorMessage) {
     const overlay = $("auth-overlay");
@@ -2740,10 +3537,18 @@
     }
 
     const staffSelect = $("auth-staff");
-    if (staffSelect && Array.isArray(auth.staffList) && auth.staffList.length > 0) {
+    if (staffSelect) {
       const prev = staffSelect.value;
-      staffSelect.innerHTML = auth.staffList.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
-      if (prev && auth.staffList.includes(prev)) staffSelect.value = prev;
+      const pub = Array.isArray(auth.accountsPublic) ? auth.accountsPublic : [];
+      if (pub.length > 0) {
+        staffSelect.innerHTML = pub
+          .map((acc) => `<option value="${escapeHtml(acc.username)}">${escapeHtml(acc.staffName)} — ${escapeHtml(getRoleLabel(acc.role))}</option>`)
+          .join("");
+        if (prev && pub.some((a) => a.username === prev)) staffSelect.value = prev;
+      } else if (Array.isArray(auth.staffList) && auth.staffList.length > 0) {
+        staffSelect.innerHTML = auth.staffList.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
+        if (prev && auth.staffList.includes(prev)) staffSelect.value = prev;
+      }
     }
 
     const errEl = $("auth-error");
@@ -2799,14 +3604,18 @@
   function bindEvents() {
     bindDelegatedCalendarEvents();
 
-    // Register PC busy check so live A -> B auto-updates NEVER interrupt an open booking/Dorm/Costs form
+    // Register PC busy check so live A -> B auto-updates NEVER interrupt open forms or photo uploads
     if (typeof store.registerBusyCheck === "function") {
       store.registerBusyCheck(() =>
         state.isSubmitting ||
         costsState.isSaving ||
+        hkState.isSubmitting ||
         $("booking-modal").classList.contains("open") ||
         $("dorm-modal").classList.contains("open") ||
-        $("costs-modal").classList.contains("open")
+        $("costs-modal").classList.contains("open") ||
+        $("hk-complete-modal").classList.contains("open") ||
+        $("issue-modal").classList.contains("open") ||
+        $("accounts-modal").classList.contains("open")
       );
     }
 
@@ -2814,35 +3623,44 @@
     $("auth-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const btn = $("auth-submit");
-      const staffName = $("auth-staff").value;
+      const manualUser = ($("auth-username").value || "").trim();
+      const loginId = manualUser || $("auth-staff").value;
       const passcode = $("auth-passcode").value;
       btn.disabled = true;
       btn.textContent = "Đang xác thực...";
       try {
-        const res = await store.login(staffName, passcode);
+        const res = await store.login(loginId, passcode);
         if (!res.ok) {
           syncAuthOverlay(res.error || "Đăng nhập thất bại.");
           return;
         }
         $("auth-passcode").value = "";
+        $("auth-username").value = "";
         syncAuthOverlay("");
         state.bookings = res.bookings || store.getBookings() || [];
-        renderAll();
-        updateAutoBackupUI();
+        applyRolePermissionsUI();
+        if (getUserRole() !== "housekeeping") {
+          renderAll();
+          updateAutoBackupUI();
+        }
         updatePcSyncPill();
-        showToast(`Xin chào ${res.user.staffName} — đã kết nối sổ đặt phòng!`);
+        showToast(`Xin chào ${res.user.staffName} (${getRoleLabel(res.user.role)})!`);
       } finally {
         btn.disabled = false;
-        btn.textContent = "Đăng nhập vào sổ phòng";
+        btn.textContent = "Đăng nhập";
       }
     });
 
-    $("btn-pc-logout").addEventListener("click", async () => {
-      if (!confirm("Đăng xuất tài khoản lễ tân trên thiết bị này?")) return;
+    const handleLogoutClick = async () => {
+      if (!confirm("Đăng xuất tài khoản trên thiết bị này?")) return;
       await store.logout();
+      applyRolePermissionsUI();
       syncAuthOverlay("");
       updatePcSyncPill();
-    });
+    };
+
+    $("btn-pc-logout").addEventListener("click", handleLogoutClick);
+    $("btn-hk-logout").addEventListener("click", handleLogoutClick);
 
     $("btn-app-update-now").addEventListener("click", () => {
       if (typeof store.applyPendingUpdateNow === "function") {
@@ -2856,11 +3674,13 @@
         const { type, state: snap, remoteEvent } = ev;
         updatePcSyncPill();
         if (type === "auth_required") {
+          applyRolePermissionsUI();
           syncAuthOverlay(ev.error || "");
           return;
         }
         if (type === "auth_login") {
           syncAuthOverlay("");
+          applyRolePermissionsUI();
         }
         if (type === "update_pending" || type === "update_applying") {
           syncAppUpdateBanner(type, ev.pendingUpdate);
@@ -2872,6 +3692,31 @@
         }
         if (type === "status" || !snap) return;
         state.bookings = snap.bookings || [];
+
+        if (type === "remote_change" && remoteEvent && remoteEvent.action === "ISSUE_CREATE") {
+          hkState.dismissedAlertIssueId = "";
+          if (getUserRole() !== "housekeeping") {
+            const rName = remoteEvent.roomId ? `P.${getRoomById(remoteEvent.roomId)?.name || remoteEvent.roomId}` : "phòng";
+            showToast(`🚨 Sự cố mới ${rName} từ ${remoteEvent.actor || "Buồng phòng"}!`);
+          }
+        }
+        if (type === "remote_change" && remoteEvent && remoteEvent.action === "HK_COMPLETE" && getUserRole() !== "housekeeping") {
+          const rName = remoteEvent.roomId ? `P.${getRoomById(remoteEvent.roomId)?.name || remoteEvent.roomId}` : "phòng";
+          showToast(`✅ ${remoteEvent.actor || "Buồng phòng"} đã dọn xong ${rName}`);
+        }
+
+        updateHkHeaderBadge();
+        renderIssueBanner();
+        if ($("hk-workspace").classList.contains("open")) {
+          renderHousekeepingWorkspace();
+        }
+        if ($("accounts-modal").classList.contains("open") && Array.isArray(snap.accounts)) {
+          renderAccountsList(snap.accounts);
+        }
+
+        if (getUserRole() === "housekeeping") {
+          return;
+        }
 
         if (type === "remote_change") {
           const openBkId = $("booking-modal").classList.contains("open") ? $("field-booking-id").value : "";
@@ -2915,6 +3760,8 @@
         }
         if ($("booking-modal").classList.contains("open")) {
           renderModalGroupSummary();
+          const curBk = $("field-booking-id").value ? state.bookings.find((b) => b.id === $("field-booking-id").value) : null;
+          renderPcBookingOperationalBars($("field-room").value, curBk || null);
         }
 
         if (type === "remote_change" && remoteEvent && ["CREATE", "UPDATE", "DELETE"].includes(remoteEvent.action)) {
@@ -2981,12 +3828,405 @@
     $("btn-new-booking").addEventListener("click", () => openBookingModal({ roomId: "101", checkin: getTodayISO(), allowRoomSelect: true }));
     $("btn-open-dorm-today").addEventListener("click", () => openDormBoard(getTodayISO()));
     $("btn-open-groups").addEventListener("click", openGroupReportModal);
+    $("btn-open-hk").addEventListener("click", () => openHousekeepingWorkspace({ tab: "tasks", roomId: "all", dateISO: getTodayISO() }));
     $("btn-open-costs").addEventListener("click", () => openOperatingCostsModal());
+    $("btn-open-accounts").addEventListener("click", openAccountsModal);
     $("btn-open-history").addEventListener("click", openHistoryModal);
     $("btn-cancel-clipboard").addEventListener("click", () => clearClipboard(false));
     $("btn-export-csv").addEventListener("click", exportCSV);
     $("btn-backup-json").addEventListener("click", backupJSON);
     $("input-restore-json").addEventListener("change", (e) => { restoreJSON(e.target.files[0]); e.target.value = ""; });
+
+    // Live Issue Alert Banner actions
+    $("btn-issue-alert-view").addEventListener("click", () => openHousekeepingWorkspace({ tab: "issues", roomId: "all" }));
+    $("btn-issue-alert-dismiss").addEventListener("click", () => {
+      const issues = typeof store.getMaintenanceIssues === "function" ? store.getMaintenanceIssues() : [];
+      const openIssues = issues.filter((i) => i && i.status !== "resolved");
+      const primary = openIssues.find((i) => i.blocksRoom) || openIssues[0];
+      if (primary) hkState.dismissedAlertIssueId = primary.id;
+      $("issue-alert-banner").classList.remove("show");
+    });
+
+    // PC Booking Modal: Room Issue jump + Check-out + Stayover cleaning actions
+    $("pc-room-issue-warning").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-pc-jump-issues]");
+      if (!btn) return;
+      openHousekeepingWorkspace({ tab: "issues", roomId: btn.dataset.pcJumpIssues });
+    });
+
+    $("btn-checkout-booking").addEventListener("click", async () => {
+      const id = $("field-booking-id").value;
+      if (!id || state.isSubmitting) return;
+      state.isSubmitting = true;
+      $("btn-checkout-booking").disabled = true;
+      try {
+        const res = await store.checkoutBooking(id, { serviceDate: getTodayISO() });
+        if (!res || !res.ok) {
+          showFormError((res && res.error) || "Không thể xác nhận trả phòng.");
+          return;
+        }
+        state.bookings = store.getBookings() || state.bookings;
+        const latest = state.bookings.find((b) => b.id === id) || res.booking;
+        if (latest) {
+          state.editingBookingRevision = Number(latest.revision) || state.editingBookingRevision;
+          state.editingOriginalBooking = { ...latest, confirmationPdf: latest.confirmationPdf ? { ...latest.confirmationPdf } : null };
+          renderPcBookingOperationalBars(latest.roomId, latest);
+        }
+        renderAll();
+        const rName = getRoomById(latest ? latest.roomId : $("field-room").value)?.name || $("field-room").value;
+        showToast(res.idempotentHit || res.alreadyCheckedOut || res.created === false
+          ? `✓ P.${rName} đã trả phòng trước đó — việc dọn phòng đã tồn tại (không tạo trùng).`
+          : `🚪 Đã check-out P.${rName} → Tự động tạo việc Dọn sau trả phòng!`);
+      } finally {
+        state.isSubmitting = false;
+        $("btn-checkout-booking").disabled = false;
+      }
+    });
+
+    $("btn-request-stayover").addEventListener("click", async () => {
+      const roomId = $("field-room").value;
+      if (!roomId || state.isSubmitting) return;
+      state.isSubmitting = true;
+      $("btn-request-stayover").disabled = true;
+      try {
+        const res = await store.createHousekeepingTask({
+          roomId,
+          taskType: "stayover",
+          serviceDate: getTodayISO(),
+          note: "Dọn trong kỳ lưu trú theo yêu cầu lễ tân"
+        });
+        if (!res || !res.ok) {
+          showFormError((res && res.error) || "Không thể tạo việc dọn phòng.");
+          return;
+        }
+        renderAll();
+        showToast(`🧹 Đã tạo việc Dọn trong kỳ lưu trú cho P.${getRoomById(roomId)?.name || roomId} (khách vẫn đang ở)`);
+      } finally {
+        state.isSubmitting = false;
+        $("btn-request-stayover").disabled = false;
+      }
+    });
+
+    // Housekeeping Workspace events
+    $("btn-hk-close").addEventListener("click", () => {
+      if (getUserRole() === "housekeeping") return;
+      $("hk-workspace").classList.remove("open");
+    });
+    $("hk-workspace").addEventListener("click", (e) => {
+      if (e.target === $("hk-workspace") && getUserRole() !== "housekeeping") {
+        $("hk-workspace").classList.remove("open");
+      }
+    });
+    $("btn-hk-tab-tasks").addEventListener("click", () => { setHousekeepingTab("tasks"); renderHousekeepingWorkspace(); });
+    $("btn-hk-tab-issues").addEventListener("click", () => { setHousekeepingTab("issues"); renderHousekeepingWorkspace(); });
+    $("hk-filter-date").addEventListener("change", () => {
+      hkState.filterDate = $("hk-filter-date").value || getTodayISO();
+      renderHousekeepingWorkspace();
+    });
+    $("hk-filter-room").addEventListener("change", () => {
+      hkState.filterRoom = $("hk-filter-room").value || "all";
+      renderHousekeepingWorkspace();
+    });
+    $("hk-filter-status").addEventListener("change", () => {
+      hkState.filterStatus = $("hk-filter-status").value || "all";
+      renderHousekeepingWorkspace();
+    });
+    $("btn-hk-today").addEventListener("click", () => {
+      hkState.filterDate = getTodayISO();
+      hkState.filterRoom = "all";
+      hkState.filterStatus = "all";
+      renderHousekeepingWorkspace();
+    });
+    $("btn-hk-toggle-create").addEventListener("click", () => {
+      const f = $("hk-create-form");
+      const show = f.style.display === "none";
+      f.style.display = show ? "block" : "none";
+      if (show) {
+        $("hk-new-date").value = hkState.filterDate || getTodayISO();
+        $("hk-new-type").value = "stayover";
+        $("hk-new-note").value = "";
+        $("hk-create-error").textContent = "";
+        $("hk-create-error").classList.remove("show");
+      }
+    });
+    $("btn-hk-create-cancel").addEventListener("click", () => { $("hk-create-form").style.display = "none"; });
+    $("hk-create-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (hkState.isSubmitting) return;
+      $("hk-create-error").textContent = "";
+      $("hk-create-error").classList.remove("show");
+      hkState.isSubmitting = true;
+      $("btn-hk-create-submit").disabled = true;
+      try {
+        const res = await store.createHousekeepingTask({
+          roomId: $("hk-new-room").value,
+          taskType: $("hk-new-type").value,
+          serviceDate: $("hk-new-date").value || getTodayISO(),
+          note: $("hk-new-note").value.trim()
+        });
+        if (!res || !res.ok) {
+          $("hk-create-error").textContent = (res && res.error) || "Không thể tạo việc dọn phòng.";
+          $("hk-create-error").classList.add("show");
+          return;
+        }
+        $("hk-create-form").style.display = "none";
+        hkState.filterDate = res.task.serviceDate;
+        renderHousekeepingWorkspace();
+        updateHkHeaderBadge();
+        if (isPcViewActive() && userCan("bookings:read")) renderCalendar();
+        showToast(`🧹 Đã giao việc ${(HK_TASK_TYPES[res.task.taskType] || HK_TASK_TYPES.stayover).label} cho P.${res.task.roomName}`);
+      } finally {
+        hkState.isSubmitting = false;
+        $("btn-hk-create-submit").disabled = false;
+      }
+    });
+
+    $("hk-tasks-list").addEventListener("click", async (e) => {
+      const img = e.target.closest("[data-lightbox-src]");
+      if (img) return openPhotoLightbox(img.dataset.lightboxSrc, img.dataset.lightboxCap);
+
+      const startBtn = e.target.closest("[data-hk-start]");
+      if (startBtn) {
+        if (hkState.isSubmitting) return;
+        hkState.isSubmitting = true;
+        startBtn.disabled = true;
+        try {
+          const res = await store.startHousekeepingTask(startBtn.dataset.hkStart);
+          if (!res || !res.ok) return showToast((res && res.error) || "Không thể bắt đầu dọn.");
+          renderHousekeepingWorkspace();
+          if (isPcViewActive() && userCan("bookings:read")) renderCalendar();
+          showToast(`🟡 Đang dọn P.${(res.task && res.task.roomName) || ""}`);
+        } finally {
+          hkState.isSubmitting = false;
+          startBtn.disabled = false;
+        }
+        return;
+      }
+
+      const compBtn = e.target.closest("[data-hk-open-complete]");
+      if (compBtn) {
+        openHkCompleteModal(compBtn.dataset.hkOpenComplete);
+        return;
+      }
+
+      const issBtn = e.target.closest("[data-hk-report-issue-room]");
+      if (issBtn) {
+        openReportIssueModal({
+          roomId: issBtn.dataset.hkReportIssueRoom,
+          taskId: issBtn.dataset.hkReportIssueTask || ""
+        });
+      }
+    });
+
+    // Photo Proof Completion Modal events
+    $("hk-photo-camera").addEventListener("change", async (e) => {
+      await addFilesToPhotoDraft(e.target.files, hkState.completePhotos, renderHkCompletePhotoPreviews, showHkCompleteError);
+      e.target.value = "";
+    });
+    $("hk-photo-gallery").addEventListener("change", async (e) => {
+      await addFilesToPhotoDraft(e.target.files, hkState.completePhotos, renderHkCompletePhotoPreviews, showHkCompleteError);
+      e.target.value = "";
+    });
+    $("hk-photo-preview-list").addEventListener("click", (e) => {
+      const remBtn = e.target.closest("[data-remove-hk-photo]");
+      if (remBtn) {
+        hkState.completePhotos = hkState.completePhotos.filter((p) => p.localId !== remBtn.dataset.removeHkPhoto);
+        renderHkCompletePhotoPreviews();
+        return;
+      }
+      const img = e.target.closest("[data-lightbox-src]");
+      if (img) openPhotoLightbox(img.dataset.lightboxSrc, img.dataset.lightboxCap);
+    });
+    $("btn-hk-confirm-complete").addEventListener("click", submitHkTaskCompletion);
+    $("btn-close-hk-complete").onclick = $("btn-cancel-hk-complete").onclick = () => {
+      $("hk-complete-modal").classList.remove("open");
+      if (typeof store.notifyIdleCheck === "function") store.notifyIdleCheck();
+    };
+
+    // Issues Tab & Report Issue Modal events
+    $("hk-issue-filter-status").addEventListener("change", () => {
+      hkState.issueFilterStatus = $("hk-issue-filter-status").value || "active";
+      renderHousekeepingWorkspace();
+    });
+    $("hk-issue-filter-room").addEventListener("change", () => {
+      hkState.issueFilterRoom = $("hk-issue-filter-room").value || "all";
+      renderHousekeepingWorkspace();
+    });
+    $("btn-open-report-issue").addEventListener("click", () => {
+      const targetRoom = hkState.issueFilterRoom !== "all" ? hkState.issueFilterRoom : (hkState.filterRoom !== "all" ? hkState.filterRoom : "101");
+      openReportIssueModal({ roomId: targetRoom });
+    });
+    $("hk-issues-list").addEventListener("click", async (e) => {
+      const img = e.target.closest("[data-lightbox-src]");
+      if (img) return openPhotoLightbox(img.dataset.lightboxSrc, img.dataset.lightboxCap);
+
+      const stBtn = e.target.closest("[data-issue-set-status]");
+      if (stBtn) {
+        if (hkState.isSubmitting) return;
+        hkState.isSubmitting = true;
+        stBtn.disabled = true;
+        try {
+          const res = await store.updateMaintenanceIssue(stBtn.dataset.issueSetStatus, { status: stBtn.dataset.nextStatus });
+          if (!res || !res.ok) return showToast((res && res.error) || "Không thể cập nhật trạng thái sự cố.");
+          renderHousekeepingWorkspace();
+          updateHkHeaderBadge();
+          renderIssueBanner();
+          if (isPcViewActive() && userCan("bookings:read")) renderCalendar();
+          showToast(`✓ Đã cập nhật sự cố sang ${(ISSUE_STATUSES[stBtn.dataset.nextStatus] || ISSUE_STATUSES.open).label}`);
+        } finally {
+          hkState.isSubmitting = false;
+          stBtn.disabled = false;
+        }
+      }
+    });
+
+    $("issue-photo-camera").addEventListener("change", async (e) => {
+      await addFilesToPhotoDraft(e.target.files, hkState.issuePhotos, renderIssuePhotoPreviews, showIssueError);
+      e.target.value = "";
+    });
+    $("issue-photo-gallery").addEventListener("change", async (e) => {
+      await addFilesToPhotoDraft(e.target.files, hkState.issuePhotos, renderIssuePhotoPreviews, showIssueError);
+      e.target.value = "";
+    });
+    $("issue-photo-preview-list").addEventListener("click", (e) => {
+      const remBtn = e.target.closest("[data-remove-issue-photo]");
+      if (remBtn) {
+        hkState.issuePhotos = hkState.issuePhotos.filter((p) => p.localId !== remBtn.dataset.removeIssuePhoto);
+        renderIssuePhotoPreviews();
+        return;
+      }
+      const img = e.target.closest("[data-lightbox-src]");
+      if (img) openPhotoLightbox(img.dataset.lightboxSrc, img.dataset.lightboxCap);
+    });
+    $("issue-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (hkState.isSubmitting) return;
+      showIssueError("");
+      const description = $("issue-description").value.trim();
+      if (!description) {
+        showIssueError("Vui lòng nhập mô tả sự cố trong phòng.");
+        return;
+      }
+      hkState.isSubmitting = true;
+      $("btn-submit-issue").disabled = true;
+      try {
+        for (const item of hkState.issuePhotos) {
+          if (item.uploadedPhoto) continue;
+          const upRes = await store.uploadPhoto(item.dataUrl, "issue");
+          if (!upRes || !upRes.ok || !upRes.photo) {
+            showIssueError((upRes && upRes.error) || "Tải ảnh sự cố thất bại — vui lòng thử lại.");
+            return;
+          }
+          item.uploadedPhoto = upRes.photo;
+        }
+        const uploadedList = hkState.issuePhotos.map((p) => p.uploadedPhoto).filter(Boolean);
+        const res = await store.reportMaintenanceIssue({
+          roomId: $("issue-room-id").value,
+          taskId: $("issue-task-id").value || "",
+          severity: $("issue-severity").value,
+          description,
+          blocksRoom: $("issue-blocks-room").checked,
+          photoIds: uploadedList.map((p) => p.id),
+          photos: uploadedList
+        });
+        if (!res || !res.ok) {
+          showIssueError((res && res.error) || "Không thể gửi báo cáo sự cố.");
+          return;
+        }
+        $("issue-modal").classList.remove("open");
+        hkState.issuePhotos = [];
+        hkState.dismissedAlertIssueId = "";
+        renderHousekeepingWorkspace();
+        updateHkHeaderBadge();
+        renderIssueBanner();
+        if (isPcViewActive() && userCan("bookings:read")) renderCalendar();
+        showToast(`🚨 Đã báo sự cố P.${(res.issue && res.issue.roomName) || $("issue-room-id").value}!`);
+      } finally {
+        hkState.isSubmitting = false;
+        $("btn-submit-issue").disabled = false;
+        if (typeof store.notifyIdleCheck === "function") store.notifyIdleCheck();
+      }
+    });
+    $("btn-close-issue").onclick = $("btn-cancel-issue").onclick = () => {
+      $("issue-modal").classList.remove("open");
+      if (typeof store.notifyIdleCheck === "function") store.notifyIdleCheck();
+    };
+
+    // Staff Accounts Manager Modal events
+    $("btn-acc-reset").addEventListener("click", () => resetAccountForm(null));
+    $("accounts-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      showAccountError("");
+      const editId = $("acc-id").value;
+      const staffName = $("acc-staff-name").value.trim();
+      const username = $("acc-username").value.trim();
+      const role = $("acc-role").value;
+      const passcode = $("acc-passcode").value;
+
+      if (!staffName) return showAccountError("Vui lòng nhập họ tên hiển thị.");
+      if (!editId && !username) return showAccountError("Vui lòng nhập tên đăng nhập.");
+      if (!editId && passcode.length < 4) return showAccountError("Mật khẩu phải có ít nhất 4 ký tự.");
+
+      $("btn-acc-save").disabled = true;
+      try {
+        const res = editId
+          ? await store.updateAccount(editId, {
+              staffName,
+              role,
+              ...(passcode ? { passcode } : {})
+            })
+          : await store.createAccount({ staffName, username, role, passcode });
+
+        if (!res || !res.ok) {
+          showAccountError((res && res.error) || "Không thể lưu tài khoản.");
+          return;
+        }
+        renderAccountsList(res.accounts || []);
+        resetAccountForm(null);
+        showToast(editId ? `✓ Đã cập nhật tài khoản ${staffName}` : `✓ Đã tạo tài khoản @${username} (${getRoleLabel(role)})`);
+      } finally {
+        $("btn-acc-save").disabled = false;
+      }
+    });
+
+    $("accounts-list").addEventListener("click", async (e) => {
+      const editBtn = e.target.closest("[data-acc-edit]");
+      if (editBtn) {
+        const found = (store.getAccounts ? store.getAccounts() : []).find((a) => a.id === editBtn.dataset.accEdit);
+        if (found) resetAccountForm(found);
+        return;
+      }
+      const toggleBtn = e.target.closest("[data-acc-toggle-active]");
+      if (toggleBtn) {
+        showAccountError("");
+        const id = toggleBtn.dataset.accToggleActive;
+        const nextActive = toggleBtn.dataset.nextActive === "1";
+        const res = await store.updateAccount(id, { active: nextActive });
+        if (!res || !res.ok) {
+          showAccountError((res && res.error) || "Không thể cập nhật trạng thái tài khoản.");
+          return;
+        }
+        renderAccountsList(res.accounts || []);
+        showToast(nextActive ? "🔓 Đã mở khóa tài khoản nhân viên" : "🔒 Đã khóa tài khoản & thu hồi phiên đăng nhập");
+      }
+    });
+
+    $("btn-close-accounts").onclick = $("btn-close-accounts-2").onclick = () => {
+      $("accounts-modal").classList.remove("open");
+      if (typeof store.notifyIdleCheck === "function") store.notifyIdleCheck();
+    };
+    $("accounts-modal").addEventListener("click", (e) => {
+      if (e.target === $("accounts-modal")) {
+        $("accounts-modal").classList.remove("open");
+        if (typeof store.notifyIdleCheck === "function") store.notifyIdleCheck();
+      }
+    });
+
+    // Photo Lightbox close
+    $("btn-close-lightbox").onclick = () => $("photo-lightbox-modal").classList.remove("open");
+    $("photo-lightbox-modal").addEventListener("click", (e) => {
+      if (e.target === $("photo-lightbox-modal")) $("photo-lightbox-modal").classList.remove("open");
+    });
 
     // Group Report Modal interactions
     let grpSearchTimer = null;
@@ -3085,6 +4325,8 @@
       const r = getRoomById($("field-room").value);
       if (r && !$("field-booking-id").value) $("modal-heading").textContent = `Đặt phòng mới — P.${r.name}`;
       updateRoomSpecificFields();
+      const curBk = $("field-booking-id").value ? state.bookings.find((b) => b.id === $("field-booking-id").value) : null;
+      renderPcBookingOperationalBars($("field-room").value, curBk || null);
       saveDraft();
     });
     $("field-booking-date").addEventListener("change", saveDraft);
@@ -3648,7 +4890,12 @@
 
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
-        if ($("confirm-pdf-modal").classList.contains("open")) closeModal("confirm-pdf-modal");
+        if ($("photo-lightbox-modal").classList.contains("open")) $("photo-lightbox-modal").classList.remove("open");
+        else if ($("hk-complete-modal").classList.contains("open")) closeModal("hk-complete-modal");
+        else if ($("issue-modal").classList.contains("open")) closeModal("issue-modal");
+        else if ($("accounts-modal").classList.contains("open")) closeModal("accounts-modal");
+        else if ($("hk-workspace").classList.contains("open") && getUserRole() !== "housekeeping") $("hk-workspace").classList.remove("open");
+        else if ($("confirm-pdf-modal").classList.contains("open")) closeModal("confirm-pdf-modal");
         else if ($("costs-modal").classList.contains("open")) closeModal("costs-modal");
         else if ($("booking-modal").classList.contains("open")) closeModal("booking-modal");
         else if ($("dorm-modal").classList.contains("open")) {
@@ -3681,6 +4928,7 @@
   async function boot() {
     initTheme();
     initRoomDropdown();
+    populateHousekeepingRoomDropdowns();
     initConfirmersDropdown();
     initPlatformChips();
     bindEvents();
@@ -3690,8 +4938,11 @@
     }
     const loadRes = await window.__pmsClientInitPromise;
     state.bookings = (loadRes && loadRes.bookings) || store.getBookings() || [];
-    renderAll();
-    updateAutoBackupUI();
+    applyRolePermissionsUI();
+    if (getUserRole() !== "housekeeping") {
+      renderAll();
+      updateAutoBackupUI();
+    }
     updatePcSyncPill();
     syncAuthOverlay("");
     registerAutoUpdateServiceWorker();

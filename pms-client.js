@@ -50,8 +50,9 @@
       authRequired: false,
       authConfigured: true,
       authenticated: true,
-      user: null,
-      staffList: [...(Core.CONFIRMERS || []), "Quản lý"]
+      user: isStandaloneLocal ? { id: "local_manager", username: "quanly", staffName: "Quản lý", role: "manager" } : null,
+      staffList: [...(Core.CONFIRMERS || []), "Quản lý"],
+      accountsPublic: []
     };
 
     let runningVersion = { appVersion: null, buildId: null };
@@ -62,8 +63,23 @@
       auditLogs: [],
       autoBackups: [],
       hasRollbackBackup: false,
-      operatingCosts: Core.createDefaultOperatingCostsState()
+      operatingCosts: Core.createDefaultOperatingCostsState(),
+      housekeepingTasks: [],
+      maintenanceIssues: [],
+      roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
+      accounts: []
     };
+
+    function getCurrentRole() {
+      if (mode === "local") return "manager";
+      if (!authState.authRequired) return "manager";
+      if (authState.user && authState.user.role) return Core.normalizeRole(authState.user.role);
+      return "reception";
+    }
+
+    function can(permission) {
+      return Core.hasPermission(getCurrentRole(), permission);
+    }
 
     function emit(payload) {
       for (const fn of [...listeners]) {
@@ -102,6 +118,7 @@
         authRequired: authState.authRequired,
         authenticated: authState.authenticated,
         user: authState.user,
+        role: getCurrentRole(),
         runningVersion: { ...runningVersion },
         pendingUpdate: pendingUpdate ? { ...pendingUpdate } : null
       };
@@ -111,7 +128,8 @@
       return {
         ...authState,
         user: authState.user ? { ...authState.user } : null,
-        staffList: [...authState.staffList]
+        staffList: [...authState.staffList],
+        accountsPublic: Array.isArray(authState.accountsPublic) ? authState.accountsPublic.map((a) => ({ ...a })) : []
       };
     }
 
@@ -130,6 +148,10 @@
         autoBackups: stateCache.autoBackups,
         hasRollbackBackup: stateCache.hasRollbackBackup,
         operatingCosts: stateCache.operatingCosts,
+        housekeepingTasks: stateCache.housekeepingTasks,
+        maintenanceIssues: stateCache.maintenanceIssues,
+        roomStatuses: stateCache.roomStatuses,
+        accounts: stateCache.accounts,
         storeVersion
       };
     }
@@ -188,7 +210,7 @@
         applyPendingUpdateNow();
         return;
       }
-      // Busy (receptionist is editing a booking or collecting payment): wait safely without losing input
+      // Busy (receptionist/housekeeper is editing a form): wait safely without losing input
       if (!idleUpdateTimer) {
         idleUpdateTimer = setInterval(() => {
           if (!pendingUpdate || applyingUpdate) {
@@ -221,6 +243,20 @@
       if (typeof data.hasRollbackBackup === "boolean") stateCache.hasRollbackBackup = data.hasRollbackBackup;
       if (data.operatingCosts && typeof data.operatingCosts === "object") {
         stateCache.operatingCosts = Core.sanitizeOperatingCostsState(data.operatingCosts);
+      } else if (data.operatingCosts === null) {
+        stateCache.operatingCosts = null;
+      }
+      if (Array.isArray(data.housekeepingTasks)) {
+        stateCache.housekeepingTasks = data.housekeepingTasks;
+      }
+      if (Array.isArray(data.maintenanceIssues)) {
+        stateCache.maintenanceIssues = data.maintenanceIssues;
+      }
+      stateCache.roomStatuses = (data.roomStatuses && typeof data.roomStatuses === "object")
+        ? data.roomStatuses
+        : Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
+      if (Array.isArray(data.accounts)) {
+        stateCache.accounts = data.accounts;
       }
       if (incomingVer !== null) storeVersion = incomingVer;
       if (data.user) authState.user = data.user;
@@ -245,6 +281,13 @@
       if (typeof localStore.getOperatingCosts === "function") {
         stateCache.operatingCosts = localStore.getOperatingCosts();
       }
+      if (typeof localStore.getHousekeepingTasks === "function") {
+        stateCache.housekeepingTasks = localStore.getHousekeepingTasks();
+      }
+      if (typeof localStore.getMaintenanceIssues === "function") {
+        stateCache.maintenanceIssues = localStore.getMaintenanceIssues();
+      }
+      stateCache.roomStatuses = Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
       lastSyncedAt = new Date().toISOString();
       emit({ type, state: getSnapshot(), status: getStatus() });
     }
@@ -525,7 +568,8 @@
             user: authRes.data.user || null,
             staffList: Array.isArray(authRes.data.staffList) && authRes.data.staffList.length
               ? authRes.data.staffList
-              : authState.staffList
+              : authState.staffList,
+            accountsPublic: Array.isArray(authRes.data.accountsPublic) ? authRes.data.accountsPublic : []
           };
           if (authRes.data.appVersion || authRes.data.buildId) {
             recordOrCheckVersion(authRes.data.appVersion, authRes.data.buildId);
@@ -562,12 +606,27 @@
       }
     }
 
-    async function login(staffName, passcode) {
-      if (mode !== "server") return { ok: true, user: { staffName: staffName || "Lễ tân", role: "staff" } };
+    async function refreshAuthPublicList() {
+      if (mode !== "server") return;
+      try {
+        const authRes = await fetchJson("/api/auth/status", { timeoutMs: 5000 });
+        if (authRes.httpOk && authRes.data && authRes.data.ok) {
+          if (Array.isArray(authRes.data.staffList) && authRes.data.staffList.length) {
+            authState.staffList = authRes.data.staffList;
+          }
+          if (Array.isArray(authRes.data.accountsPublic)) {
+            authState.accountsPublic = authRes.data.accountsPublic;
+          }
+        }
+      } catch {}
+    }
+
+    async function login(staffNameOrUsername, passcode) {
+      if (mode !== "server") return { ok: true, user: { id: "local_manager", username: "quanly", staffName: staffNameOrUsername || "Quản lý", role: "manager" } };
       try {
         const res = await fetchJson("/api/auth/login", {
           method: "POST",
-          body: { staffName, passcode },
+          body: { username: staffNameOrUsername, staffName: staffNameOrUsername, passcode },
           timeoutMs: 10000
         });
         if (!res.httpOk || !res.data || !res.data.ok) {
@@ -578,11 +637,11 @@
           };
         }
         authState.authenticated = true;
-        authState.user = res.data.user || { staffName, role: "staff" };
+        authState.user = res.data.user || { username: staffNameOrUsername, staffName: staffNameOrUsername, role: "reception" };
         if (res.data.appVersion || res.data.buildId) {
           recordOrCheckVersion(res.data.appVersion, res.data.buildId);
         }
-        const pulled = await pullLatestFromServer({ type: "auth_login" });
+        const pulled = await pullLatestFromServer({ type: "auth_login", force: true });
         connectSSE();
         emit({ type: "auth_login", auth: getAuthState(), state: getSnapshot(), status: getStatus() });
         return { ok: true, user: authState.user, bookings: pulled.bookings || stateCache.bookings };
@@ -595,11 +654,22 @@
       if (mode !== "server") return { ok: true };
       closeEventSource();
       try { await fetchJson("/api/auth/logout", { method: "POST", body: {}, timeoutMs: 6000 }); } catch {}
-      stateCache = { bookings: [], auditLogs: [], autoBackups: [], hasRollbackBackup: false };
+      stateCache = {
+        bookings: [],
+        auditLogs: [],
+        autoBackups: [],
+        hasRollbackBackup: false,
+        operatingCosts: null,
+        housekeepingTasks: [],
+        maintenanceIssues: [],
+        roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
+        accounts: []
+      };
       storeVersion = 0;
       authState.authenticated = false;
       authState.user = null;
       connectionStatus = "auth_required";
+      await refreshAuthPublicList();
       emit({ type: "auth_required", auth: getAuthState(), state: getSnapshot(), status: getStatus() });
       return { ok: true };
     }
@@ -724,6 +794,231 @@
       return res;
     }
 
+    async function checkoutBooking(bookingId, opts = {}) {
+      if (mode === "server") {
+        return serverMutate(`/api/bookings/${encodeURIComponent(bookingId)}/checkout`, "POST", {
+          serviceDate: opts.serviceDate || Core.getTodayISO()
+        });
+      }
+      const res = await Core.runWithCrossTabLock(() =>
+        localStore.checkoutBooking(bookingId, (authState.user && authState.user.staffName) || "Lễ tân", opts.serviceDate)
+      );
+      if (res && res.ok) syncFromLocalCache("local_commit");
+      return res;
+    }
+
+    async function createHousekeepingTask(payload) {
+      if (mode === "server") {
+        return serverMutate("/api/housekeeping/tasks", "POST", payload);
+      }
+      const res = await Core.runWithCrossTabLock(() => {
+        const tasks = localStore.getHousekeepingTasks();
+        const task = Core.sanitizeHousekeepingTask({
+          ...payload,
+          status: "dirty",
+          createdBy: (authState.user && authState.user.staffName) || "Lễ tân"
+        });
+        if (!task) return { ok: false, error: "Thông tin phòng không hợp lệ." };
+        const saved = localStore.saveHousekeepingTasks([task, ...tasks]);
+        return saved.ok ? { ok: true, task, housekeepingTasks: saved.housekeepingTasks } : saved;
+      });
+      if (res && res.ok) syncFromLocalCache("local_commit");
+      return res;
+    }
+
+    async function startHousekeepingTask(taskId) {
+      if (mode === "server") {
+        return serverMutate(`/api/housekeeping/tasks/${encodeURIComponent(taskId)}/start`, "POST", {});
+      }
+      const res = await Core.runWithCrossTabLock(() => {
+        const tasks = localStore.getHousekeepingTasks();
+        const idx = tasks.findIndex((t) => t.id === taskId);
+        if (idx < 0) return { ok: false, error: "Không tìm thấy công việc dọn phòng." };
+        const actor = (authState.user && authState.user.staffName) || "Buồng phòng";
+        const nowIso = new Date().toISOString();
+        const updated = { ...tasks[idx], status: "in_progress", startedBy: tasks[idx].startedBy || actor, startedAt: tasks[idx].startedAt || nowIso, updatedAt: nowIso };
+        const next = tasks.slice();
+        next[idx] = updated;
+        const saved = localStore.saveHousekeepingTasks(next);
+        return saved.ok ? { ok: true, task: updated, housekeepingTasks: saved.housekeepingTasks } : saved;
+      });
+      if (res && res.ok) syncFromLocalCache("local_commit");
+      return res;
+    }
+
+    async function uploadPhoto(dataUrl, kind = "housekeeping") {
+      if (mode !== "server") {
+        if (!String(dataUrl || "").startsWith("data:image/")) {
+          return { ok: false, error: "Dữ liệu ảnh không hợp lệ." };
+        }
+        const photo = Core.sanitizePhotoRef({
+          id: `ph_local_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+          url: dataUrl,
+          uploadedBy: (authState.user && authState.user.staffName) || "Nhân viên",
+          uploadedAt: new Date().toISOString()
+        });
+        return { ok: true, photo };
+      }
+      if (navigator.onLine === false) {
+        return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Đang mất mạng — chưa tải được ảnh lên máy chủ. Vui lòng thử lại khi có mạng." };
+      }
+      try {
+        const res = await fetchJson("/api/photos", {
+          method: "POST",
+          body: { dataUrl, kind },
+          timeoutMs: 20000
+        });
+        if (res.status === 401) {
+          handleAuthExpired((res.data && res.data.error) || "Phiên đăng nhập đã hết hạn.");
+          return { ok: false, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
+        }
+        if (!res.httpOk || !res.data || !res.data.ok) {
+          return {
+            ok: false,
+            code: (res.data && res.data.code) || "UPLOAD_FAILED",
+            error: (res.data && res.data.error) || `Tải ảnh thất bại (mã ${res.status}). Vui lòng thử lại.`
+          };
+        }
+        return res.data;
+      } catch {
+        return { ok: false, offline: true, code: "UPLOAD_NETWORK_ERROR", error: "Lỗi mạng khi tải ảnh lên máy chủ — công việc vẫn giữ ở trạng thái Đang dọn. Vui lòng thử lại." };
+      }
+    }
+
+    async function completeHousekeepingTask(taskId, { photoIds = [], photos = [], note = "" } = {}) {
+      if (mode === "server") {
+        return serverMutate(`/api/housekeeping/tasks/${encodeURIComponent(taskId)}/complete`, "POST", { photoIds, note });
+      }
+      const res = await Core.runWithCrossTabLock(() => {
+        const tasks = localStore.getHousekeepingTasks();
+        const idx = tasks.findIndex((t) => t.id === taskId);
+        if (idx < 0) return { ok: false, error: "Không tìm thấy công việc dọn phòng." };
+        const cleanPhotos = Core.sanitizePhotoList(photos);
+        if (cleanPhotos.length === 0) {
+          return { ok: false, code: "PHOTO_REQUIRED", error: "Bắt buộc phải có ít nhất 1 ảnh chụp sau khi dọn." };
+        }
+        const actor = (authState.user && authState.user.staffName) || "Buồng phòng";
+        const nowIso = new Date().toISOString();
+        const updated = {
+          ...tasks[idx],
+          status: "cleaned",
+          completedBy: actor,
+          completedAt: nowIso,
+          photos: cleanPhotos,
+          note: note || tasks[idx].note,
+          updatedAt: nowIso
+        };
+        const next = tasks.slice();
+        next[idx] = updated;
+        const saved = localStore.saveHousekeepingTasks(next);
+        return saved.ok ? { ok: true, task: updated, housekeepingTasks: saved.housekeepingTasks } : saved;
+      });
+      if (res && res.ok) syncFromLocalCache("local_commit");
+      return res;
+    }
+
+    async function reportMaintenanceIssue(payload) {
+      if (mode === "server") {
+        return serverMutate("/api/issues", "POST", payload);
+      }
+      const res = await Core.runWithCrossTabLock(() => {
+        const issues = localStore.getMaintenanceIssues();
+        const issue = Core.sanitizeMaintenanceIssue({
+          ...payload,
+          reportedBy: (authState.user && authState.user.staffName) || "Nhân viên"
+        });
+        if (!issue) return { ok: false, error: "Vui lòng nhập đầy đủ số phòng và mô tả sự cố." };
+        const saved = localStore.saveMaintenanceIssues([issue, ...issues]);
+        return saved.ok ? { ok: true, issue, maintenanceIssues: saved.maintenanceIssues } : saved;
+      });
+      if (res && res.ok) syncFromLocalCache("local_commit");
+      return res;
+    }
+
+    async function updateMaintenanceIssue(issueId, patch) {
+      if (mode === "server") {
+        return serverMutate(`/api/issues/${encodeURIComponent(issueId)}`, "PATCH", patch);
+      }
+      const res = await Core.runWithCrossTabLock(() => {
+        const issues = localStore.getMaintenanceIssues();
+        const idx = issues.findIndex((i) => i.id === issueId);
+        if (idx < 0) return { ok: false, error: "Không tìm thấy sự cố." };
+        const actor = (authState.user && authState.user.staffName) || "Quản lý";
+        const nowIso = new Date().toISOString();
+        const nextStatus = Core.ISSUE_STATUSES[patch.status] ? patch.status : issues[idx].status;
+        const updated = {
+          ...issues[idx],
+          ...patch,
+          status: nextStatus,
+          resolvedBy: nextStatus === "resolved" ? actor : "",
+          resolvedAt: nextStatus === "resolved" ? nowIso : "",
+          updatedAt: nowIso
+        };
+        const next = issues.slice();
+        next[idx] = updated;
+        const saved = localStore.saveMaintenanceIssues(next);
+        return saved.ok ? { ok: true, issue: updated, maintenanceIssues: saved.maintenanceIssues } : saved;
+      });
+      if (res && res.ok) syncFromLocalCache("local_commit");
+      return res;
+    }
+
+    async function listAccounts() {
+      if (mode !== "server") {
+        return { ok: true, accounts: stateCache.accounts };
+      }
+      try {
+        const res = await fetchJson("/api/accounts", { timeoutMs: 8000 });
+        if (res.status === 401) {
+          handleAuthExpired((res.data && res.data.error) || "Phiên đăng nhập đã hết hạn.");
+          return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
+        }
+        if (!res.httpOk || !res.data || !res.data.ok) {
+          return { ok: false, code: (res.data && res.data.code) || "FORBIDDEN", error: (res.data && res.data.error) || "Không thể tải danh sách tài khoản." };
+        }
+        stateCache.accounts = res.data.accounts || [];
+        return res.data;
+      } catch {
+        return { ok: false, offline: true, error: "Không kết nối được tới máy chủ." };
+      }
+    }
+
+    async function createAccount(payload) {
+      if (mode !== "server") {
+        return { ok: false, error: "Quản lý tài khoản nhân viên cần chạy ở chế độ máy chủ có đăng nhập." };
+      }
+      try {
+        const res = await fetchJson("/api/accounts", { method: "POST", body: payload, timeoutMs: 10000 });
+        if (!res.data) return { ok: false, error: `Lỗi máy chủ (${res.status}).` };
+        if (res.data.ok && Array.isArray(res.data.accounts)) {
+          stateCache.accounts = res.data.accounts;
+          await refreshAuthPublicList();
+          emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        }
+        return res.data;
+      } catch {
+        return { ok: false, offline: true, error: "Không kết nối được tới máy chủ." };
+      }
+    }
+
+    async function updateAccount(accountId, patch) {
+      if (mode !== "server") {
+        return { ok: false, error: "Quản lý tài khoản nhân viên cần chạy ở chế độ máy chủ có đăng nhập." };
+      }
+      try {
+        const res = await fetchJson(`/api/accounts/${encodeURIComponent(accountId)}`, { method: "PATCH", body: patch, timeoutMs: 10000 });
+        if (!res.data) return { ok: false, error: `Lỗi máy chủ (${res.status}).` };
+        if (res.data.ok && Array.isArray(res.data.accounts)) {
+          stateCache.accounts = res.data.accounts;
+          await refreshAuthPublicList();
+          emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        }
+        return res.data;
+      } catch {
+        return { ok: false, offline: true, error: "Không kết nối được tới máy chủ." };
+      }
+    }
+
     function runHealthCheck() {
       if (mode === "server") {
         const consistency = Core.auditBookingConsistency(stateCache.bookings);
@@ -757,6 +1052,8 @@
       checkAppVersion,
       getVersionInfo,
       getAuthState,
+      getRole: getCurrentRole,
+      can,
       login,
       logout,
       getStatus,
@@ -767,6 +1064,20 @@
       hasRollbackBackup: () => stateCache.hasRollbackBackup,
       getOperatingCosts: () => stateCache.operatingCosts,
       saveOperatingCosts,
+      getHousekeepingTasks: () => stateCache.housekeepingTasks,
+      getMaintenanceIssues: () => stateCache.maintenanceIssues,
+      getRoomStatuses: () => stateCache.roomStatuses,
+      getAccounts: () => stateCache.accounts,
+      checkoutBooking,
+      createHousekeepingTask,
+      startHousekeepingTask,
+      completeHousekeepingTask,
+      uploadPhoto,
+      reportMaintenanceIssue,
+      updateMaintenanceIssue,
+      listAccounts,
+      createAccount,
+      updateAccount,
       refreshLatest: () => {
         if (mode === "local" && localStore) {
           localStore.refreshLatest();

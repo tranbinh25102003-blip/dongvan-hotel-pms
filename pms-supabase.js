@@ -83,8 +83,25 @@
       auditLogs: [],
       autoBackups: [],
       hasRollbackBackup: false,
-      operatingCosts: Core.createDefaultOperatingCostsState()
+      operatingCosts: Core.createDefaultOperatingCostsState(),
+      housekeepingTasks: [],
+      maintenanceIssues: [],
+      roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
+      accounts: []
     };
+
+    function getCurrentRole() {
+      if (!session) return "reception";
+      if (session.role) return Core.normalizeRole(session.role);
+      const nm = String(session.staffName || "").trim().toLowerCase();
+      if (nm.includes("buồng phòng") || nm.includes("buongphong")) return "housekeeping";
+      if (nm.includes("lễ tân") || nm.includes("letan")) return "reception";
+      return "manager";
+    }
+
+    function can(permission) {
+      return Core.hasPermission(getCurrentRole(), permission);
+    }
 
     function emit(payload) {
       for (const fn of [...listeners]) {
@@ -132,8 +149,12 @@
         authRequired: true,
         authConfigured: Boolean(baseUrl && anonKey),
         authenticated: Boolean(session && session.access_token),
-        user: session ? { staffName: session.staffName || "Lễ tân", role: session.staffName === "Quản lý" ? "admin" : "staff" } : null,
-        staffList: [...staffList]
+        user: session ? { username: session.username || session.staffName || "Lễ tân", staffName: session.staffName || "Lễ tân", role: getCurrentRole() } : null,
+        staffList: [...staffList, "Buồng phòng"],
+        accountsPublic: [
+          ...staffList.map((n) => ({ id: `sb_${n}`, username: n, staffName: n, role: n === "Quản lý" ? "manager" : "reception" })),
+          { id: "sb_hk", username: "Buồng phòng", staffName: "Buồng phòng", role: "housekeeping" }
+        ]
       };
     }
 
@@ -156,19 +177,25 @@
         isOnline: connectionStatus === "connected",
         authRequired: true,
         authenticated: Boolean(session && session.access_token),
-        user: session ? { staffName: session.staffName || "Lễ tân", role: session.staffName === "Quản lý" ? "admin" : "staff" } : null,
+        user: session ? { username: session.username || session.staffName || "Lễ tân", staffName: session.staffName || "Lễ tân", role: getCurrentRole() } : null,
+        role: getCurrentRole(),
         runningVersion: { ...runningVersion },
         pendingUpdate: pendingUpdate ? { ...pendingUpdate } : null
       };
     }
 
     function getSnapshot() {
+      const isHk = getCurrentRole() === "housekeeping";
       return {
-        bookings: stateCache.bookings,
-        auditLogs: stateCache.auditLogs,
-        autoBackups: stateCache.autoBackups,
-        hasRollbackBackup: stateCache.hasRollbackBackup,
-        operatingCosts: stateCache.operatingCosts,
+        bookings: isHk ? [] : stateCache.bookings,
+        auditLogs: isHk ? [] : stateCache.auditLogs,
+        autoBackups: isHk ? [] : stateCache.autoBackups,
+        hasRollbackBackup: isHk ? false : stateCache.hasRollbackBackup,
+        operatingCosts: getCurrentRole() === "manager" ? stateCache.operatingCosts : null,
+        housekeepingTasks: stateCache.housekeepingTasks,
+        maintenanceIssues: stateCache.maintenanceIssues,
+        roomStatuses: stateCache.roomStatuses,
+        accounts: stateCache.accounts,
         storeVersion
       };
     }
@@ -1249,6 +1276,165 @@
       }
     }
 
+    async function upsertPmsMetaKey(key, valueObj, broadcastAction) {
+      if (navigator.onLine === false) {
+        return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Đang mất kết nối mạng — không thể lưu dữ liệu." };
+      }
+      const token = await ensureValidAccessToken(false);
+      if (!token) {
+        return { ok: false, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập lại." };
+      }
+      const updatedAt = new Date().toISOString();
+      try {
+        const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?on_conflict=key`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "Prefer": "resolution=merge-duplicates,return=representation"
+          },
+          body: { key, value: valueObj, updated_at: updatedAt },
+          timeoutMs: 12000
+        });
+        if (res.status === 401) {
+          handleAuthExpired("Phiên đăng nhập hết hạn.");
+          return { ok: false, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
+        }
+        if (!res.httpOk) {
+          return { ok: false, code: "SERVER_ERROR", error: "Không thể lưu dữ liệu lên Supabase." };
+        }
+        lastSyncedAt = updatedAt;
+        connectionStatus = "connected";
+        stateCache.roomStatuses = Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
+        emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        broadcastDeltaToPeers({
+          senderId: clientId,
+          storeVersion,
+          action: broadcastAction,
+          actor: (session && session.staffName) || "",
+          ts: updatedAt
+        });
+        return { ok: true, updatedAt };
+      } catch {
+        return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Mất kết nối khi lưu lên Supabase." };
+      }
+    }
+
+    async function checkoutBooking(bookingId, opts = {}) {
+      if (!can("bookings:checkout")) return { ok: false, code: "FORBIDDEN", error: "Tài khoản không có quyền check-out." };
+      const target = stateCache.bookings.find((b) => b.id === bookingId);
+      if (!target) return { ok: false, code: "NOT_FOUND", error: "Không tìm thấy đặt phòng." };
+      const actor = (session && session.staffName) || "Lễ tân";
+      const idemKey = `checkout:${target.id}`;
+      const existingTask = stateCache.housekeepingTasks.find((t) => t.idempotencyKey === idemKey);
+      let updatedBooking = target;
+      if (!target.checkedOutAt) {
+        const saveRes = await saveBooking({ ...target, checkedOutAt: new Date().toISOString(), checkedOutBy: actor }, { expectedRevision: target.revision });
+        if (!saveRes || !saveRes.ok) return saveRes;
+        updatedBooking = saveRes.booking || target;
+      }
+      if (existingTask) {
+        return { ok: true, idempotentHit: true, booking: updatedBooking, task: existingTask, bookings: stateCache.bookings, housekeepingTasks: stateCache.housekeepingTasks };
+      }
+      const newTask = Core.sanitizeHousekeepingTask({
+        roomId: target.roomId,
+        taskType: "checkout",
+        status: "dirty",
+        serviceDate: (opts && opts.serviceDate) || Core.getTodayISO(),
+        sourceBookingId: target.id,
+        idempotencyKey: idemKey,
+        note: Core.buildCheckoutHousekeepingNote(target),
+        createdBy: actor
+      });
+      const nextTasks = [newTask, ...stateCache.housekeepingTasks];
+      stateCache.housekeepingTasks = nextTasks;
+      const metaRes = await upsertPmsMetaKey("housekeeping_v1", { tasks: nextTasks, updatedAt: new Date().toISOString() }, "CHECKOUT");
+      if (!metaRes.ok) return metaRes;
+      return { ok: true, idempotentHit: false, booking: updatedBooking, task: newTask, bookings: stateCache.bookings, housekeepingTasks: nextTasks };
+    }
+
+    async function createHousekeepingTask(payload) {
+      if (!can("housekeeping:create")) return { ok: false, code: "FORBIDDEN", error: "Không có quyền tạo yêu cầu dọn phòng." };
+      const actor = (session && session.staffName) || "Lễ tân";
+      const task = Core.sanitizeHousekeepingTask({ ...payload, status: "dirty", createdBy: actor });
+      if (!task) return { ok: false, error: "Thông tin phòng không hợp lệ." };
+      const nextTasks = [task, ...stateCache.housekeepingTasks];
+      stateCache.housekeepingTasks = nextTasks;
+      const metaRes = await upsertPmsMetaKey("housekeeping_v1", { tasks: nextTasks, updatedAt: new Date().toISOString() }, "HK_TASK_CREATE");
+      return metaRes.ok ? { ok: true, task, housekeepingTasks: nextTasks } : metaRes;
+    }
+
+    async function startHousekeepingTask(taskId) {
+      if (!can("housekeeping:execute")) return { ok: false, code: "FORBIDDEN", error: "Không có quyền thực hiện dọn phòng." };
+      const idx = stateCache.housekeepingTasks.findIndex((t) => t.id === taskId);
+      if (idx < 0) return { ok: false, error: "Không tìm thấy công việc." };
+      const actor = (session && session.staffName) || "Buồng phòng";
+      const nowIso = new Date().toISOString();
+      const updated = { ...stateCache.housekeepingTasks[idx], status: "in_progress", startedBy: stateCache.housekeepingTasks[idx].startedBy || actor, startedAt: stateCache.housekeepingTasks[idx].startedAt || nowIso, updatedAt: nowIso };
+      const nextTasks = stateCache.housekeepingTasks.slice();
+      nextTasks[idx] = updated;
+      stateCache.housekeepingTasks = nextTasks;
+      const metaRes = await upsertPmsMetaKey("housekeeping_v1", { tasks: nextTasks, updatedAt: nowIso }, "HK_TASK_START");
+      return metaRes.ok ? { ok: true, task: updated, housekeepingTasks: nextTasks } : metaRes;
+    }
+
+    async function uploadPhoto(dataUrl, kind = "housekeeping") {
+      if (navigator.onLine === false) {
+        return { ok: false, offline: true, error: "Đang mất mạng — chưa tải được ảnh." };
+      }
+      if (!String(dataUrl || "").startsWith("data:image/")) {
+        return { ok: false, error: "Dữ liệu ảnh không hợp lệ." };
+      }
+      const photo = Core.sanitizePhotoRef({
+        id: `ph_sb_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        url: dataUrl,
+        uploadedBy: (session && session.staffName) || "Nhân viên",
+        uploadedAt: new Date().toISOString()
+      });
+      return { ok: true, photo };
+    }
+
+    async function completeHousekeepingTask(taskId, { photos = [], note = "" } = {}) {
+      if (!can("housekeeping:execute")) return { ok: false, code: "FORBIDDEN", error: "Không có quyền hoàn tất dọn phòng." };
+      const idx = stateCache.housekeepingTasks.findIndex((t) => t.id === taskId);
+      if (idx < 0) return { ok: false, error: "Không tìm thấy công việc." };
+      const cleanPhotos = Core.sanitizePhotoList(photos);
+      if (cleanPhotos.length === 0) return { ok: false, code: "PHOTO_REQUIRED", error: "Cần ít nhất 1 ảnh chụp sau khi dọn." };
+      const actor = (session && session.staffName) || "Buồng phòng";
+      const nowIso = new Date().toISOString();
+      const updated = { ...stateCache.housekeepingTasks[idx], status: "cleaned", completedBy: actor, completedAt: nowIso, photos: cleanPhotos, note: note || stateCache.housekeepingTasks[idx].note, updatedAt: nowIso };
+      const nextTasks = stateCache.housekeepingTasks.slice();
+      nextTasks[idx] = updated;
+      stateCache.housekeepingTasks = nextTasks;
+      const metaRes = await upsertPmsMetaKey("housekeeping_v1", { tasks: nextTasks, updatedAt: nowIso }, "HK_TASK_COMPLETE");
+      return metaRes.ok ? { ok: true, task: updated, housekeepingTasks: nextTasks } : metaRes;
+    }
+
+    async function reportMaintenanceIssue(payload) {
+      if (!can("issues:create")) return { ok: false, code: "FORBIDDEN", error: "Không có quyền báo sự cố." };
+      const actor = (session && session.staffName) || "Nhân viên";
+      const issue = Core.sanitizeMaintenanceIssue({ ...payload, reportedBy: actor });
+      if (!issue) return { ok: false, error: "Vui lòng nhập đầy đủ số phòng và mô tả sự cố." };
+      const nextIssues = [issue, ...stateCache.maintenanceIssues];
+      stateCache.maintenanceIssues = nextIssues;
+      const metaRes = await upsertPmsMetaKey("issues_v1", { issues: nextIssues, updatedAt: new Date().toISOString() }, "ISSUE_CREATE");
+      return metaRes.ok ? { ok: true, issue, maintenanceIssues: nextIssues } : metaRes;
+    }
+
+    async function updateMaintenanceIssue(issueId, patch) {
+      if (!can("issues:manage")) return { ok: false, code: "FORBIDDEN", error: "Không có quyền xử lý sự cố." };
+      const idx = stateCache.maintenanceIssues.findIndex((i) => i.id === issueId);
+      if (idx < 0) return { ok: false, error: "Không tìm thấy sự cố." };
+      const actor = (session && session.staffName) || "Quản lý";
+      const nowIso = new Date().toISOString();
+      const nextStatus = Core.ISSUE_STATUSES[patch.status] ? patch.status : stateCache.maintenanceIssues[idx].status;
+      const updated = { ...stateCache.maintenanceIssues[idx], ...patch, status: nextStatus, resolvedBy: nextStatus === "resolved" ? actor : "", resolvedAt: nextStatus === "resolved" ? nowIso : "", updatedAt: nowIso };
+      const nextIssues = stateCache.maintenanceIssues.slice();
+      nextIssues[idx] = updated;
+      stateCache.maintenanceIssues = nextIssues;
+      const metaRes = await upsertPmsMetaKey("issues_v1", { issues: nextIssues, updatedAt: nowIso }, "ISSUE_UPDATE");
+      return metaRes.ok ? { ok: true, issue: updated, maintenanceIssues: nextIssues } : metaRes;
+    }
+
     function runHealthCheck() {
       const consistency = Core.auditBookingConsistency(stateCache.bookings);
       return {
@@ -1280,17 +1466,33 @@
       checkAppVersion,
       getVersionInfo,
       getAuthState,
+      getRole: getCurrentRole,
+      can,
       login,
       logout,
       getStatus,
       getSnapshot,
-      getBookings: () => stateCache.bookings,
-      getAuditLogs: () => stateCache.auditLogs,
-      getAutoBackups: () => stateCache.autoBackups,
-      hasRollbackBackup: () => stateCache.hasRollbackBackup,
-      getOperatingCosts: () => stateCache.operatingCosts,
+      getBookings: () => (getCurrentRole() === "housekeeping" ? [] : stateCache.bookings),
+      getAuditLogs: () => (getCurrentRole() === "housekeeping" ? [] : stateCache.auditLogs),
+      getAutoBackups: () => (getCurrentRole() === "housekeeping" ? [] : stateCache.autoBackups),
+      hasRollbackBackup: () => (getCurrentRole() === "housekeeping" ? false : stateCache.hasRollbackBackup),
+      getOperatingCosts: () => (getCurrentRole() === "manager" ? stateCache.operatingCosts : null),
       saveOperatingCosts,
-      refreshLatest: () => stateCache.bookings,
+      getHousekeepingTasks: () => stateCache.housekeepingTasks,
+      getMaintenanceIssues: () => stateCache.maintenanceIssues,
+      getRoomStatuses: () => stateCache.roomStatuses,
+      getAccounts: () => stateCache.accounts,
+      checkoutBooking,
+      createHousekeepingTask,
+      startHousekeepingTask,
+      completeHousekeepingTask,
+      uploadPhoto,
+      reportMaintenanceIssue,
+      updateMaintenanceIssue,
+      listAccounts: async () => ({ ok: true, accounts: getAuthState().accountsPublic }),
+      createAccount: async () => ({ ok: false, error: "Tạo tài khoản riêng cho từng nhân viên được quản lý trực tiếp trên máy chủ PMS (SQLite) hoặc Supabase Auth." }),
+      updateAccount: async () => ({ ok: false, error: "Cập nhật tài khoản riêng được quản lý trực tiếp trên máy chủ PMS (SQLite) hoặc Supabase Auth." }),
+      refreshLatest: () => (getCurrentRole() === "housekeeping" ? [] : stateCache.bookings),
       pullLatest: () => pullLatestFromCloud({ type: "manual_refresh", force: true }),
       saveBooking,
       deleteBooking,

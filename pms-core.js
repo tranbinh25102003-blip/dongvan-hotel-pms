@@ -22,6 +22,9 @@
   const QUARANTINE_KEY = "ks_manual_corrupt_quarantine_v1";
   const LOCK_KEY = "ks_manual_pms_lock_v1";
   const OPERATING_COSTS_KEY = "ks_pms_operating_costs_v1";
+  const HOUSEKEEPING_KEY = "ks_pms_housekeeping_v1";
+  const ISSUES_KEY = "ks_pms_issues_v1";
+  const ACCOUNTS_KEY = "ks_pms_accounts_v1";
   const MAX_AUDIT_ENTRIES = 300;
   const MAX_AUTOBACKUPS = 30;
   const MAX_AMOUNT_VND = 10000000000; // 10 billion VND safety cap
@@ -671,6 +674,8 @@
       confirmedBy: sanitizeText(obj.confirmedBy, 60),
       confirmationPdf,
       notes: sanitizeText(obj.notes, 2000),
+      checkedOutAt: sanitizeText(obj.checkedOutAt !== undefined ? obj.checkedOutAt : (existingRecord && existingRecord.checkedOutAt) || "", 40) || "",
+      checkedOutBy: sanitizeText(obj.checkedOutBy !== undefined ? obj.checkedOutBy : (existingRecord && existingRecord.checkedOutBy) || "", 60) || "",
       idempotencyKey: sanitizeText(obj.idempotencyKey, 80) || undefined,
       revision: existingRecord ? (Number(existingRecord.revision) || 1) + 1 : 1,
       createdAt: existingRecord && existingRecord.createdAt ? existingRecord.createdAt : (sanitizeText(obj.createdAt, 40) || nowISO),
@@ -2372,6 +2377,292 @@
     return "\uFEFF" + lines.join("\r\n");
   }
 
+  /* -------------------- Accounts, RBAC Permissions, Housekeeping & Maintenance Engine -------------------- */
+
+  const STAFF_ROLES = Object.freeze({
+    manager: Object.freeze({ key: "manager", label: "Quản lý" }),
+    reception: Object.freeze({ key: "reception", label: "Lễ tân" }),
+    housekeeping: Object.freeze({ key: "housekeeping", label: "Buồng phòng" })
+  });
+
+  const ROLE_PERMISSIONS = Object.freeze({
+    manager: Object.freeze(new Set([
+      "bookings:read", "bookings:write", "bookings:checkout", "bookings:pdf", "bookings:export",
+      "housekeeping:read", "housekeeping:create", "housekeeping:execute",
+      "issues:read", "issues:create", "issues:manage",
+      "photos:upload", "photos:read",
+      "costs:read", "costs:write",
+      "accounts:manage",
+      "reports:daily", "reports:management",
+      "admin:backup", "admin:restore", "admin:reset"
+    ])),
+    reception: Object.freeze(new Set([
+      "bookings:read", "bookings:write", "bookings:checkout", "bookings:pdf",
+      "housekeeping:read", "housekeeping:create", "housekeeping:execute",
+      "issues:read", "issues:create", "issues:manage",
+      "photos:upload", "photos:read",
+      "reports:daily"
+    ])),
+    housekeeping: Object.freeze(new Set([
+      "housekeeping:read", "housekeeping:execute",
+      "issues:read", "issues:create",
+      "photos:upload", "photos:read"
+    ]))
+  });
+
+  function normalizeRole(raw) {
+    const val = String(raw || "").trim().toLowerCase();
+    if (val === "manager" || val === "admin" || val === "quanly" || val === "quản lý") return "manager";
+    if (val === "housekeeping" || val === "hk" || val === "buongphong" || val === "buồng phòng") return "housekeeping";
+    return "reception";
+  }
+
+  function getRoleLabel(role) {
+    const norm = normalizeRole(role);
+    return (STAFF_ROLES[norm] && STAFF_ROLES[norm].label) || "Lễ tân";
+  }
+
+  function hasPermission(role, permission) {
+    const norm = normalizeRole(role);
+    const set = ROLE_PERMISSIONS[norm];
+    return Boolean(set && set.has(permission));
+  }
+
+  const HK_TASK_TYPES = Object.freeze({
+    checkout: Object.freeze({ key: "checkout", label: "Dọn sau trả phòng", shortLabel: "Sau trả phòng" }),
+    stayover: Object.freeze({ key: "stayover", label: "Dọn trong kỳ lưu trú", shortLabel: "Trong kỳ lưu trú" })
+  });
+
+  const HK_TASK_STATUSES = Object.freeze({
+    dirty: Object.freeze({ key: "dirty", label: "Cần dọn" }),
+    in_progress: Object.freeze({ key: "in_progress", label: "Đang dọn" }),
+    cleaned: Object.freeze({ key: "cleaned", label: "Đã dọn" })
+  });
+
+  const ISSUE_SEVERITIES = Object.freeze({
+    low: Object.freeze({ key: "low", label: "Thấp" }),
+    medium: Object.freeze({ key: "medium", label: "Trung bình" }),
+    high: Object.freeze({ key: "high", label: "Cao" }),
+    urgent: Object.freeze({ key: "urgent", label: "Khẩn cấp" })
+  });
+
+  const ISSUE_STATUSES = Object.freeze({
+    open: Object.freeze({ key: "open", label: "Mới báo" }),
+    in_progress: Object.freeze({ key: "in_progress", label: "Đang xử lý" }),
+    resolved: Object.freeze({ key: "resolved", label: "Đã xử lý" })
+  });
+
+  function sanitizePhotoRef(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const obj = stripDangerousKeys(raw);
+    const id = sanitizeText(obj.id, 80);
+    const rawUrl = String(obj.url || "").trim();
+    const isSafeUrl = rawUrl.startsWith("/api/photos/") || rawUrl.startsWith("data:image/");
+    if (!id && !isSafeUrl) return null;
+    return {
+      id: id || `ph_${Date.now().toString(36)}`,
+      url: isSafeUrl ? rawUrl : `/api/photos/${encodeURIComponent(id)}`,
+      mimeType: sanitizeText(obj.mimeType, 40) || "image/jpeg",
+      uploadedBy: sanitizeText(obj.uploadedBy, 60),
+      uploadedAt: sanitizeText(obj.uploadedAt, 40) || new Date().toISOString()
+    };
+  }
+
+  function sanitizePhotoList(rawList) {
+    if (!Array.isArray(rawList)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const item of rawList) {
+      const clean = sanitizePhotoRef(item);
+      if (!clean || seen.has(clean.id)) continue;
+      seen.add(clean.id);
+      out.push(clean);
+      if (out.length >= 6) break;
+    }
+    return out;
+  }
+
+  function buildCheckoutHousekeepingNote(booking) {
+    if (!booking || typeof booking !== "object") {
+      return "Khách vừa trả phòng — cần dọn chuẩn bị đón khách mới.";
+    }
+    const parts = ["Khách vừa trả phòng"];
+    const room = getRoomById(booking.roomId);
+    if (room && room.type === "Twins" && booking.mergeBed) {
+      parts.push("lưu ý đã ghép giường trước đó");
+    }
+    if (Number(booking.extraBed) > 0) {
+      parts.push(`có ${Number(booking.extraBed)} Extra bed cần thu dọn`);
+    }
+    return parts.join(" • ") + ".";
+  }
+
+  function sanitizeHousekeepingTask(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const obj = stripDangerousKeys(raw);
+    const room = getRoomById(obj.roomId);
+    if (!room) return null;
+    const taskType = HK_TASK_TYPES[obj.taskType] ? obj.taskType : "checkout";
+    const status = HK_TASK_STATUSES[obj.status] ? obj.status : "dirty";
+    const serviceDate = isValidISODate(obj.serviceDate) ? obj.serviceDate : getTodayISO();
+    const nowIso = new Date().toISOString();
+    // STRICT PII ISOLATION: housekeeping tasks NEVER carry guestName, phone, totalAmount, paidAmount, or bookingCode
+    return {
+      id: sanitizeText(obj.id, 64) || `hk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      roomId: room.id,
+      roomName: room.name,
+      floor: room.floor,
+      roomType: room.type,
+      taskType,
+      status,
+      serviceDate,
+      sourceBookingId: sanitizeText(obj.sourceBookingId, 64) || "",
+      idempotencyKey: sanitizeText(obj.idempotencyKey, 96) || "",
+      note: sanitizeText(obj.note, 300),
+      startedBy: sanitizeText(obj.startedBy, 60),
+      startedAt: sanitizeText(obj.startedAt, 40),
+      completedBy: sanitizeText(obj.completedBy, 60),
+      completedAt: sanitizeText(obj.completedAt, 40),
+      photos: sanitizePhotoList(obj.photos),
+      createdBy: sanitizeText(obj.createdBy, 60),
+      createdAt: sanitizeText(obj.createdAt, 40) || nowIso,
+      updatedAt: sanitizeText(obj.updatedAt, 40) || nowIso
+    };
+  }
+
+  function sanitizeMaintenanceIssue(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const obj = stripDangerousKeys(raw);
+    const room = getRoomById(obj.roomId);
+    if (!room) return null;
+    const description = sanitizeText(obj.description, 500);
+    if (!description) return null;
+    const severity = ISSUE_SEVERITIES[obj.severity] ? obj.severity : "medium";
+    const status = ISSUE_STATUSES[obj.status] ? obj.status : "open";
+    const nowIso = new Date().toISOString();
+    return {
+      id: sanitizeText(obj.id, 64) || `iss_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      roomId: room.id,
+      roomName: room.name,
+      floor: room.floor,
+      taskId: sanitizeText(obj.taskId, 64),
+      description,
+      severity,
+      blocksRoom: obj.blocksRoom !== undefined ? Boolean(obj.blocksRoom) : (severity === "high" || severity === "urgent"),
+      status,
+      photos: sanitizePhotoList(obj.photos),
+      reportedBy: sanitizeText(obj.reportedBy, 60) || "Nhân viên",
+      reportedAt: sanitizeText(obj.reportedAt, 40) || nowIso,
+      resolvedBy: sanitizeText(obj.resolvedBy, 60),
+      resolvedAt: sanitizeText(obj.resolvedAt, 40),
+      resolutionNote: sanitizeText(obj.resolutionNote, 300),
+      updatedAt: sanitizeText(obj.updatedAt, 40) || nowIso
+    };
+  }
+
+  function sanitizeStaffAccountPublic(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const obj = stripDangerousKeys(raw);
+    const id = sanitizeText(obj.id, 64);
+    const username = sanitizeText(obj.username, 60).toLowerCase();
+    const staffName = sanitizeText(obj.staffName, 80);
+    if (!id || !username || !staffName) return null;
+    return {
+      id,
+      username,
+      staffName,
+      role: normalizeRole(obj.role),
+      active: obj.active !== false,
+      createdAt: sanitizeText(obj.createdAt, 40),
+      updatedAt: sanitizeText(obj.updatedAt, 40)
+    };
+  }
+
+  function getHousekeepingTasksForDate(tasks, dateISO) {
+    const targetDate = isValidISODate(dateISO) ? dateISO : getTodayISO();
+    const list = Array.isArray(tasks) ? tasks : [];
+    const matched = [];
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      if (!t) continue;
+      const isTargetDay = t.serviceDate === targetDate;
+      const isCarryover = t.serviceDate < targetDate && t.status !== "cleaned";
+      if (isTargetDay || isCarryover) {
+        matched.push({
+          ...t,
+          isCarryover
+        });
+      }
+    }
+    const statusOrder = { dirty: 0, in_progress: 1, cleaned: 2 };
+    matched.sort((a, b) => {
+      if (a.isCarryover !== b.isCarryover) return a.isCarryover ? -1 : 1;
+      const sDiff = (statusOrder[a.status] ?? 9) - (statusOrder[b.status] ?? 9);
+      if (sDiff !== 0) return sDiff;
+      const dDiff = String(a.serviceDate || "").localeCompare(String(b.serviceDate || ""));
+      if (dDiff !== 0) return dDiff;
+      return String(a.roomId || "").localeCompare(String(b.roomId || ""));
+    });
+    return matched;
+  }
+
+  function computeRoomOperationalStatus(roomId, tasks, issues, dateISO) {
+    const targetDate = isValidISODate(dateISO) ? dateISO : getTodayISO();
+    const taskList = Array.isArray(tasks) ? tasks : [];
+    const issueList = Array.isArray(issues) ? issues : [];
+
+    const roomTasks = taskList.filter((t) => t && t.roomId === roomId);
+    const openTasks = roomTasks.filter((t) => t.status !== "cleaned" && t.serviceDate <= targetDate);
+    const inProgressTask = openTasks.find((t) => t.status === "in_progress") || null;
+    const dirtyTask = openTasks.find((t) => t.status === "dirty") || null;
+    const todayCompleted = roomTasks
+      .filter((t) => t.status === "cleaned" && (t.serviceDate === targetDate || String(t.completedAt || "").slice(0, 10) === targetDate))
+      .sort((a, b) => String(b.completedAt || "").localeCompare(String(a.completedAt || "")))[0] || null;
+
+    let cleanliness = "clean";
+    let cleanlinessLabel = "Sạch";
+    let activeTask = null;
+    if (inProgressTask) {
+      cleanliness = "in_progress";
+      cleanlinessLabel = "Đang dọn";
+      activeTask = inProgressTask;
+    } else if (dirtyTask) {
+      cleanliness = "dirty";
+      cleanlinessLabel = "Cần dọn";
+      activeTask = dirtyTask;
+    } else if (todayCompleted) {
+      cleanliness = "cleaned";
+      cleanlinessLabel = "Đã dọn";
+      activeTask = todayCompleted;
+    }
+
+    // Maintenance issues are STRICTLY independent of cleaning completion!
+    const activeIssues = issueList.filter((iss) => iss && iss.roomId === roomId && iss.status !== "resolved");
+    const blockingIssues = activeIssues.filter((iss) => Boolean(iss.blocksRoom));
+
+    return {
+      roomId,
+      cleanliness,
+      cleanlinessLabel,
+      activeTask,
+      lastCleanedTask: todayCompleted,
+      openTaskCount: openTasks.length,
+      activeIssues,
+      blockingIssues,
+      hasOpenIssues: activeIssues.length > 0,
+      isBlocked: blockingIssues.length > 0
+    };
+  }
+
+  function computeAllRoomOperationalStatuses(tasks, issues, dateISO) {
+    const map = {};
+    for (let i = 0; i < ROOMS.length; i++) {
+      const r = ROOMS[i];
+      map[r.id] = computeRoomOperationalStatus(r.id, tasks, issues, dateISO);
+    }
+    return map;
+  }
+
   function createBookingStore(storageAdapter, options = {}) {
     const keys = {
       data: options.storageKey || STORAGE_KEY,
@@ -3203,6 +3494,84 @@
       }
     }
 
+    function getHousekeepingTasks() {
+      try {
+        const raw = storageAdapter.getItem(HOUSEKEEPING_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.map(sanitizeHousekeepingTask).filter(Boolean) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function saveHousekeepingTasks(tasks) {
+      const clean = (Array.isArray(tasks) ? tasks : []).map(sanitizeHousekeepingTask).filter(Boolean);
+      try {
+        storageAdapter.setItem(HOUSEKEEPING_KEY, JSON.stringify(clean));
+        return { ok: true, housekeepingTasks: clean };
+      } catch (err) {
+        return { ok: false, error: `Không thể lưu danh sách buồng phòng: ${err && err.message ? err.message : "lỗi bộ nhớ"}` };
+      }
+    }
+
+    function getMaintenanceIssues() {
+      try {
+        const raw = storageAdapter.getItem(ISSUES_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.map(sanitizeMaintenanceIssue).filter(Boolean) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function saveMaintenanceIssues(issues) {
+      const clean = (Array.isArray(issues) ? issues : []).map(sanitizeMaintenanceIssue).filter(Boolean);
+      try {
+        storageAdapter.setItem(ISSUES_KEY, JSON.stringify(clean));
+        return { ok: true, maintenanceIssues: clean };
+      } catch (err) {
+        return { ok: false, error: `Không thể lưu danh sách sự cố: ${err && err.message ? err.message : "lỗi bộ nhớ"}` };
+      }
+    }
+
+    function checkoutBooking(bookingId, actorName = "Lễ tân", serviceDate = "") {
+      const latest = refreshLatest();
+      const target = latest.find((b) => b.id === bookingId);
+      if (!target) return { ok: false, code: "NOT_FOUND", error: "Không tìm thấy đặt phòng để check-out." };
+      const tasks = getHousekeepingTasks();
+      const idemKey = `checkout:${target.id}`;
+      const existingTask = tasks.find((t) => t.idempotencyKey === idemKey);
+      let updatedBooking = target;
+      if (!target.checkedOutAt) {
+        const saveRes = saveBooking({
+          ...target,
+          checkedOutAt: new Date().toISOString(),
+          checkedOutBy: sanitizeText(actorName, 60) || "Lễ tân"
+        });
+        if (!saveRes.ok) return saveRes;
+        updatedBooking = saveRes.booking;
+      }
+      if (existingTask) {
+        return { ok: true, idempotentHit: true, booking: updatedBooking, bookings: getBookings(), task: existingTask, housekeepingTasks: tasks };
+      }
+      const newTask = sanitizeHousekeepingTask({
+        roomId: target.roomId,
+        taskType: "checkout",
+        status: "dirty",
+        serviceDate: isValidISODate(serviceDate) ? serviceDate : getTodayISO(),
+        sourceBookingId: target.id,
+        idempotencyKey: idemKey,
+        note: buildCheckoutHousekeepingNote(target),
+        createdBy: sanitizeText(actorName, 60) || "Lễ tân"
+      });
+      const nextTasks = [newTask, ...tasks];
+      const saveTaskRes = saveHousekeepingTasks(nextTasks);
+      if (!saveTaskRes.ok) return saveTaskRes;
+      return { ok: true, idempotentHit: false, booking: updatedBooking, bookings: getBookings(), task: newTask, housekeepingTasks: saveTaskRes.housekeepingTasks };
+    }
+
     return {
       load,
       refreshLatest,
@@ -3213,6 +3582,11 @@
       getStorageStatus,
       getOperatingCosts,
       saveOperatingCosts,
+      getHousekeepingTasks,
+      saveHousekeepingTasks,
+      getMaintenanceIssues,
+      saveMaintenanceIssues,
+      checkoutBooking,
       saveBooking,
       deleteBooking,
       restoreFromImport,
@@ -3232,6 +3606,9 @@
     QUARANTINE_KEY,
     LOCK_KEY,
     OPERATING_COSTS_KEY,
+    HOUSEKEEPING_KEY,
+    ISSUES_KEY,
+    ACCOUNTS_KEY,
     MAX_AUTOBACKUPS,
     MAX_CONFIRMATION_PDF_BYTES,
     ROOMS,
@@ -3308,6 +3685,23 @@
     computeMonthlyProratedRevenue,
     computeMonthlyOperatingCosts,
     generateOperatingCostsCsvContent,
+    STAFF_ROLES,
+    normalizeRole,
+    getRoleLabel,
+    hasPermission,
+    HK_TASK_TYPES,
+    HK_TASK_STATUSES,
+    ISSUE_SEVERITIES,
+    ISSUE_STATUSES,
+    sanitizePhotoRef,
+    sanitizePhotoList,
+    buildCheckoutHousekeepingNote,
+    sanitizeHousekeepingTask,
+    sanitizeMaintenanceIssue,
+    sanitizeStaffAccountPublic,
+    getHousekeepingTasksForDate,
+    computeRoomOperationalStatus,
+    computeAllRoomOperationalStatuses,
     generateCsvContent,
     diffBookingChanges,
     generateAuditCsvContent,

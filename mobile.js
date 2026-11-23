@@ -50,6 +50,12 @@
     allocateGroupPayment,
     buildCopiedBookingPayload,
     buildGroupSyncUpdates,
+    getRoleLabel,
+    hasPermission,
+    ISSUE_SEVERITIES,
+    ISSUE_STATUSES,
+    computeRoomOperationalStatus,
+    computeAllRoomOperationalStatuses,
     generateCsvContent,
     generateAuditCsvContent,
     diffBookingChanges
@@ -214,6 +220,11 @@
         <button id="m-btn-retry-sync" type="button" class="m-btn" style="min-height:36px; padding:0 10px; font-size:12px;">Thử lại</button>
       </div>
 
+      <div id="m-issue-alert-banner" class="issue-alert-banner" role="alert" aria-live="polite">
+        <span id="m-issue-alert-text" style="font-size:12px;"></span>
+        <button id="m-btn-issue-alert-view" type="button" class="m-btn m-btn-primary" style="min-height:34px; padding:0 10px; font-size:12px; flex-shrink:0;">Xem</button>
+      </div>
+
       <div id="m-clipboard-bar" class="m-clipboard-bar" role="status" aria-live="polite">
         <span id="m-clipboard-text" class="m-clipboard-text"></span>
         <button id="m-clipboard-cancel" type="button" class="m-clipboard-cancel">✕ Hủy dán</button>
@@ -339,6 +350,14 @@
           </div>
 
           <div class="m-menu-list">
+            <button id="m-menu-hk" type="button" class="m-menu-item">
+              <span>🧹 Buồng phòng &amp; Sự cố phòng<span class="m-menu-sub">Xem tiến độ dọn, ảnh hoàn tất, giao việc dọn &amp; xử lý sự cố</span></span>
+              <span>›</span>
+            </button>
+            <button id="m-menu-accounts" type="button" class="m-menu-item" style="display:none;">
+              <span>👤 Quản lý tài khoản &amp; phân quyền<span class="m-menu-sub">Tạo tài khoản Quản lý, Lễ tân, Buồng phòng &amp; khóa tài khoản</span></span>
+              <span>›</span>
+            </button>
             <button id="m-menu-costs" type="button" class="m-menu-item">
               <span>💰 Chi phí vận hành &amp; giá vốn<span class="m-menu-sub">Định mức theo lưu trú, chứng từ thực tế &amp; chốt chi phí tháng</span></span>
               <span>›</span>
@@ -359,7 +378,7 @@
               <span>💾 Sao lưu dữ liệu JSON<span class="m-menu-sub">Tải toàn bộ sổ đặt phòng và lịch sử về máy</span></span>
               <span>›</span>
             </button>
-            <label class="m-menu-item" for="m-input-restore-json">
+            <label id="m-menu-restore-json" class="m-menu-item" for="m-input-restore-json">
               <span>📥 Khôi phục dữ liệu từ file JSON<span class="m-menu-sub">Thẩm định xung đột trước khi nạp dữ liệu</span></span>
               <span>›</span>
               <input id="m-input-restore-json" type="file" accept=".json" hidden />
@@ -377,7 +396,7 @@
               <span>›</span>
             </button>
             <button id="m-menu-logout" type="button" class="m-menu-item" style="display:none; color:var(--status-unpaid);">
-              <span>🔒 Đăng xuất tài khoản lễ tân<span id="m-menu-logout-sub" class="m-menu-sub">Kết thúc phiên đăng nhập trên thiết bị này</span></span>
+              <span>🔒 Đăng xuất tài khoản<span id="m-menu-logout-sub" class="m-menu-sub">Kết thúc phiên đăng nhập trên thiết bị này</span></span>
               <span>›</span>
             </button>
           </div>
@@ -436,6 +455,14 @@
           </div>
 
           <div id="m-bk-error" class="m-form-error" role="alert"></div>
+          <div id="m-room-issue-warning" class="room-issue-warning" role="alert" style="display:none;"></div>
+          <div id="m-checkout-bar" class="checkout-action-bar" style="display:none;">
+            <div id="m-checkout-status" class="checkout-status-text"></div>
+            <div style="display:flex; gap:6px; flex-wrap:wrap; width:100%;">
+              <button id="m-btn-request-stayover" type="button" class="m-btn" style="flex:1; min-height:40px; font-size:12.5px;">🧹 Dọn trong kỳ lưu trú</button>
+              <button id="m-btn-checkout-booking" type="button" class="m-btn m-btn-primary" style="flex:1; min-height:40px; font-size:12.5px;">🚪 Check-out phòng</button>
+            </div>
+          </div>
 
           <!-- Group 1: Booking Date & Stay Dates -->
           <div class="m-form-group">
@@ -776,6 +803,55 @@
 
   /* -------------------- Sync Status & Visual Viewport -------------------- */
 
+  function mRole() {
+    return typeof client.getRole === "function" ? client.getRole() : "manager";
+  }
+
+  function mCan(perm) {
+    return typeof client.can === "function" ? client.can(perm) : hasPermission(mRole(), perm);
+  }
+
+  function applyMobileRolePermissionsUI() {
+    const canCosts = mCan("costs:read");
+    const canAccounts = mCan("accounts:manage");
+    const canBackup = mCan("admin:backup");
+    const role = mRole();
+
+    if ($("m-menu-hk")) $("m-menu-hk").style.display = role === "housekeeping" ? "none" : "";
+    if ($("m-menu-accounts")) $("m-menu-accounts").style.display = canAccounts ? "" : "none";
+    if ($("m-menu-costs")) $("m-menu-costs").style.display = canCosts ? "" : "none";
+    if ($("m-menu-rollback")) $("m-menu-rollback").style.display = canBackup ? "" : "none";
+    if ($("m-menu-export-csv")) $("m-menu-export-csv").style.display = canBackup ? "" : "none";
+    if ($("m-menu-backup-json")) $("m-menu-backup-json").style.display = canBackup ? "" : "none";
+    if ($("m-menu-restore-json")) $("m-menu-restore-json").style.display = canBackup ? "" : "none";
+    if ($("m-menu-reset-sample")) $("m-menu-reset-sample").style.display = canBackup ? "" : "none";
+
+    renderMobileIssueBanner();
+  }
+
+  function renderMobileIssueBanner() {
+    const banner = $("m-issue-alert-banner");
+    const txt = $("m-issue-alert-text");
+    if (!banner || !txt) return;
+    if (mRole() === "housekeeping" || !mCan("bookings:read")) {
+      banner.classList.remove("show");
+      return;
+    }
+    const issues = typeof client.getMaintenanceIssues === "function" ? client.getMaintenanceIssues() : [];
+    const openIssues = issues.filter((i) => i && i.status !== "resolved");
+    if (openIssues.length === 0) {
+      banner.classList.remove("show");
+      return;
+    }
+    const blocking = openIssues.filter((i) => i.blocksRoom);
+    const primary = blocking[0] || openIssues[0];
+    const rName = getRoomById(primary.roomId)?.name || primary.roomId;
+    txt.textContent = blocking.length > 0
+      ? `🚫 P.${rName} chưa thể giao khách: ${primary.description}`
+      : `⚠️ P.${rName} có sự cố: ${primary.description}`;
+    banner.classList.add("show");
+  }
+
   function renderSyncStatus() {
     const status = client.getStatus();
     const chip = $("m-sync-chip");
@@ -830,7 +906,7 @@
       moreInfo.innerHTML = `
         <div><strong>Chế độ:</strong> ${modeLabel}</div>
         <div><strong>Trạng thái:</strong> ${connLabel}</div>
-        ${status.user && status.user.staffName ? `<div><strong>Tài khoản trực ca:</strong> ${escapeHtml(status.user.staffName)}</div>` : ""}
+        ${status.user && status.user.staffName ? `<div><strong>Tài khoản trực ca:</strong> ${escapeHtml(status.user.staffName)} (${escapeHtml(getRoleLabel(status.user.role))})</div>` : ""}
         <div><strong>Phiên bản ứng dụng:</strong> <span id="m-app-version-val">${ver}</span></div>
         <div><strong>Đồng bộ lần cuối:</strong> ${status.lastSyncedAt ? formatDateTimeVN(status.lastSyncedAt) : "—"} (rev ${status.storeVersion})</div>
       `;
@@ -842,9 +918,11 @@
       logoutBtn.style.display = showLogout ? "" : "none";
       const sub = $("m-menu-logout-sub");
       if (sub && status.user && status.user.staffName) {
-        sub.textContent = `Đang đăng nhập: ${status.user.staffName}`;
+        sub.textContent = `Đang đăng nhập: ${status.user.staffName} (${getRoleLabel(status.user.role)})`;
       }
     }
+
+    applyMobileRolePermissionsUI();
   }
 
   function bindVisualViewportSupport() {
@@ -1108,6 +1186,12 @@
     const groupMap = new Map();
     computeAllBookingGroups(allBookings, { minRooms: 2 }).forEach((g) => groupMap.set(g.normalizedCode, g));
     const pasteActive = Boolean(mState.copiedBooking);
+    const roomStatuses = (typeof client.getRoomStatuses === "function" && client.getRoomStatuses())
+      || computeAllRoomOperationalStatuses(
+        typeof client.getHousekeepingTasks === "function" ? client.getHousekeepingTasks() : [],
+        typeof client.getMaintenanceIssues === "function" ? client.getMaintenanceIssues() : [],
+        getTodayISO()
+      );
 
     // Build section-grouped room cards (Dorm separated at VERY TOP, then Floors 1-4)
     const htmlParts = [];
@@ -1184,6 +1268,27 @@
         const bookCi = mState.rangeActive ? mState.rangeCheckin : dateISO;
         const bookCo = mState.rangeActive ? mState.rangeCheckout : addDaysISO(dateISO, 1);
 
+        const ops = roomStatuses[room.id] || null;
+        let opsHtml = "";
+        if (ops) {
+          const pills = [];
+          if (ops.cleanliness === "dirty") {
+            pills.push(`<button type="button" class="room-hk-pill dirty" data-m-open-room-hk="${escapeHtml(room.id)}">🔴 Cần dọn</button>`);
+          } else if (ops.cleanliness === "in_progress") {
+            pills.push(`<button type="button" class="room-hk-pill in_progress" data-m-open-room-hk="${escapeHtml(room.id)}">🟡 Đang dọn</button>`);
+          } else if (ops.cleanliness === "cleaned") {
+            pills.push(`<button type="button" class="room-hk-pill cleaned" data-m-open-room-hk="${escapeHtml(room.id)}">✅ Đã dọn</button>`);
+          }
+          if (ops.isBlocked && ops.blockingIssues.length > 0) {
+            const topIss = ops.blockingIssues[0];
+            const shortDesc = topIss.description.length > 22 ? `${topIss.description.slice(0, 22)}…` : topIss.description;
+            pills.push(`<button type="button" class="room-issue-pill" data-m-open-room-issues="${escapeHtml(room.id)}">🚫 Sự cố: ${escapeHtml(shortDesc)}</button>`);
+          } else if (ops.hasOpenIssues) {
+            pills.push(`<button type="button" class="room-issue-pill soft" data-m-open-room-issues="${escapeHtml(room.id)}">⚠️ Sự cố (${ops.activeIssues.length})</button>`);
+          }
+          if (pills.length > 0) opsHtml = `<div class="room-ops-badges">${pills.join("")}</div>`;
+        }
+
         return `<article class="m-room-card ${cardCls}" data-room-id="${escapeHtml(room.id)}">
           <div class="m-room-head" data-m-open-room="${escapeHtml(room.id)}">
             <div>
@@ -1192,6 +1297,7 @@
                 ${room.type === "Twins" ? `<span style="font-size:11px; color:var(--text-muted);">(Ghép được)</span>` : ""}
               </div>
               <div class="m-room-meta">${escapeHtml(room.type)} • ${escapeHtml(room.view)}</div>
+              ${opsHtml}
             </div>
             <span class="m-status-pill ${pillCls}">${pillTxt}</span>
           </div>
@@ -1747,7 +1853,64 @@
     }
   }
 
+  function renderMobileBookingOperationalBars(roomId, bookingObj) {
+    const warnEl = $("m-room-issue-warning");
+    const coBar = $("m-checkout-bar");
+    const coStatus = $("m-checkout-status");
+    const coBtn = $("m-btn-checkout-booking");
+    const stayBtn = $("m-btn-request-stayover");
+
+    if (warnEl) {
+      const ops = computeRoomOperationalStatus(
+        roomId,
+        typeof client.getHousekeepingTasks === "function" ? client.getHousekeepingTasks() : [],
+        typeof client.getMaintenanceIssues === "function" ? client.getMaintenanceIssues() : [],
+        getTodayISO()
+      );
+      if (ops && ops.activeIssues.length > 0) {
+        const lines = ops.activeIssues.map((iss) => {
+          const stLbl = (ISSUE_STATUSES[iss.status] || ISSUE_STATUSES.open).label;
+          const blk = iss.blocksRoom ? "<strong>[Chưa thể giao khách]</strong> " : "";
+          return `<div>• ${blk}${escapeHtml(iss.description)} (${escapeHtml(stLbl)})</div>`;
+        }).join("");
+        warnEl.innerHTML = `<div style="display:flex; flex-direction:column; gap:4px;">
+          <div>${ops.isBlocked ? `🚫 CẢNH BÁO P.${escapeHtml(getRoomById(roomId)?.name || roomId)} CHƯA THỂ GIAO KHÁCH` : `⚠️ P.${escapeHtml(getRoomById(roomId)?.name || roomId)} có sự cố đang mở`}</div>
+          <div style="font-weight:600;">${lines}</div>
+          <button type="button" class="m-btn" style="min-height:34px; font-size:12px; align-self:flex-start;" data-m-jump-issues="${escapeHtml(roomId)}">Xem sự cố ›</button>
+        </div>`;
+        warnEl.style.display = "block";
+      } else {
+        warnEl.innerHTML = "";
+        warnEl.style.display = "none";
+      }
+    }
+
+    if (coBar && coStatus && coBtn && stayBtn) {
+      if (bookingObj && bookingObj.id && bookingObj.roomId !== "DORM" && mCan("bookings:checkout")) {
+        coBar.style.display = "flex";
+        if (bookingObj.checkedOutAt) {
+          coStatus.innerHTML = `<span style="color:var(--status-paid);">✓ Đã trả phòng lúc ${escapeHtml(formatDateTimeVN(bookingObj.checkedOutAt))}</span> • Đã tạo việc dọn phòng`;
+          coBtn.textContent = "✓ Đã Check-out";
+          coBtn.classList.remove("m-btn-primary");
+          coBtn.classList.add("m-btn-success");
+        } else {
+          coStatus.textContent = "Khách đang ở / chưa check-out phòng này";
+          coBtn.textContent = "🚪 Check-out phòng";
+          coBtn.classList.add("m-btn-primary");
+          coBtn.classList.remove("m-btn-success");
+        }
+        stayBtn.style.display = mCan("housekeeping:create") ? "inline-flex" : "none";
+      } else {
+        coBar.style.display = "none";
+      }
+    }
+  }
+
   function openMobileBookingSheet({ bookingId = null, roomId = "101", checkin = mState.selectedDate, checkout = null, prefill = null, allowRoomSelect = false } = {}) {
+    if (!mCan("bookings:read")) {
+      showMobileToast("Tài khoản của bạn không có quyền xem hoặc sửa đặt phòng.");
+      return;
+    }
     mState.savedScrollTop = $("m-main").scrollTop;
     showMobileBookingError("");
     mState.bookingConflictBooking = null;
@@ -1840,6 +2003,7 @@
     updateMobileNights();
     updateMobilePaymentPreview();
     renderMobileModalGroupSummary();
+    renderMobileBookingOperationalBars($("m-f-room").value, existing || null);
     $("m-sheet-booking").classList.add("open");
   }
 
@@ -2505,6 +2669,18 @@
 
     // Delegated clicks inside Schedule, Bookings, Report, and Room Detail
     $("m-main").addEventListener("click", async (e) => {
+      const hkPill = e.target.closest("[data-m-open-room-hk]");
+      if (hkPill) {
+        e.stopPropagation();
+        if (window.PMSHousekeepingApp) window.PMSHousekeepingApp.open({ tab: "tasks", roomId: hkPill.dataset.mOpenRoomHk });
+        return;
+      }
+      const issPill = e.target.closest("[data-m-open-room-issues]");
+      if (issPill) {
+        e.stopPropagation();
+        if (window.PMSHousekeepingApp) window.PMSHousekeepingApp.open({ tab: "issues", roomId: issPill.dataset.mOpenRoomIssues });
+        return;
+      }
       if (e.target.closest("#m-stat-dorm-card")) return openDormSheet(mState.selectedDate);
       const dormBtn = e.target.closest("[data-m-open-dorm]");
       if (dormBtn) return openDormSheet(dormBtn.dataset.mOpenDorm);
@@ -2595,10 +2771,61 @@
       const bk = getBookings().find((b) => b.id === mState.editingBookingId);
       if (bk) copyMobileBooking(bk);
     });
+    $("m-room-issue-warning").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-m-jump-issues]");
+      if (!btn) return;
+      if (window.PMSHousekeepingApp) window.PMSHousekeepingApp.open({ tab: "issues", roomId: btn.dataset.mJumpIssues });
+    });
+    $("m-btn-checkout-booking").addEventListener("click", async () => {
+      const id = mState.editingBookingId;
+      if (!id || mState.isSubmitting) return;
+      mState.isSubmitting = true;
+      $("m-btn-checkout-booking").disabled = true;
+      try {
+        const res = await client.checkoutBooking(id, { serviceDate: getTodayISO() });
+        if (!res || !res.ok) return showMobileBookingError((res && res.error) || "Không thể check-out phòng.");
+        const latest = getBookings().find((b) => b.id === id) || res.booking;
+        if (latest) {
+          mState.editingBookingRevision = Number(latest.revision) || mState.editingBookingRevision;
+          mState.editingOriginalBooking = { ...latest, confirmationPdf: latest.confirmationPdf ? { ...latest.confirmationPdf } : null };
+          renderMobileBookingOperationalBars(latest.roomId, latest);
+        }
+        renderMobileAll();
+        const rName = getRoomById(latest ? latest.roomId : $("m-f-room").value)?.name || $("m-f-room").value;
+        showMobileToast(res.idempotentHit || res.alreadyCheckedOut || res.created === false
+          ? `✓ P.${rName} đã check-out trước đó (không tạo trùng việc dọn)`
+          : `🚪 Đã check-out P.${rName} → Tự động tạo việc Dọn sau trả phòng!`);
+      } finally {
+        mState.isSubmitting = false;
+        $("m-btn-checkout-booking").disabled = false;
+      }
+    });
+    $("m-btn-request-stayover").addEventListener("click", async () => {
+      const roomId = $("m-f-room").value;
+      if (!roomId || mState.isSubmitting) return;
+      mState.isSubmitting = true;
+      $("m-btn-request-stayover").disabled = true;
+      try {
+        const res = await client.createHousekeepingTask({
+          roomId,
+          taskType: "stayover",
+          serviceDate: getTodayISO(),
+          note: "Dọn trong kỳ lưu trú theo yêu cầu lễ tân"
+        });
+        if (!res || !res.ok) return showMobileBookingError((res && res.error) || "Không thể tạo việc dọn phòng.");
+        renderMobileAll();
+        showMobileToast(`🧹 Đã giao việc Dọn trong kỳ lưu trú cho P.${getRoomById(roomId)?.name || roomId}`);
+      } finally {
+        mState.isSubmitting = false;
+        $("m-btn-request-stayover").disabled = false;
+      }
+    });
     $("m-f-room").addEventListener("change", () => {
       const r = getRoomById($("m-f-room").value);
       if (r && !mState.editingBookingId) $("m-bk-sheet-title").textContent = `Đặt phòng mới — P.${r.name}`;
       updateMobileRoomFields();
+      const curBk = mState.editingBookingId ? getBookings().find((b) => b.id === mState.editingBookingId) : null;
+      renderMobileBookingOperationalBars($("m-f-room").value, curBk || null);
       saveMobileDraft();
     });
     $("m-f-booking-date").addEventListener("change", saveMobileDraft);
@@ -2855,8 +3082,19 @@
       showMobileToast(`Đã khôi phục mốc sao lưu (${res.bookings.length} đơn)`);
     });
 
-    // More Tab actions (100% PC feature parity)
+    // More Tab actions (100% PC feature parity + RBAC enforcement)
+    $("m-btn-issue-alert-view").addEventListener("click", () => {
+      if (window.PMSHousekeepingApp) window.PMSHousekeepingApp.open({ tab: "issues", roomId: "all" });
+    });
+    $("m-menu-hk").addEventListener("click", () => {
+      if (window.PMSHousekeepingApp) window.PMSHousekeepingApp.open({ tab: "tasks", roomId: "all", dateISO: getTodayISO() });
+    });
+    $("m-menu-accounts").addEventListener("click", () => {
+      if (!mCan("accounts:manage")) return showMobileToast("Quản lý tài khoản chỉ dành cho Quản lý.");
+      if (window.PMSHousekeepingApp) window.PMSHousekeepingApp.openAccounts();
+    });
     $("m-menu-costs").addEventListener("click", () => {
+      if (!mCan("costs:read")) return showMobileToast("Chi phí & Giá vốn chỉ dành cho Quản lý.");
       if (window.PMSOperatingCostsModal) {
         window.PMSOperatingCostsModal.open(mState.selectedDate ? mState.selectedDate.slice(0, 7) : undefined);
       }
@@ -2869,6 +3107,7 @@
       }
     });
     $("m-menu-rollback").addEventListener("click", async () => {
+      if (!mCan("admin:backup")) return showMobileToast("Chỉ Quản lý mới có quyền hoàn tác dữ liệu.");
       if (!confirm("Hoàn tác dữ liệu về trạng thái ngay trước thay đổi gần nhất?")) return;
       const res = await client.rollbackLastChange();
       if (!res.ok) return alert(res.error);
@@ -2876,6 +3115,7 @@
       showMobileToast(`Đã hoàn tác (${res.bookings.length} đơn)`);
     });
     $("m-menu-export-csv").addEventListener("click", () => {
+      if (!mCan("admin:backup")) return showMobileToast("Xuất Excel tổng hợp chỉ dành cho Quản lý.");
       const csv = generateCsvContent(getBookings());
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
@@ -2884,6 +3124,7 @@
       showMobileToast("Đã xuất file Excel (CSV)");
     });
     $("m-menu-backup-json").addEventListener("click", () => {
+      if (!mCan("admin:backup")) return showMobileToast("Sao lưu JSON chỉ dành cho Quản lý.");
       const payload = {
         exportedAt: new Date().toISOString(),
         version: 3,
@@ -2899,6 +3140,7 @@
       showMobileToast("Đã tải file sao lưu JSON (gồm lịch phòng & chi phí)");
     });
     $("m-input-restore-json").addEventListener("change", (e) => {
+      if (!mCan("admin:backup")) { e.target.value = ""; return showMobileToast("Khôi phục JSON chỉ dành cho Quản lý."); }
       const file = e.target.files[0];
       e.target.value = "";
       if (!file) return;
@@ -2939,6 +3181,7 @@
       }
     });
     $("m-menu-reset-sample").addEventListener("click", async () => {
+      if (!mCan("admin:backup")) return showMobileToast("Chỉ Quản lý mới có quyền khôi phục dữ liệu mẫu.");
       if (!confirm("Khôi phục danh sách đặt phòng mẫu?")) return;
       const res = await client.resetToSample();
       if (!res.ok) return alert(res.error);
@@ -2946,10 +3189,11 @@
       showMobileToast("Đã khôi phục dữ liệu mẫu");
     });
     $("m-menu-switch-pc").addEventListener("click", () => {
+      if (mRole() === "housekeeping") return;
       document.body.dataset.viewMode = "pc";
     });
     $("m-menu-logout").addEventListener("click", async () => {
-      if (!confirm("Đăng xuất tài khoản lễ tân trên điện thoại này?")) return;
+      if (!confirm("Đăng xuất tài khoản trên điện thoại này?")) return;
       await client.logout();
       renderSyncStatus();
     });
@@ -2977,6 +3221,7 @@
       }
       renderSyncStatus();
       if (type === "status" || type === "version" || type === "update_pending" || type === "update_applying" || type === "auth_required") return;
+      if (mRole() === "housekeeping") return;
 
       // Check concurrent edit conflict if user has an open booking edit form!
       if (type === "remote_change" && $("m-sheet-booking").classList.contains("open") && mState.editingBookingId) {
@@ -3000,11 +3245,19 @@
 
       scheduleMobileRenderAll();
 
-      if (type === "remote_change" && remoteEvent && ["CREATE", "UPDATE", "DELETE"].includes(remoteEvent.action)) {
-        const verb = remoteEvent.action === "CREATE" ? "vừa đặt mới" : remoteEvent.action === "DELETE" ? "vừa xóa" : "vừa cập nhật";
-        const rName = remoteEvent.roomId ? (remoteEvent.roomId === "DORM" ? "Dorm" : `P.${getRoomById(remoteEvent.roomId)?.name || remoteEvent.roomId}`) : "sổ phòng";
-        const actor = remoteEvent.actor ? `${remoteEvent.actor} ` : "Thiết bị khác ";
-        showMobileToast(`🔄 ${actor}${verb} ${rName}`);
+      if (type === "remote_change" && remoteEvent) {
+        if (remoteEvent.action === "ISSUE_CREATE") {
+          const rName = remoteEvent.roomId ? `P.${getRoomById(remoteEvent.roomId)?.name || remoteEvent.roomId}` : "phòng";
+          showMobileToast(`🚨 Sự cố mới ${rName} từ ${remoteEvent.actor || "Buồng phòng"}!`);
+        } else if (remoteEvent.action === "HK_COMPLETE") {
+          const rName = remoteEvent.roomId ? `P.${getRoomById(remoteEvent.roomId)?.name || remoteEvent.roomId}` : "phòng";
+          showMobileToast(`✅ ${remoteEvent.actor || "Buồng phòng"} đã dọn xong ${rName}`);
+        } else if (["CREATE", "UPDATE", "DELETE"].includes(remoteEvent.action)) {
+          const verb = remoteEvent.action === "CREATE" ? "vừa đặt mới" : remoteEvent.action === "DELETE" ? "vừa xóa" : "vừa cập nhật";
+          const rName = remoteEvent.roomId ? (remoteEvent.roomId === "DORM" ? "Dorm" : `P.${getRoomById(remoteEvent.roomId)?.name || remoteEvent.roomId}`) : "sổ phòng";
+          const actor = remoteEvent.actor ? `${remoteEvent.actor} ` : "Thiết bị khác ";
+          showMobileToast(`🔄 ${actor}${verb} ${rName}`);
+        }
       }
     });
   }
