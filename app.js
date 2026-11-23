@@ -3647,6 +3647,9 @@
     }
 
     // Unified Login Overlay & Update Banner handlers (shared by PC and Mobile)
+    $("auth-staff").addEventListener("change", () => {
+      if ($("auth-username")) $("auth-username").value = "";
+    });
     $("auth-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const btn = $("auth-submit");

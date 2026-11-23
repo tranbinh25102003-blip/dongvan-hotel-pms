@@ -50,9 +50,13 @@
     let lastSyncedAt = null;
     let storeVersion = 0;
     let lastOperatingCostsUpdatedAt = "";
+    let lastHousekeepingUpdatedAt = "";
+    let lastIssuesUpdatedAt = "";
     let lastAccountsUpdatedAt = "";
+    let staffAuthAvailable = null; // null = unknown, true = pgcrypto RPCs installed, false = legacy Supabase Auth only
+    let publicAccountsCache = null; // real active accounts fetched from pms_public_accounts()
 
-    let session = null; // { access_token, refresh_token, expires_at, username, staffName, role }
+    let session = null; // { authMode: "staff_session", sessionToken, expires_at, accountId, username, staffName, role } OR legacy { access_token, refresh_token, expires_at, ... }
     let refreshInFlight = null;
     let inFlightPull = null;
     let queuedPullMeta = null;
@@ -78,6 +82,14 @@
 
     let runningVersion = { appVersion: null, buildId: null };
     let pendingUpdate = null;
+
+    function isStaffSession(s = session) {
+      return Boolean(s && s.authMode === "staff_session" && s.sessionToken);
+    }
+
+    function isSessionActive(s = session) {
+      return Boolean(s && (isStaffSession(s) || s.access_token));
+    }
 
     function ensureSuperAdminAccounts(rawList) {
       const clean = (Array.isArray(rawList) ? rawList : [])
@@ -121,13 +133,15 @@
       const u = String(session.username || "").trim().toLowerCase();
       const s = String(session.staffName || "").trim().toLowerCase();
       return stateCache.accounts.find((a) =>
-        (u && a.username.toLowerCase() === u)
+        (session.accountId && a.id === session.accountId)
+        || (u && a.username.toLowerCase() === u)
         || (s && (a.username.toLowerCase() === s || a.staffName.toLowerCase() === s))
       ) || null;
     }
 
     function getCurrentRole() {
       if (!session) return "reception";
+      if (isStaffSession() && session.role) return Core.normalizeRole(session.role);
       const u = String(session.username || "").trim().toLowerCase();
       const nm = String(session.staffName || "").trim().toLowerCase();
       if (u === Core.SUPER_ADMIN_USERNAME || nm === Core.SUPER_ADMIN_USERNAME || nm === Core.SUPER_ADMIN_DISPLAY_NAME.toLowerCase()) {
@@ -173,6 +187,7 @@
         const raw = root.localStorage.getItem(SESSION_STORAGE_KEY);
         if (!raw) return null;
         const parsed = JSON.parse(raw);
+        if (parsed && parsed.authMode === "staff_session" && parsed.sessionToken) return parsed;
         if (parsed && parsed.access_token && parsed.refresh_token) return parsed;
       } catch {}
       return null;
@@ -187,6 +202,14 @@
     }
 
     function getPublicAccountsList() {
+      if (staffAuthAvailable === true && Array.isArray(publicAccountsCache) && publicAccountsCache.length > 0) {
+        return publicAccountsCache.map((a) => ({
+          id: a.id,
+          username: a.username,
+          staffName: a.staffName,
+          role: Core.normalizeRole(a.role)
+        }));
+      }
       const out = [];
       const seen = new Set();
       for (const acc of stateCache.accounts) {
@@ -217,11 +240,11 @@
       return {
         authRequired: true,
         authConfigured: Boolean(baseUrl && anonKey),
-        authenticated: Boolean(session && session.access_token),
-        user: session ? {
-          id: (matched && matched.id) || (getCurrentRole() === "super_admin" ? "acc_super_admin" : ""),
-          username: (matched && matched.username) || session.username || session.staffName || "Lễ tân",
-          staffName: (matched && matched.staffName) || session.staffName || "Lễ tân",
+        authenticated: isSessionActive(),
+        user: isSessionActive() ? {
+          id: session.accountId || (matched && matched.id) || (getCurrentRole() === "super_admin" ? "acc_super_admin" : ""),
+          username: session.username || (matched && matched.username) || session.staffName || "Lễ tân",
+          staffName: session.staffName || (matched && matched.staffName) || "Lễ tân",
           role: getCurrentRole()
         } : null,
         staffList: pub.map((a) => a.staffName),
@@ -248,7 +271,7 @@
         storeVersion,
         isOnline: connectionStatus === "connected",
         authRequired: true,
-        authenticated: Boolean(session && session.access_token),
+        authenticated: isSessionActive(),
         user: authNow.user,
         role: getCurrentRole(),
         runningVersion: { ...runningVersion },
@@ -382,10 +405,35 @@
       }
     }
 
+    async function fetchPublicAccounts() {
+      if (!baseUrl || !anonKey || navigator.onLine === false) return null;
+      try {
+        const res = await rawFetchJson(`${baseUrl}/rest/v1/rpc/pms_public_accounts`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${anonKey}` },
+          body: {},
+          timeoutMs: 6000
+        });
+        if (res.httpOk && res.data && res.data.ok && Array.isArray(res.data.accounts)) {
+          staffAuthAvailable = true;
+          publicAccountsCache = res.data.accounts;
+          if (!isSessionActive()) {
+            emit({ type: "auth_required", auth: getAuthState(), status: getStatus() });
+          }
+          return publicAccountsCache;
+        }
+        if (res.status === 404 || (res.data && res.data.code === "PGRST202")) {
+          staffAuthAvailable = false;
+        }
+      } catch {}
+      return null;
+    }
+
     function handleAuthExpired(errorMsg) {
       closeRealtime();
       saveStoredSession(null);
       connectionStatus = "auth_required";
+      fetchPublicAccounts();
       emit({
         type: "auth_required",
         error: errorMsg || "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại (nội dung đang nhập vẫn được giữ).",
@@ -396,8 +444,15 @@
 
     // Single-flight token refresh prevents concurrent RPCs from racing refresh-token rotation!
     async function ensureValidAccessToken(forceRefresh = false) {
-      if (!session || !session.access_token) return null;
+      if (!isSessionActive()) return null;
       const nowSec = Math.floor(Date.now() / 1000);
+      if (isStaffSession()) {
+        if (session.expires_at && nowSec >= session.expires_at) {
+          handleAuthExpired("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
+          return null;
+        }
+        return anonKey;
+      }
       if (!forceRefresh && session.expires_at && session.expires_at - nowSec > 120) {
         return session.access_token;
       }
@@ -455,22 +510,33 @@
       }
       const token = await ensureValidAccessToken(false);
       if (!token) {
-        return { ok: false, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập tài khoản lễ tân." };
+        return { ok: false, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập tài khoản Dongvan Hotel." };
       }
+      const reqBody = isStaffSession()
+        ? { ...params, p_session_token: session.sessionToken }
+        : params;
       try {
         const res = await rawFetchJson(`${baseUrl}/rest/v1/rpc/${rpcName}`, {
           method: "POST",
           headers: { "Authorization": `Bearer ${token}` },
-          body: params,
+          body: reqBody,
           timeoutMs: 12000
         });
-        if (res.status === 401 || (res.data && String(res.data.message || "").includes("AUTH_REQUIRED"))) {
-          if (allowRetry && session && session.refresh_token) {
+        const errMsg = res.data && String(res.data.message || res.data.error || "");
+        if (res.status === 401 || errMsg.includes("AUTH_REQUIRED")) {
+          if (allowRetry && !isStaffSession() && session && session.refresh_token) {
             const refreshed = await ensureValidAccessToken(true);
             if (refreshed) return callRpc(rpcName, params, false);
           }
-          handleAuthExpired("Phiên đăng nhập đã hết hạn — nội dung đang nhập vẫn được giữ nguyên.");
+          handleAuthExpired(
+            isStaffSession()
+              ? "Phiên đăng nhập đã hết hạn hoặc tài khoản đã bị chặn/xóa. Vui lòng đăng nhập lại."
+              : "Phiên đăng nhập đã hết hạn — nội dung đang nhập vẫn được giữ nguyên."
+          );
           return { ok: false, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại rồi bấm Lưu." };
+        }
+        if (res.status === 403 || errMsg.includes("FORBIDDEN")) {
+          return { ok: false, code: "FORBIDDEN", error: "Tài khoản của bạn không có quyền thực hiện thao tác hoặc xem dữ liệu này." };
         }
         if (!res.httpOk) {
           return {
@@ -503,11 +569,40 @@
         return false;
       }
 
+      if (data.user && isStaffSession() && session) {
+        const nextRole = Core.normalizeRole(data.user.role);
+        if (session.role !== nextRole || session.staffName !== data.user.staffName) {
+          saveStoredSession({
+            ...session,
+            accountId: data.user.id || session.accountId,
+            username: data.user.username || session.username,
+            staffName: data.user.staffName || session.staffName,
+            role: nextRole
+          });
+        }
+      }
+
       Core.normalizeDormSlots(data.bookings);
       stateCache.bookings = data.bookings;
       if (Array.isArray(data.auditLogs)) stateCache.auditLogs = data.auditLogs;
       if (Array.isArray(data.autoBackups)) stateCache.autoBackups = data.autoBackups;
       if (typeof data.hasRollbackBackup === "boolean") stateCache.hasRollbackBackup = data.hasRollbackBackup;
+      if (data.operatingCosts && typeof data.operatingCosts === "object") {
+        stateCache.operatingCosts = Core.sanitizeOperatingCostsState(data.operatingCosts);
+        lastOperatingCostsUpdatedAt = stateCache.operatingCosts.updatedAt || lastOperatingCostsUpdatedAt;
+      } else if (data.operatingCosts === null) {
+        stateCache.operatingCosts = can("costs:read") ? Core.createDefaultOperatingCostsState() : null;
+      }
+      if (Array.isArray(data.housekeepingTasks)) {
+        stateCache.housekeepingTasks = data.housekeepingTasks.map((t) => Core.sanitizeHousekeepingTask(t)).filter(Boolean);
+      }
+      if (Array.isArray(data.maintenanceIssues)) {
+        stateCache.maintenanceIssues = data.maintenanceIssues.map((i) => Core.sanitizeMaintenanceIssue(i)).filter(Boolean);
+      }
+      stateCache.roomStatuses = Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
+      if (Array.isArray(data.accounts) && can("accounts:manage")) {
+        stateCache.accounts = ensureSuperAdminAccounts(data.accounts);
+      }
       if (incomingVer !== null) storeVersion = incomingVer;
       lastSyncedAt = new Date().toISOString();
       connectionStatus = "connected";
@@ -627,6 +722,7 @@
       if (delta.senderId && delta.senderId === clientId) return;
 
       if (delta.action === "COSTS_UPDATE" && delta.operatingCosts) {
+        if (!can("costs:read")) return;
         stateCache.operatingCosts = Core.sanitizeOperatingCostsState(delta.operatingCosts);
         lastOperatingCostsUpdatedAt = stateCache.operatingCosts.updatedAt || delta.ts || new Date().toISOString();
         lastSyncedAt = new Date().toISOString();
@@ -640,8 +736,14 @@
         return;
       }
 
-      if (delta.action === "ACCOUNTS_UPDATE" && Array.isArray(delta.accounts)) {
-        applyAccountsUpdate(delta.accounts, delta.ts || new Date().toISOString());
+      if (delta.action === "ACCOUNTS_UPDATE") {
+        if (delta.revokedAccountId && session && session.accountId && delta.revokedAccountId === session.accountId && getCurrentRole() !== "super_admin") {
+          handleAuthExpired("Tài khoản của bạn đã bị Tổng quản lý chặn truy cập hoặc xóa.");
+          return;
+        }
+        if (Array.isArray(delta.accounts)) {
+          applyAccountsUpdate(delta.accounts, delta.ts || new Date().toISOString());
+        }
         lastSyncedAt = new Date().toISOString();
         emit({
           type: "remote_change",
@@ -651,6 +753,18 @@
         });
         return;
       }
+
+      if (delta.action === "CHECKOUT" || delta.action === "HK_TASK_CREATE" || delta.action === "HK_TASK_START" || delta.action === "HK_TASK_COMPLETE" || delta.action === "ISSUE_CREATE" || delta.action === "ISSUE_UPDATE") {
+        pullLatestFromCloud({
+          type: "remote_change",
+          remoteEvent: { action: delta.action, actor: delta.actor || "", ts: delta.ts || new Date().toISOString() },
+          force: true
+        });
+        return;
+      }
+
+      // Housekeeping must NEVER ingest raw booking payloads from Broadcast
+      if (getCurrentRole() === "housekeeping") return;
 
       const remoteVer = typeof delta.storeVersion === "number" ? delta.storeVersion : null;
       if (remoteVer !== null && remoteVer <= storeVersion) return;
@@ -711,7 +825,7 @@
     }
 
     async function pullLatestFromCloud(meta = {}) {
-      if (!session || !session.access_token) {
+      if (!isSessionActive()) {
         return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
       }
 
@@ -726,34 +840,36 @@
         if (!res || !res.ok) {
           return res || { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Không thể tải dữ liệu." };
         }
-        // Fetch extended PMS meta (operating_costs_v1, housekeeping_v1, issues_v1, staff_accounts_v1) in one RLS query
-        try {
-          const token = await ensureValidAccessToken(false);
-          if (token) {
-            const cRes = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=in.(operating_costs_v1,housekeeping_v1,issues_v1,staff_accounts_v1)&select=key,value,updated_at`, {
-              method: "GET",
-              headers: { "Authorization": `Bearer ${token}` },
-              timeoutMs: 6000
-            });
-            if (cRes.httpOk && Array.isArray(cRes.data)) {
-              for (const row of cRes.data) {
-                if (!row || !row.value) continue;
-                const key = row.key || "operating_costs_v1";
-                if (key === "operating_costs_v1") {
-                  stateCache.operatingCosts = Core.sanitizeOperatingCostsState(row.value);
-                  lastOperatingCostsUpdatedAt = (row.value && row.value.updatedAt) || row.updated_at || stateCache.operatingCosts.updatedAt || "";
-                } else if (key === "housekeeping_v1" && Array.isArray(row.value.tasks)) {
-                  stateCache.housekeepingTasks = row.value.tasks.map((t) => Core.sanitizeHousekeepingTask(t)).filter(Boolean);
-                } else if (key === "issues_v1" && Array.isArray(row.value.issues)) {
-                  stateCache.maintenanceIssues = row.value.issues.map((i) => Core.sanitizeMaintenanceIssue(i)).filter(Boolean);
-                } else if (key === "staff_accounts_v1" && Array.isArray(row.value.accounts)) {
-                  applyAccountsUpdate(row.value.accounts, (row.value && row.value.updatedAt) || row.updated_at || "");
+        // In legacy Supabase Auth JWT mode (non-staff_session), also fetch extended meta directly
+        if (!isStaffSession()) {
+          try {
+            const token = await ensureValidAccessToken(false);
+            if (token) {
+              const cRes = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=in.(operating_costs_v1,housekeeping_v1,issues_v1,staff_accounts_v1)&select=key,value,updated_at`, {
+                method: "GET",
+                headers: { "Authorization": `Bearer ${token}` },
+                timeoutMs: 6000
+              });
+              if (cRes.httpOk && Array.isArray(cRes.data)) {
+                for (const row of cRes.data) {
+                  if (!row || !row.value) continue;
+                  const key = row.key || "operating_costs_v1";
+                  if (key === "operating_costs_v1") {
+                    stateCache.operatingCosts = Core.sanitizeOperatingCostsState(row.value);
+                    lastOperatingCostsUpdatedAt = (row.value && row.value.updatedAt) || row.updated_at || stateCache.operatingCosts.updatedAt || "";
+                  } else if (key === "housekeeping_v1" && Array.isArray(row.value.tasks)) {
+                    stateCache.housekeepingTasks = row.value.tasks.map((t) => Core.sanitizeHousekeepingTask(t)).filter(Boolean);
+                  } else if (key === "issues_v1" && Array.isArray(row.value.issues)) {
+                    stateCache.maintenanceIssues = row.value.issues.map((i) => Core.sanitizeMaintenanceIssue(i)).filter(Boolean);
+                  } else if (key === "staff_accounts_v1" && Array.isArray(row.value.accounts)) {
+                    applyAccountsUpdate(row.value.accounts, (row.value && row.value.updatedAt) || row.updated_at || "");
+                  }
                 }
+                stateCache.roomStatuses = Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
               }
-              stateCache.roomStatuses = Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
             }
-          }
-        } catch {}
+          } catch {}
+        }
         connectionStatus = "connected";
         applyCloudState(res, currentMeta);
         return { ok: true, bookings: stateCache.bookings, storeVersion };
@@ -761,7 +877,7 @@
 
       inFlightPull = (async () => {
         let lastResult = await runOnePull(meta);
-        while (queuedPullMeta && session && session.access_token) {
+        while (queuedPullMeta && isSessionActive()) {
           const nextMeta = queuedPullMeta;
           queuedPullMeta = null;
           lastResult = await runOnePull(nextMeta);
@@ -774,17 +890,50 @@
       return inFlightPull;
     }
 
-    // Ultra-lightweight version probe (reads store_version + operating_costs_v1 + staff_accounts_v1 from pms_meta).
-    // Triggers full pms_get_state() when remote storeVersion > local storeVersion,
-    // and immediately catches up operating_costs_v1 / staff_accounts_v1 when modified on another device while sleeping/offline.
+    // Ultra-lightweight version probe & live session revocation check
     async function checkRemoteVersionAndSync(reason = "VERSION_PROBE") {
-      if (!session || !session.access_token || navigator.onLine === false) return false;
+      if (!isSessionActive() || navigator.onLine === false) return false;
       if (inFlightPull || inFlightVersionProbe) return false;
 
       inFlightVersionProbe = (async () => {
+        lastProbeAt = Date.now();
+        if (isStaffSession()) {
+          const syncRes = await callRpc("pms_check_sync", {});
+          if (!syncRes || !syncRes.ok) return false;
+          const remoteVer = typeof syncRes.storeVersion === "number" ? syncRes.storeVersion : null;
+          const remoteCostsTs = syncRes.operatingCostsUpdatedAt || "";
+          const remoteHkTs = syncRes.housekeepingUpdatedAt || "";
+          const remoteIssTs = syncRes.issuesUpdatedAt || "";
+          const remoteAccTs = syncRes.accountsUpdatedAt || "";
+          const needsPull = (remoteVer !== null && remoteVer > storeVersion)
+            || (can("costs:read") && remoteCostsTs && remoteCostsTs !== lastOperatingCostsUpdatedAt)
+            || (remoteHkTs && remoteHkTs !== lastHousekeepingUpdatedAt)
+            || (remoteIssTs && remoteIssTs !== lastIssuesUpdatedAt)
+            || (can("accounts:manage") && remoteAccTs && remoteAccTs !== lastAccountsUpdatedAt);
+
+          if (remoteCostsTs) lastOperatingCostsUpdatedAt = remoteCostsTs;
+          if (remoteHkTs) lastHousekeepingUpdatedAt = remoteHkTs;
+          if (remoteIssTs) lastIssuesUpdatedAt = remoteIssTs;
+          if (remoteAccTs) lastAccountsUpdatedAt = remoteAccTs;
+
+          if (needsPull) {
+            await pullLatestFromCloud({
+              type: "remote_change",
+              remoteEvent: { ...(syncRes.storeMeta || {}), action: (syncRes.storeMeta && syncRes.storeMeta.action) || reason },
+              force: true
+            });
+            return true;
+          }
+          if (connectionStatus !== "connected") {
+            connectionStatus = "connected";
+            lastSyncedAt = new Date().toISOString();
+            emit({ type: "status", status: getStatus() });
+          }
+          return false;
+        }
+
         const token = await ensureValidAccessToken(false);
         if (!token) return false;
-        lastProbeAt = Date.now();
         try {
           const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=in.(store_version,operating_costs_v1,staff_accounts_v1)&select=key,value,updated_at`, {
             method: "GET",
@@ -892,7 +1041,7 @@
     }
 
     function scheduleRealtimeReconnect() {
-      if (wsReconnectTimer || !session || !session.access_token || navigator.onLine === false) return;
+      if (wsReconnectTimer || !isSessionActive() || navigator.onLine === false) return;
       const delay = Math.min(4000, 450 * Math.pow(1.5, wsReconnectAttempt));
       wsReconnectAttempt += 1;
       wsReconnectTimer = setTimeout(() => {
@@ -902,7 +1051,7 @@
     }
 
     async function connectRealtime() {
-      if (!session || !session.access_token || typeof root.WebSocket !== "function" || navigator.onLine === false) return;
+      if (!isSessionActive() || typeof root.WebSocket !== "function" || navigator.onLine === false) return;
       if (wsConnecting) return;
       wsConnecting = true;
 
@@ -912,7 +1061,7 @@
       } finally {
         wsConnecting = false;
       }
-      if (!accessToken || !session || navigator.onLine === false) return;
+      if (!accessToken || !isSessionActive() || navigator.onLine === false) return;
 
       closeRealtime();
       const wsBase = baseUrl.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
@@ -926,17 +1075,18 @@
           if (ws !== socket) return;
           wsReconnectAttempt = 0;
           wsJoinRef = String(++wsRef);
+          const joinConfig = isStaffSession()
+            ? { broadcast: { ack: false, self: false }, presence: { key: "" } }
+            : {
+                broadcast: { ack: false, self: false },
+                presence: { key: "" },
+                postgres_changes: [{ event: "*", schema: "public", table: "pms_meta" }]
+              };
           socket.send(JSON.stringify({
             topic: "realtime:pms-sync",
             event: "phx_join",
             payload: {
-              config: {
-                broadcast: { ack: false, self: false },
-                presence: { key: "" },
-                postgres_changes: [
-                  { event: "*", schema: "public", table: "pms_meta" }
-                ]
-              },
+              config: joinConfig,
               access_token: (session && session.access_token) || accessToken
             },
             ref: wsJoinRef
@@ -1069,7 +1219,7 @@
           clearHeartbeatTimers();
           if (navigator.onLine === false) {
             connectionStatus = "offline";
-          } else if (session && session.access_token) {
+          } else if (isSessionActive()) {
             connectionStatus = "reconnecting";
           }
           emit({ type: "status", status: getStatus() });
@@ -1084,7 +1234,7 @@
 
     function forceReconnectRealtime(reason) {
       closeRealtime();
-      if (!session || !session.access_token || navigator.onLine === false) return;
+      if (!isSessionActive() || navigator.onLine === false) return;
       connectionStatus = "reconnecting";
       emit({ type: "status", status: getStatus() });
       checkRemoteVersionAndSync(reason || "RECONNECT_SYNC");
@@ -1093,7 +1243,7 @@
 
     function handleAppResume(reason) {
       checkAppVersion();
-      if (!session || !session.access_token || navigator.onLine === false) return;
+      if (!isSessionActive() || navigator.onLine === false) return;
       checkRemoteVersionAndSync(reason);
       if (!ws || ws.readyState !== 1 || !wsJoined) {
         connectRealtime();
@@ -1126,7 +1276,7 @@
 
       root.addEventListener("online", () => {
         checkAppVersion();
-        if (!session || !session.access_token) return;
+        if (!isSessionActive()) return;
         connectionStatus = "reconnecting";
         emit({ type: "status", status: getStatus() });
         checkRemoteVersionAndSync("RECONNECT_SYNC");
@@ -1146,7 +1296,7 @@
       // Layer 3 adaptive lightweight probe: 3.5s when WS degraded, 12s safety check when WS healthy
       if (!syncProbeTimer) {
         syncProbeTimer = setInterval(() => {
-          if (root.document.hidden || navigator.onLine === false || !session || !session.access_token) return;
+          if (root.document.hidden || navigator.onLine === false || !isSessionActive()) return;
           const intervalNeeded = wsJoined ? HEALTHY_PROBE_MS : DEGRADED_PROBE_MS;
           if (Date.now() - lastProbeAt >= intervalNeeded) {
             checkRemoteVersionAndSync(wsJoined ? "SAFETY_PROBE" : "DEGRADED_PROBE");
@@ -1174,6 +1324,7 @@
       const stored = loadStoredSession();
       if (!stored) {
         connectionStatus = "auth_required";
+        await fetchPublicAccounts();
         emit({ type: "auth_required", auth: getAuthState(), status: getStatus() });
         return { ok: true, mode: "server", authRequired: true, authenticated: false, bookings: [] };
       }
@@ -1194,9 +1345,49 @@
       const cleanLogin = String(staffName || "").trim() || "Lễ tân";
       const cleanPass = String(passcode || "");
       if (!cleanPass) {
-        return { ok: false, code: "MISSING_CREDENTIALS", error: "Vui lòng nhập mật khẩu khách sạn." };
+        return { ok: false, code: "MISSING_CREDENTIALS", error: "Vui lòng nhập mật khẩu tài khoản." };
       }
       try {
+        // 1. Primary authentication: per-account pgcrypto bcrypt RPC (pms_staff_login)
+        const rpcLogin = await rawFetchJson(`${baseUrl}/rest/v1/rpc/pms_staff_login`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${anonKey}` },
+          body: { p_login: cleanLogin, p_passcode: cleanPass },
+          timeoutMs: 12000
+        });
+        const rpcNotInstalled = !rpcLogin.httpOk
+          && !(rpcLogin.data && rpcLogin.data.ok === false && rpcLogin.data.code && rpcLogin.data.code !== "PGRST202" && rpcLogin.data.code !== "42501");
+
+        if (!rpcNotInstalled) {
+          staffAuthAvailable = true;
+          if (!rpcLogin.httpOk || !rpcLogin.data || !rpcLogin.data.ok) {
+            return {
+              ok: false,
+              code: (rpcLogin.data && rpcLogin.data.code) || "INVALID_CREDENTIALS",
+              error: (rpcLogin.data && (rpcLogin.data.error || rpcLogin.data.message)) || "Sai tên đăng nhập hoặc mật khẩu."
+            };
+          }
+          const u = rpcLogin.data.user || {};
+          saveStoredSession({
+            authMode: "staff_session",
+            sessionToken: rpcLogin.data.sessionToken,
+            expires_at: Number(rpcLogin.data.expiresAt) || (Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60),
+            accountId: u.id || "",
+            username: u.username || cleanLogin,
+            staffName: u.staffName || cleanLogin,
+            role: Core.normalizeRole(u.role)
+          });
+          const pulled = await pullLatestFromCloud({ type: "auth_login", force: true });
+          if (!pulled.ok) {
+            return { ok: false, code: pulled.code, error: pulled.error };
+          }
+          connectRealtime();
+          emit({ type: "auth_login", auth: getAuthState(), state: getSnapshot(), status: getStatus() });
+          return { ok: true, user: getAuthState().user, bookings: stateCache.bookings };
+        }
+
+        // 2. Fallback ONLY when Supabase SQL upgrade (v1.4.2) has not been executed yet
+        staffAuthAvailable = false;
         let res = await rawFetchJson(`${baseUrl}/auth/v1/token?grant_type=password`, {
           method: "POST",
           body: { email: hotelEmail, password: cleanPass },
@@ -1211,11 +1402,10 @@
           });
         }
         if (!res.httpOk || !res.data || !res.data.access_token) {
-          return {
-            ok: false,
-            code: "INVALID_CREDENTIALS",
-            error: "Sai mật khẩu khách sạn (hoặc tài khoản chưa được tạo trên Supabase)."
-          };
+          const hint = cleanPass.length < 6
+            ? "Mật khẩu riêng (4 ký tự) cần chạy 1 lần file supabase/schema.sql trong Supabase → SQL Editor. Nếu chưa chạy SQL, hãy tạm nhập mật khẩu khách sạn Supabase."
+            : "Sai mật khẩu khách sạn (hoặc tài khoản chưa được tạo trên Supabase).";
+          return { ok: false, code: "INVALID_CREDENTIALS", error: hint };
         }
         const isSuper = cleanLogin.toLowerCase() === Core.SUPER_ADMIN_USERNAME
           || cleanLogin.toLowerCase() === Core.SUPER_ADMIN_DISPLAY_NAME.toLowerCase();
@@ -1231,7 +1421,6 @@
         if (!pulled.ok) {
           return { ok: false, code: pulled.code, error: pulled.error };
         }
-        // Check if this account is blocked in staff_accounts_v1
         const matched = findSessionAccount();
         if (matched && !matched.active) {
           saveStoredSession(null);
@@ -1256,13 +1445,24 @@
     }
 
     async function logout() {
-      const token = session && session.access_token;
+      const wasStaff = isStaffSession();
+      const staffTok = session && session.sessionToken;
+      const jwtTok = session && session.access_token;
       closeRealtime();
-      if (token) {
+      if (wasStaff && staffTok) {
+        try {
+          await rawFetchJson(`${baseUrl}/rest/v1/rpc/pms_staff_logout`, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${anonKey}` },
+            body: { p_session_token: staffTok },
+            timeoutMs: 5000
+          });
+        } catch {}
+      } else if (jwtTok) {
         try {
           await rawFetchJson(`${baseUrl}/auth/v1/logout`, {
             method: "POST",
-            headers: { "Authorization": `Bearer ${token}` },
+            headers: { "Authorization": `Bearer ${jwtTok}` },
             body: {},
             timeoutMs: 5000
           });
@@ -1282,8 +1482,11 @@
       };
       storeVersion = 0;
       lastOperatingCostsUpdatedAt = "";
+      lastHousekeepingUpdatedAt = "";
+      lastIssuesUpdatedAt = "";
       lastAccountsUpdatedAt = "";
       connectionStatus = "auth_required";
+      await fetchPublicAccounts();
       emit({ type: "auth_required", auth: getAuthState(), state: getSnapshot(), status: getStatus() });
       return { ok: true };
     }
@@ -1414,12 +1617,37 @@
       if (navigator.onLine === false) {
         return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Đang mất kết nối mạng — không thể lưu chi phí vận hành." };
       }
+      if (!can("costs:write")) {
+        return { ok: false, code: "FORBIDDEN", error: "Tài khoản của bạn không có quyền chỉnh sửa chi phí vận hành." };
+      }
+      const clean = Core.sanitizeOperatingCostsState(nextState);
+      clean.updatedAt = new Date().toISOString();
+
+      if (isStaffSession()) {
+        const rpcRes = await callRpc("pms_save_meta", { p_key: "operating_costs_v1", p_value: clean });
+        if (!rpcRes || !rpcRes.ok) {
+          return rpcRes || { ok: false, code: "SERVER_ERROR", error: "Không thể lưu chi phí vận hành lên Supabase." };
+        }
+        stateCache.operatingCosts = clean;
+        lastOperatingCostsUpdatedAt = clean.updatedAt;
+        lastSyncedAt = clean.updatedAt;
+        connectionStatus = "connected";
+        emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        broadcastDeltaToPeers({
+          senderId: clientId,
+          storeVersion,
+          action: "COSTS_UPDATE",
+          operatingCosts: clean,
+          actor: (session && session.staffName) || "",
+          ts: clean.updatedAt
+        });
+        return { ok: true, operatingCosts: clean };
+      }
+
       const token = await ensureValidAccessToken(false);
       if (!token) {
         return { ok: false, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập để lưu chi phí vận hành." };
       }
-      const clean = Core.sanitizeOperatingCostsState(nextState);
-      clean.updatedAt = new Date().toISOString();
       try {
         const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?on_conflict=key`, {
           method: "POST",
@@ -1464,11 +1692,33 @@
       if (navigator.onLine === false) {
         return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Đang mất kết nối mạng — không thể lưu dữ liệu." };
       }
+      const updatedAt = (valueObj && valueObj.updatedAt) || new Date().toISOString();
+
+      if (isStaffSession()) {
+        const rpcRes = await callRpc("pms_save_meta", { p_key: key, p_value: valueObj });
+        if (!rpcRes || !rpcRes.ok) {
+          return rpcRes || { ok: false, code: "SERVER_ERROR", error: "Không thể lưu dữ liệu lên Supabase." };
+        }
+        if (key === "housekeeping_v1") lastHousekeepingUpdatedAt = updatedAt;
+        if (key === "issues_v1") lastIssuesUpdatedAt = updatedAt;
+        lastSyncedAt = updatedAt;
+        connectionStatus = "connected";
+        stateCache.roomStatuses = Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
+        emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        broadcastDeltaToPeers({
+          senderId: clientId,
+          storeVersion,
+          action: broadcastAction,
+          actor: (session && session.staffName) || "",
+          ts: updatedAt
+        });
+        return { ok: true, updatedAt };
+      }
+
       const token = await ensureValidAccessToken(false);
       if (!token) {
         return { ok: false, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập lại." };
       }
-      const updatedAt = new Date().toISOString();
       try {
         const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?on_conflict=key`, {
           method: "POST",
@@ -1623,10 +1873,18 @@
       if (!can("accounts:manage")) {
         return { ok: false, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền xem và quản trị tài khoản." };
       }
+      if (isStaffSession()) {
+        const rpcRes = await callRpc("pms_list_accounts", {});
+        if (!rpcRes || !rpcRes.ok) {
+          return rpcRes || { ok: false, code: "SERVER_ERROR", error: "Không tải được danh sách tài khoản." };
+        }
+        stateCache.accounts = ensureSuperAdminAccounts(rpcRes.accounts || []);
+        return { ok: true, accounts: stateCache.accounts };
+      }
       return { ok: true, accounts: stateCache.accounts };
     }
 
-    async function persistCloudAccounts(nextAccounts) {
+    async function persistCloudAccounts(nextAccounts, revokedAccountId = "") {
       const normalized = ensureSuperAdminAccounts(nextAccounts);
       const nowIso = new Date().toISOString();
       const metaRes = await upsertPmsMetaKey("staff_accounts_v1", { accounts: normalized, updatedAt: nowIso }, "ACCOUNTS_UPDATE");
@@ -1638,6 +1896,7 @@
         storeVersion,
         action: "ACCOUNTS_UPDATE",
         accounts: normalized,
+        revokedAccountId: revokedAccountId || undefined,
         actor: (session && session.staffName) || "",
         ts: nowIso
       });
@@ -1648,6 +1907,32 @@
       if (!can("accounts:create")) {
         return { ok: false, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền cấp tài khoản mới." };
       }
+      if (isStaffSession()) {
+        const rpcRes = await callRpc("pms_create_account", {
+          p_username: String((payload && payload.username) || "").trim(),
+          p_staff_name: String((payload && payload.staffName) || "").trim(),
+          p_role: String((payload && payload.role) || "reception").trim(),
+          p_passcode: String((payload && payload.passcode) || "").trim()
+        });
+        if (!rpcRes || !rpcRes.ok) return rpcRes || { ok: false, error: "Không thể tạo tài khoản mới." };
+        if (Array.isArray(rpcRes.accounts)) {
+          stateCache.accounts = ensureSuperAdminAccounts(rpcRes.accounts);
+        }
+        const nowIso = new Date().toISOString();
+        lastAccountsUpdatedAt = nowIso;
+        await fetchPublicAccounts();
+        emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        broadcastDeltaToPeers({
+          senderId: clientId,
+          storeVersion,
+          action: "ACCOUNTS_UPDATE",
+          accounts: stateCache.accounts,
+          actor: (session && session.staffName) || "",
+          ts: nowIso
+        });
+        return { ...rpcRes, accounts: stateCache.accounts };
+      }
+
       const cleanUser = Core.sanitizeText(payload && payload.username, 60).toLowerCase().replace(/\s+/g, "");
       const cleanName = Core.sanitizeText(payload && payload.staffName, 80);
       const normRole = Core.normalizeRole(payload && payload.role);
@@ -1681,6 +1966,34 @@
       if (!can("accounts:manage")) {
         return { ok: false, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền chỉnh sửa tài khoản." };
       }
+      if (isStaffSession()) {
+        const rpcRes = await callRpc("pms_update_account", {
+          p_account_id: accountId,
+          p_staff_name: patch && patch.staffName !== undefined ? String(patch.staffName) : null,
+          p_role: patch && patch.role !== undefined ? String(patch.role) : null,
+          p_active: patch && patch.active !== undefined ? Boolean(patch.active) : null,
+          p_passcode: patch && patch.passcode !== undefined && String(patch.passcode).trim() !== "" ? String(patch.passcode).trim() : null
+        });
+        if (!rpcRes || !rpcRes.ok) return rpcRes || { ok: false, error: "Không thể cập nhật tài khoản." };
+        if (Array.isArray(rpcRes.accounts)) {
+          stateCache.accounts = ensureSuperAdminAccounts(rpcRes.accounts);
+        }
+        const nowIso = new Date().toISOString();
+        lastAccountsUpdatedAt = nowIso;
+        await fetchPublicAccounts();
+        emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        broadcastDeltaToPeers({
+          senderId: clientId,
+          storeVersion,
+          action: "ACCOUNTS_UPDATE",
+          accounts: stateCache.accounts,
+          revokedAccountId: (patch && patch.active === false) ? accountId : undefined,
+          actor: (session && session.staffName) || "",
+          ts: nowIso
+        });
+        return { ...rpcRes, accounts: stateCache.accounts };
+      }
+
       const idx = stateCache.accounts.findIndex((a) => a.id === accountId);
       if (idx < 0) return { ok: false, code: "NOT_FOUND", error: "Không tìm thấy tài khoản nhân viên." };
       const cur = stateCache.accounts[idx];
@@ -1704,7 +2017,7 @@
       };
       const nextList = stateCache.accounts.slice();
       nextList[idx] = updated;
-      const saved = await persistCloudAccounts(nextList);
+      const saved = await persistCloudAccounts(nextList, !nextActive ? accountId : "");
       return saved.ok ? { ok: true, account: updated, accounts: saved.accounts } : saved;
     }
 
@@ -1712,13 +2025,35 @@
       if (!can("accounts:delete")) {
         return { ok: false, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền xóa tài khoản." };
       }
+      if (isStaffSession()) {
+        const rpcRes = await callRpc("pms_delete_account", { p_account_id: accountId });
+        if (!rpcRes || !rpcRes.ok) return rpcRes || { ok: false, error: "Không thể xóa tài khoản." };
+        if (Array.isArray(rpcRes.accounts)) {
+          stateCache.accounts = ensureSuperAdminAccounts(rpcRes.accounts);
+        }
+        const nowIso = new Date().toISOString();
+        lastAccountsUpdatedAt = nowIso;
+        await fetchPublicAccounts();
+        emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        broadcastDeltaToPeers({
+          senderId: clientId,
+          storeVersion,
+          action: "ACCOUNTS_UPDATE",
+          accounts: stateCache.accounts,
+          revokedAccountId: accountId,
+          actor: (session && session.staffName) || "",
+          ts: nowIso
+        });
+        return { ...rpcRes, accounts: stateCache.accounts };
+      }
+
       const target = stateCache.accounts.find((a) => a.id === accountId);
       if (!target) return { ok: false, code: "NOT_FOUND", error: "Không tìm thấy tài khoản cần xóa." };
       if (Core.normalizeRole(target.role) === "super_admin") {
         return { ok: false, code: "SUPER_ADMIN_PROTECTED", error: "Không thể xóa tài khoản Tổng quản lý duy nhất." };
       }
       const nextList = stateCache.accounts.filter((a) => a.id !== accountId);
-      const saved = await persistCloudAccounts(nextList);
+      const saved = await persistCloudAccounts(nextList, accountId);
       return saved.ok ? { ok: true, deleted: target, accounts: saved.accounts } : saved;
     }
 
