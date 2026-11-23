@@ -40,7 +40,7 @@
     const baseUrl = normalizeBaseUrl(config && config.url);
     const anonKey = String((config && config.anonKey) || "").trim();
     const hotelEmail = String((config && config.hotelEmail) || "letan@dongvanhotel.vn").trim();
-    const staffList = [...(Core.CONFIRMERS || []), "Quản lý"];
+    const legacyStaffList = (Core.CONFIRMERS || []).filter((n) => n !== Core.SUPER_ADMIN_DISPLAY_NAME);
     const clientId = `cli_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
     const listeners = new Set();
@@ -50,8 +50,9 @@
     let lastSyncedAt = null;
     let storeVersion = 0;
     let lastOperatingCostsUpdatedAt = "";
+    let lastAccountsUpdatedAt = "";
 
-    let session = null; // { access_token, refresh_token, expires_at, staffName }
+    let session = null; // { access_token, refresh_token, expires_at, username, staffName, role }
     let refreshInFlight = null;
     let inFlightPull = null;
     let queuedPullMeta = null;
@@ -78,6 +79,31 @@
     let runningVersion = { appVersion: null, buildId: null };
     let pendingUpdate = null;
 
+    function ensureSuperAdminAccounts(rawList) {
+      const clean = (Array.isArray(rawList) ? rawList : [])
+        .map((a) => Core.sanitizeStaffAccountPublic(a))
+        .filter(Boolean);
+      const hasSuper = clean.some((a) => a.role === "super_admin");
+      if (!hasSuper) {
+        const nowIso = new Date().toISOString();
+        clean.unshift({
+          id: "acc_super_admin",
+          username: Core.SUPER_ADMIN_USERNAME,
+          staffName: Core.SUPER_ADMIN_DISPLAY_NAME,
+          role: "super_admin",
+          active: true,
+          createdAt: nowIso,
+          updatedAt: nowIso
+        });
+      }
+      clean.sort((a, b) => {
+        const rank = (r) => (r === "super_admin" ? 0 : r === "manager" ? 1 : r === "reception" ? 2 : 3);
+        const diff = rank(a.role) - rank(b.role);
+        return diff !== 0 ? diff : a.staffName.localeCompare(b.staffName);
+      });
+      return clean;
+    }
+
     let stateCache = {
       bookings: [],
       auditLogs: [],
@@ -87,13 +113,29 @@
       housekeepingTasks: [],
       maintenanceIssues: [],
       roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
-      accounts: []
+      accounts: ensureSuperAdminAccounts([])
     };
+
+    function findSessionAccount() {
+      if (!session) return null;
+      const u = String(session.username || "").trim().toLowerCase();
+      const s = String(session.staffName || "").trim().toLowerCase();
+      return stateCache.accounts.find((a) =>
+        (u && a.username.toLowerCase() === u)
+        || (s && (a.username.toLowerCase() === s || a.staffName.toLowerCase() === s))
+      ) || null;
+    }
 
     function getCurrentRole() {
       if (!session) return "reception";
-      if (session.role) return Core.normalizeRole(session.role);
+      const u = String(session.username || "").trim().toLowerCase();
       const nm = String(session.staffName || "").trim().toLowerCase();
+      if (u === Core.SUPER_ADMIN_USERNAME || nm === Core.SUPER_ADMIN_USERNAME || nm === Core.SUPER_ADMIN_DISPLAY_NAME.toLowerCase()) {
+        return "super_admin";
+      }
+      const matched = findSessionAccount();
+      if (matched) return Core.normalizeRole(matched.role);
+      if (session.role) return Core.normalizeRole(session.role);
       if (nm.includes("buồng phòng") || nm.includes("buongphong")) return "housekeeping";
       if (nm.includes("lễ tân") || nm.includes("letan")) return "reception";
       return "manager";
@@ -144,17 +186,46 @@
       } catch {}
     }
 
+    function getPublicAccountsList() {
+      const out = [];
+      const seen = new Set();
+      for (const acc of stateCache.accounts) {
+        if (!acc.active) {
+          seen.add(acc.username.toLowerCase());
+          seen.add(acc.staffName.toLowerCase());
+          continue;
+        }
+        seen.add(acc.username.toLowerCase());
+        seen.add(acc.staffName.toLowerCase());
+        out.push({ id: acc.id, username: acc.username, staffName: acc.staffName, role: Core.normalizeRole(acc.role) });
+      }
+      for (const n of legacyStaffList) {
+        const low = n.toLowerCase();
+        if (seen.has(low)) continue;
+        seen.add(low);
+        out.push({ id: `sb_${low}`, username: n, staffName: n, role: "reception" });
+      }
+      if (!seen.has("buồng phòng") && !seen.has("buongphong")) {
+        out.push({ id: "sb_hk", username: "Buồng phòng", staffName: "Buồng phòng", role: "housekeeping" });
+      }
+      return out;
+    }
+
     function getAuthState() {
+      const pub = getPublicAccountsList();
+      const matched = findSessionAccount();
       return {
         authRequired: true,
         authConfigured: Boolean(baseUrl && anonKey),
         authenticated: Boolean(session && session.access_token),
-        user: session ? { username: session.username || session.staffName || "Lễ tân", staffName: session.staffName || "Lễ tân", role: getCurrentRole() } : null,
-        staffList: [...staffList, "Buồng phòng"],
-        accountsPublic: [
-          ...staffList.map((n) => ({ id: `sb_${n}`, username: n, staffName: n, role: n === "Quản lý" ? "manager" : "reception" })),
-          { id: "sb_hk", username: "Buồng phòng", staffName: "Buồng phòng", role: "housekeeping" }
-        ]
+        user: session ? {
+          id: (matched && matched.id) || (getCurrentRole() === "super_admin" ? "acc_super_admin" : ""),
+          username: (matched && matched.username) || session.username || session.staffName || "Lễ tân",
+          staffName: (matched && matched.staffName) || session.staffName || "Lễ tân",
+          role: getCurrentRole()
+        } : null,
+        staffList: pub.map((a) => a.staffName),
+        accountsPublic: pub
       };
     }
 
@@ -167,6 +238,7 @@
     }
 
     function getStatus() {
+      const authNow = getAuthState();
       return {
         mode: "server",
         backend: "supabase",
@@ -177,7 +249,7 @@
         isOnline: connectionStatus === "connected",
         authRequired: true,
         authenticated: Boolean(session && session.access_token),
-        user: session ? { username: session.username || session.staffName || "Lễ tân", staffName: session.staffName || "Lễ tân", role: getCurrentRole() } : null,
+        user: authNow.user,
         role: getCurrentRole(),
         runningVersion: { ...runningVersion },
         pendingUpdate: pendingUpdate ? { ...pendingUpdate } : null
@@ -191,11 +263,11 @@
         auditLogs: isHk ? [] : stateCache.auditLogs,
         autoBackups: isHk ? [] : stateCache.autoBackups,
         hasRollbackBackup: isHk ? false : stateCache.hasRollbackBackup,
-        operatingCosts: getCurrentRole() === "manager" ? stateCache.operatingCosts : null,
+        operatingCosts: can("costs:read") ? stateCache.operatingCosts : null,
         housekeepingTasks: stateCache.housekeepingTasks,
         maintenanceIssues: stateCache.maintenanceIssues,
         roomStatuses: stateCache.roomStatuses,
-        accounts: stateCache.accounts,
+        accounts: can("accounts:manage") ? stateCache.accounts : [],
         storeVersion
       };
     }
@@ -333,7 +405,12 @@
       if (refreshInFlight) return refreshInFlight;
 
       const refreshTok = session.refresh_token;
-      const staffName = session.staffName || "Lễ tân";
+      const prevMeta = {
+        username: session.username || "",
+        staffName: session.staffName || "Lễ tân",
+        role: session.role || "",
+        accountId: session.accountId || ""
+      };
       refreshInFlight = (async () => {
         try {
           const res = await rawFetchJson(`${baseUrl}/auth/v1/token?grant_type=refresh_token`, {
@@ -343,10 +420,10 @@
           });
           if (res.httpOk && res.data && res.data.access_token) {
             const next = {
+              ...prevMeta,
               access_token: res.data.access_token,
               refresh_token: res.data.refresh_token || refreshTok,
-              expires_at: Math.floor(Date.now() / 1000) + (Number(res.data.expires_in) || 3600),
-              staffName
+              expires_at: Math.floor(Date.now() / 1000) + (Number(res.data.expires_in) || 3600)
             };
             saveStoredSession(next);
             pushAccessTokenToRealtime(next.access_token);
@@ -530,6 +607,21 @@
       }
     }
 
+    function applyAccountsUpdate(rawAccounts, updatedAt) {
+      if (!Array.isArray(rawAccounts)) return;
+      stateCache.accounts = ensureSuperAdminAccounts(rawAccounts);
+      if (updatedAt) lastAccountsUpdatedAt = updatedAt;
+      // Live revocation check: if current non-super-admin session account was blocked or deleted, sign out immediately!
+      if (session && getCurrentRole() !== "super_admin") {
+        const matched = findSessionAccount();
+        if (matched && !matched.active) {
+          handleAuthExpired("Tài khoản của bạn đã bị Tổng quản lý chặn truy cập.");
+        } else if (session.accountId && !matched) {
+          handleAuthExpired("Tài khoản của bạn đã bị Tổng quản lý xóa khỏi hệ thống.");
+        }
+      }
+    }
+
     function applyIncomingPeerDelta(delta) {
       if (!delta || typeof delta !== "object") return;
       if (delta.senderId && delta.senderId === clientId) return;
@@ -542,6 +634,18 @@
         emit({
           type: "remote_change",
           remoteEvent: { action: "COSTS_UPDATE", actor: delta.actor || "", ts: delta.ts || lastSyncedAt },
+          state: getSnapshot(),
+          status: getStatus()
+        });
+        return;
+      }
+
+      if (delta.action === "ACCOUNTS_UPDATE" && Array.isArray(delta.accounts)) {
+        applyAccountsUpdate(delta.accounts, delta.ts || new Date().toISOString());
+        lastSyncedAt = new Date().toISOString();
+        emit({
+          type: "remote_change",
+          remoteEvent: { action: "ACCOUNTS_UPDATE", actor: delta.actor || "", ts: delta.ts || lastSyncedAt },
           state: getSnapshot(),
           status: getStatus()
         });
@@ -622,18 +726,31 @@
         if (!res || !res.ok) {
           return res || { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Không thể tải dữ liệu." };
         }
-        // Also fetch operating_costs_v1 from pms_meta (existing RLS-protected table — zero SQL changes needed)
+        // Fetch extended PMS meta (operating_costs_v1, housekeeping_v1, issues_v1, staff_accounts_v1) in one RLS query
         try {
           const token = await ensureValidAccessToken(false);
           if (token) {
-            const cRes = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=eq.operating_costs_v1&select=value,updated_at`, {
+            const cRes = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=in.(operating_costs_v1,housekeeping_v1,issues_v1,staff_accounts_v1)&select=key,value,updated_at`, {
               method: "GET",
               headers: { "Authorization": `Bearer ${token}` },
               timeoutMs: 6000
             });
-            if (cRes.httpOk && Array.isArray(cRes.data) && cRes.data[0] && cRes.data[0].value) {
-              stateCache.operatingCosts = Core.sanitizeOperatingCostsState(cRes.data[0].value);
-              lastOperatingCostsUpdatedAt = (cRes.data[0].value && cRes.data[0].value.updatedAt) || cRes.data[0].updated_at || stateCache.operatingCosts.updatedAt || "";
+            if (cRes.httpOk && Array.isArray(cRes.data)) {
+              for (const row of cRes.data) {
+                if (!row || !row.value) continue;
+                const key = row.key || "operating_costs_v1";
+                if (key === "operating_costs_v1") {
+                  stateCache.operatingCosts = Core.sanitizeOperatingCostsState(row.value);
+                  lastOperatingCostsUpdatedAt = (row.value && row.value.updatedAt) || row.updated_at || stateCache.operatingCosts.updatedAt || "";
+                } else if (key === "housekeeping_v1" && Array.isArray(row.value.tasks)) {
+                  stateCache.housekeepingTasks = row.value.tasks.map((t) => Core.sanitizeHousekeepingTask(t)).filter(Boolean);
+                } else if (key === "issues_v1" && Array.isArray(row.value.issues)) {
+                  stateCache.maintenanceIssues = row.value.issues.map((i) => Core.sanitizeMaintenanceIssue(i)).filter(Boolean);
+                } else if (key === "staff_accounts_v1" && Array.isArray(row.value.accounts)) {
+                  applyAccountsUpdate(row.value.accounts, (row.value && row.value.updatedAt) || row.updated_at || "");
+                }
+              }
+              stateCache.roomStatuses = Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
             }
           }
         } catch {}
@@ -657,9 +774,9 @@
       return inFlightPull;
     }
 
-    // Ultra-lightweight version probe (reads store_version + operating_costs_v1 from pms_meta).
+    // Ultra-lightweight version probe (reads store_version + operating_costs_v1 + staff_accounts_v1 from pms_meta).
     // Triggers full pms_get_state() when remote storeVersion > local storeVersion,
-    // and immediately catches up operating_costs_v1 when modified on another device while sleeping/offline.
+    // and immediately catches up operating_costs_v1 / staff_accounts_v1 when modified on another device while sleeping/offline.
     async function checkRemoteVersionAndSync(reason = "VERSION_PROBE") {
       if (!session || !session.access_token || navigator.onLine === false) return false;
       if (inFlightPull || inFlightVersionProbe) return false;
@@ -669,7 +786,7 @@
         if (!token) return false;
         lastProbeAt = Date.now();
         try {
-          const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=in.(store_version,operating_costs_v1)&select=key,value,updated_at`, {
+          const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=in.(store_version,operating_costs_v1,staff_accounts_v1)&select=key,value,updated_at`, {
             method: "GET",
             headers: { "Authorization": `Bearer ${token}` },
             timeoutMs: 6000
@@ -683,6 +800,14 @@
 
           const svRow = res.data.find((r) => r && r.key === "store_version") || (!res.data[0].key ? res.data[0] : null);
           const costRow = res.data.find((r) => r && r.key === "operating_costs_v1") || null;
+          const accRow = res.data.find((r) => r && r.key === "staff_accounts_v1") || null;
+
+          if (accRow && accRow.value && Array.isArray(accRow.value.accounts)) {
+            const remoteAccTs = (accRow.value && accRow.value.updatedAt) || accRow.updated_at || "";
+            if (!lastAccountsUpdatedAt || (remoteAccTs && remoteAccTs > lastAccountsUpdatedAt)) {
+              applyAccountsUpdate(accRow.value.accounts, remoteAccTs);
+            }
+          }
 
           let costsSynced = false;
           if (costRow && costRow.value) {
@@ -896,6 +1021,32 @@
               }
               return;
             }
+            if (rec && rec.key === "staff_accounts_v1" && rec.value && Array.isArray(rec.value.accounts)) {
+              const remoteAccTs = (rec.value && rec.value.updatedAt) || rec.updated_at || "";
+              applyAccountsUpdate(rec.value.accounts, remoteAccTs);
+              lastSyncedAt = new Date().toISOString();
+              emit({
+                type: "remote_change",
+                remoteEvent: { action: "ACCOUNTS_UPDATE", ts: lastSyncedAt },
+                state: getSnapshot(),
+                status: getStatus()
+              });
+              return;
+            }
+            if (rec && rec.key === "housekeeping_v1" && rec.value && Array.isArray(rec.value.tasks)) {
+              stateCache.housekeepingTasks = rec.value.tasks.map((t) => Core.sanitizeHousekeepingTask(t)).filter(Boolean);
+              stateCache.roomStatuses = Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
+              lastSyncedAt = new Date().toISOString();
+              emit({ type: "remote_change", remoteEvent: { action: "HK_UPDATE", ts: lastSyncedAt }, state: getSnapshot(), status: getStatus() });
+              return;
+            }
+            if (rec && rec.key === "issues_v1" && rec.value && Array.isArray(rec.value.issues)) {
+              stateCache.maintenanceIssues = rec.value.issues.map((i) => Core.sanitizeMaintenanceIssue(i)).filter(Boolean);
+              stateCache.roomStatuses = Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
+              lastSyncedAt = new Date().toISOString();
+              emit({ type: "remote_change", remoteEvent: { action: "ISSUE_UPDATE", ts: lastSyncedAt }, state: getSnapshot(), status: getStatus() });
+              return;
+            }
             const metaVal = rec && rec.key === "store_version" ? rec.value : null;
             const remoteVer = metaVal && typeof metaVal.version === "number" ? metaVal.version : null;
             if (remoteVer === null || remoteVer > storeVersion) {
@@ -1040,33 +1191,61 @@
     }
 
     async function login(staffName, passcode) {
-      const cleanStaff = String(staffName || "").trim() || "Lễ tân";
+      const cleanLogin = String(staffName || "").trim() || "Lễ tân";
       const cleanPass = String(passcode || "");
       if (!cleanPass) {
         return { ok: false, code: "MISSING_CREDENTIALS", error: "Vui lòng nhập mật khẩu khách sạn." };
       }
       try {
-        const res = await rawFetchJson(`${baseUrl}/auth/v1/token?grant_type=password`, {
+        let res = await rawFetchJson(`${baseUrl}/auth/v1/token?grant_type=password`, {
           method: "POST",
           body: { email: hotelEmail, password: cleanPass },
           timeoutMs: 12000
         });
+        if ((!res.httpOk || !res.data || !res.data.access_token) && /^[a-z0-9._-]{3,60}$/i.test(cleanLogin)) {
+          const emailDomain = hotelEmail.includes("@") ? hotelEmail.split("@")[1] : "dongvanhotel.vn";
+          res = await rawFetchJson(`${baseUrl}/auth/v1/token?grant_type=password`, {
+            method: "POST",
+            body: { email: `${cleanLogin.toLowerCase()}@${emailDomain}`, password: cleanPass },
+            timeoutMs: 12000
+          });
+        }
         if (!res.httpOk || !res.data || !res.data.access_token) {
           return {
             ok: false,
             code: "INVALID_CREDENTIALS",
-            error: "Sai mật khẩu khách sạn (hoặc tài khoản lễ tân chưa được tạo trên Supabase)."
+            error: "Sai mật khẩu khách sạn (hoặc tài khoản chưa được tạo trên Supabase)."
           };
         }
+        const isSuper = cleanLogin.toLowerCase() === Core.SUPER_ADMIN_USERNAME
+          || cleanLogin.toLowerCase() === Core.SUPER_ADMIN_DISPLAY_NAME.toLowerCase();
         saveStoredSession({
           access_token: res.data.access_token,
           refresh_token: res.data.refresh_token,
           expires_at: Math.floor(Date.now() / 1000) + (Number(res.data.expires_in) || 3600),
-          staffName: cleanStaff
+          username: isSuper ? Core.SUPER_ADMIN_USERNAME : cleanLogin,
+          staffName: isSuper ? Core.SUPER_ADMIN_DISPLAY_NAME : cleanLogin,
+          role: isSuper ? "super_admin" : ""
         });
         const pulled = await pullLatestFromCloud({ type: "auth_login", force: true });
         if (!pulled.ok) {
           return { ok: false, code: pulled.code, error: pulled.error };
+        }
+        // Check if this account is blocked in staff_accounts_v1
+        const matched = findSessionAccount();
+        if (matched && !matched.active) {
+          saveStoredSession(null);
+          connectionStatus = "auth_required";
+          return { ok: false, code: "ACCOUNT_LOCKED", error: "Tài khoản này đã bị Tổng quản lý chặn truy cập." };
+        }
+        if (matched && session) {
+          saveStoredSession({
+            ...session,
+            accountId: matched.id,
+            username: matched.username,
+            staffName: matched.staffName,
+            role: Core.normalizeRole(matched.role)
+          });
         }
         connectRealtime();
         emit({ type: "auth_login", auth: getAuthState(), state: getSnapshot(), status: getStatus() });
@@ -1095,10 +1274,15 @@
         auditLogs: [],
         autoBackups: [],
         hasRollbackBackup: false,
-        operatingCosts: Core.createDefaultOperatingCostsState()
+        operatingCosts: Core.createDefaultOperatingCostsState(),
+        housekeepingTasks: [],
+        maintenanceIssues: [],
+        roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
+        accounts: ensureSuperAdminAccounts([])
       };
       storeVersion = 0;
       lastOperatingCostsUpdatedAt = "";
+      lastAccountsUpdatedAt = "";
       connectionStatus = "auth_required";
       emit({ type: "auth_required", auth: getAuthState(), state: getSnapshot(), status: getStatus() });
       return { ok: true };
@@ -1435,6 +1619,109 @@
       return metaRes.ok ? { ok: true, issue: updated, maintenanceIssues: nextIssues } : metaRes;
     }
 
+    async function listAccounts() {
+      if (!can("accounts:manage")) {
+        return { ok: false, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền xem và quản trị tài khoản." };
+      }
+      return { ok: true, accounts: stateCache.accounts };
+    }
+
+    async function persistCloudAccounts(nextAccounts) {
+      const normalized = ensureSuperAdminAccounts(nextAccounts);
+      const nowIso = new Date().toISOString();
+      const metaRes = await upsertPmsMetaKey("staff_accounts_v1", { accounts: normalized, updatedAt: nowIso }, "ACCOUNTS_UPDATE");
+      if (!metaRes.ok) return metaRes;
+      stateCache.accounts = normalized;
+      lastAccountsUpdatedAt = nowIso;
+      broadcastDeltaToPeers({
+        senderId: clientId,
+        storeVersion,
+        action: "ACCOUNTS_UPDATE",
+        accounts: normalized,
+        actor: (session && session.staffName) || "",
+        ts: nowIso
+      });
+      return { ok: true, accounts: normalized };
+    }
+
+    async function createAccount(payload) {
+      if (!can("accounts:create")) {
+        return { ok: false, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền cấp tài khoản mới." };
+      }
+      const cleanUser = Core.sanitizeText(payload && payload.username, 60).toLowerCase().replace(/\s+/g, "");
+      const cleanName = Core.sanitizeText(payload && payload.staffName, 80);
+      const normRole = Core.normalizeRole(payload && payload.role);
+      const rawPass = String((payload && payload.passcode) || "").trim();
+      if (!cleanUser || !/^[a-z0-9._-]{3,60}$/.test(cleanUser)) {
+        return { ok: false, code: "INVALID_USERNAME", error: "Tên đăng nhập phải từ 3–60 ký tự (chữ không dấu, số, ., _, -)." };
+      }
+      if (!cleanName) return { ok: false, code: "INVALID_NAME", error: "Vui lòng nhập họ tên nhân viên." };
+      if (rawPass.length < 4) return { ok: false, code: "WEAK_PASSWORD", error: "Mật khẩu phải có ít nhất 4 ký tự." };
+      if (normRole === "super_admin") {
+        return { ok: false, code: "SUPER_ADMIN_UNIQUE", error: "Hệ thống chỉ cho phép duy nhất 1 tài khoản Tổng quản lý." };
+      }
+      if (stateCache.accounts.some((a) => a.username.toLowerCase() === cleanUser)) {
+        return { ok: false, code: "DUPLICATE_USERNAME", error: `Tên đăng nhập "${cleanUser}" đã tồn tại.` };
+      }
+      const nowIso = new Date().toISOString();
+      const newAcc = {
+        id: `acc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        username: cleanUser,
+        staffName: cleanName,
+        role: normRole,
+        active: true,
+        createdAt: nowIso,
+        updatedAt: nowIso
+      };
+      const saved = await persistCloudAccounts([...stateCache.accounts, newAcc]);
+      return saved.ok ? { ok: true, account: newAcc, accounts: saved.accounts } : saved;
+    }
+
+    async function updateAccount(accountId, patch) {
+      if (!can("accounts:manage")) {
+        return { ok: false, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền chỉnh sửa tài khoản." };
+      }
+      const idx = stateCache.accounts.findIndex((a) => a.id === accountId);
+      if (idx < 0) return { ok: false, code: "NOT_FOUND", error: "Không tìm thấy tài khoản nhân viên." };
+      const cur = stateCache.accounts[idx];
+      const curRole = Core.normalizeRole(cur.role);
+      const nextRole = patch && patch.role !== undefined ? Core.normalizeRole(patch.role) : curRole;
+      const nextActive = patch && patch.active !== undefined ? Boolean(patch.active) : Boolean(cur.active);
+      if (curRole === "super_admin") {
+        if (!nextActive) return { ok: false, code: "SUPER_ADMIN_PROTECTED", error: "Không thể chặn truy cập hoặc khóa tài khoản Tổng quản lý duy nhất." };
+        if (nextRole !== "super_admin") return { ok: false, code: "SUPER_ADMIN_PROTECTED", error: "Không thể thay đổi vai trò của tài khoản Tổng quản lý duy nhất." };
+      } else if (nextRole === "super_admin") {
+        return { ok: false, code: "SUPER_ADMIN_UNIQUE", error: "Hệ thống chỉ cho phép duy nhất 1 tài khoản Tổng quản lý." };
+      }
+      const nextName = patch && patch.staffName !== undefined ? Core.sanitizeText(patch.staffName, 80) : cur.staffName;
+      if (!nextName) return { ok: false, code: "INVALID_NAME", error: "Họ tên nhân viên không được để trống." };
+      const updated = {
+        ...cur,
+        staffName: nextName,
+        role: nextRole,
+        active: nextActive,
+        updatedAt: new Date().toISOString()
+      };
+      const nextList = stateCache.accounts.slice();
+      nextList[idx] = updated;
+      const saved = await persistCloudAccounts(nextList);
+      return saved.ok ? { ok: true, account: updated, accounts: saved.accounts } : saved;
+    }
+
+    async function deleteAccount(accountId) {
+      if (!can("accounts:delete")) {
+        return { ok: false, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền xóa tài khoản." };
+      }
+      const target = stateCache.accounts.find((a) => a.id === accountId);
+      if (!target) return { ok: false, code: "NOT_FOUND", error: "Không tìm thấy tài khoản cần xóa." };
+      if (Core.normalizeRole(target.role) === "super_admin") {
+        return { ok: false, code: "SUPER_ADMIN_PROTECTED", error: "Không thể xóa tài khoản Tổng quản lý duy nhất." };
+      }
+      const nextList = stateCache.accounts.filter((a) => a.id !== accountId);
+      const saved = await persistCloudAccounts(nextList);
+      return saved.ok ? { ok: true, deleted: target, accounts: saved.accounts } : saved;
+    }
+
     function runHealthCheck() {
       const consistency = Core.auditBookingConsistency(stateCache.bookings);
       return {
@@ -1476,12 +1763,12 @@
       getAuditLogs: () => (getCurrentRole() === "housekeeping" ? [] : stateCache.auditLogs),
       getAutoBackups: () => (getCurrentRole() === "housekeeping" ? [] : stateCache.autoBackups),
       hasRollbackBackup: () => (getCurrentRole() === "housekeeping" ? false : stateCache.hasRollbackBackup),
-      getOperatingCosts: () => (getCurrentRole() === "manager" ? stateCache.operatingCosts : null),
+      getOperatingCosts: () => (can("costs:read") ? stateCache.operatingCosts : null),
       saveOperatingCosts,
       getHousekeepingTasks: () => stateCache.housekeepingTasks,
       getMaintenanceIssues: () => stateCache.maintenanceIssues,
       getRoomStatuses: () => stateCache.roomStatuses,
-      getAccounts: () => stateCache.accounts,
+      getAccounts: () => (can("accounts:manage") ? stateCache.accounts : []),
       checkoutBooking,
       createHousekeepingTask,
       startHousekeepingTask,
@@ -1489,9 +1776,10 @@
       uploadPhoto,
       reportMaintenanceIssue,
       updateMaintenanceIssue,
-      listAccounts: async () => ({ ok: true, accounts: getAuthState().accountsPublic }),
-      createAccount: async () => ({ ok: false, error: "Tạo tài khoản riêng cho từng nhân viên được quản lý trực tiếp trên máy chủ PMS (SQLite) hoặc Supabase Auth." }),
-      updateAccount: async () => ({ ok: false, error: "Cập nhật tài khoản riêng được quản lý trực tiếp trên máy chủ PMS (SQLite) hoặc Supabase Auth." }),
+      listAccounts,
+      createAccount,
+      updateAccount,
+      deleteAccount,
       refreshLatest: () => (getCurrentRole() === "housekeeping" ? [] : stateCache.bookings),
       pullLatest: () => pullLatestFromCloud({ type: "manual_refresh", force: true }),
       saveBooking,

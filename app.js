@@ -3444,66 +3444,89 @@
 
   function resetAccountForm(editAcc = null) {
     showAccountError("");
+    const roleSelect = $("acc-role");
+    const existingTempSuper = roleSelect.querySelector("option[data-temp-super='1']");
+    if (existingTempSuper) existingTempSuper.remove();
+
     if (editAcc) {
+      const normRole = normalizeRole(editAcc.role);
       $("acc-id").value = editAcc.id;
       $("acc-form-title").textContent = `✏️ Sửa tài khoản — ${editAcc.staffName} (@${editAcc.username})`;
       $("btn-acc-reset").style.display = "inline-flex";
       $("acc-staff-name").value = editAcc.staffName || "";
       $("acc-username").value = editAcc.username || "";
       $("acc-username").disabled = true;
-      $("acc-role").value = normalizeRole(editAcc.role);
+      if (normRole === "super_admin") {
+        const opt = document.createElement("option");
+        opt.value = "super_admin";
+        opt.dataset.tempSuper = "1";
+        opt.textContent = "👑 Tổng quản lý (Quyền hạn cao nhất — duy nhất)";
+        roleSelect.insertBefore(opt, roleSelect.firstChild);
+        roleSelect.value = "super_admin";
+        roleSelect.disabled = true;
+      } else {
+        roleSelect.disabled = false;
+        roleSelect.value = normRole;
+      }
       $("acc-passcode").value = "";
       $("acc-passcode-label").textContent = "Đổi mật khẩu mới (để trống nếu giữ nguyên)";
       $("btn-acc-save").textContent = "💾 Cập nhật tài khoản";
     } else {
       $("acc-id").value = "";
-      $("acc-form-title").textContent = "➕ Tạo tài khoản nhân viên mới";
+      $("acc-form-title").textContent = "➕ Cấp tài khoản & mật khẩu nhân viên mới";
       $("btn-acc-reset").style.display = "none";
       $("acc-staff-name").value = "";
       $("acc-username").value = "";
       $("acc-username").disabled = false;
-      $("acc-role").value = "reception";
+      roleSelect.disabled = false;
+      roleSelect.value = "reception";
       $("acc-passcode").value = "";
       $("acc-passcode-label").textContent = "Mật khẩu (tối thiểu 4 ký tự) *";
-      $("btn-acc-save").textContent = "💾 Tạo tài khoản";
+      $("btn-acc-save").textContent = "💾 Cấp tài khoản";
     }
   }
 
   function renderAccountsList(accounts) {
     const list = Array.isArray(accounts) ? accounts : [];
-    const activeManagers = list.filter((a) => a.role === "manager" && a.active).length;
     if (list.length === 0) {
-      $("accounts-list").innerHTML = `<div style="padding:14px; font-size:12.5px; color:var(--text-muted); text-align:center;">Chưa có tài khoản nhân viên nào trong cơ sở dữ liệu. Hãy tạo tài khoản mới ở biểu mẫu phía trên.</div>`;
+      $("accounts-list").innerHTML = `<div style="padding:14px; font-size:12.5px; color:var(--text-muted); text-align:center;">Chưa có tài khoản nhân viên nào trong cơ sở dữ liệu. Hãy cấp tài khoản mới ở biểu mẫu phía trên.</div>`;
       return;
     }
     $("accounts-list").innerHTML = list.map((acc) => {
-      const isLastActiveMgr = acc.role === "manager" && acc.active && activeManagers <= 1;
+      const normRole = normalizeRole(acc.role);
+      const isSuper = normRole === "super_admin";
       const statusBadge = acc.active
         ? `<span class="costs-status-badge actual">Đang hoạt động</span>`
-        : `<span class="costs-status-badge partial">🔒 Đã khóa</span>`;
+        : `<span class="costs-status-badge partial">🚫 Đã chặn truy cập</span>`;
+      const roleLabelHtml = isSuper
+        ? `<span class="role-badge super_admin">👑 ${escapeHtml(getRoleLabel(normRole))}</span>`
+        : `<span class="role-badge ${escapeHtml(normRole)}">${escapeHtml(getRoleLabel(normRole))}</span>`;
+      const metaText = isSuper
+        ? `Tạo lúc: ${escapeHtml(formatTimestampVN(acc.createdAt))} • Tài khoản quyền hạn cao nhất duy nhất (được bảo vệ)`
+        : `Tạo lúc: ${escapeHtml(formatTimestampVN(acc.createdAt))}`;
+      const actionButtons = isSuper
+        ? `<button type="button" class="btn btn-sm" data-acc-edit="${escapeHtml(acc.id)}">✏️ Sửa / Đổi MK</button>`
+        : `<button type="button" class="btn btn-sm" data-acc-edit="${escapeHtml(acc.id)}">✏️ Sửa / Đổi MK</button>
+           <button type="button" class="btn btn-sm ${acc.active ? "btn-danger" : "btn-success"}" data-acc-toggle-active="${escapeHtml(acc.id)}" data-next-active="${acc.active ? "0" : "1"}">${acc.active ? "🚫 Chặn truy cập" : "🔓 Mở chặn"}</button>
+           <button type="button" class="btn btn-sm btn-danger" data-acc-delete="${escapeHtml(acc.id)}" data-acc-label="${escapeHtml(`${acc.staffName} (@${acc.username})`)}">🗑️ Xóa</button>`;
       return `<div class="costs-item-cfg-row ${acc.active ? "" : "inactive"}">
         <div>
           <div style="font-weight:800; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
             <span>${escapeHtml(acc.staffName)}</span>
             <span style="font-family:monospace; font-size:11.5px; color:var(--text-muted);">@${escapeHtml(acc.username)}</span>
-            <span class="role-badge ${escapeHtml(acc.role)}">${escapeHtml(getRoleLabel(acc.role))}</span>
+            ${roleLabelHtml}
             ${statusBadge}
           </div>
-          <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">
-            Tạo lúc: ${escapeHtml(formatTimestampVN(acc.createdAt))}${isLastActiveMgr ? " • Quản lý duy nhất đang hoạt động (được bảo vệ)" : ""}
-          </div>
+          <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">${metaText}</div>
         </div>
-        <div class="costs-item-actions">
-          <button type="button" class="btn btn-sm" data-acc-edit="${escapeHtml(acc.id)}">✏️ Sửa / Đổi MK</button>
-          <button type="button" class="btn btn-sm ${acc.active ? "btn-danger" : "btn-success"}" data-acc-toggle-active="${escapeHtml(acc.id)}" data-next-active="${acc.active ? "0" : "1"}">${acc.active ? "🔒 Khóa" : "🔓 Mở khóa"}</button>
-        </div>
+        <div class="costs-item-actions">${actionButtons}</div>
       </div>`;
     }).join("");
   }
 
   async function openAccountsModal() {
     if (!userCan("accounts:manage")) {
-      showToast("Chức năng quản trị tài khoản chỉ dành cho Quản lý.");
+      showToast("Chức năng quản trị tài khoản chỉ dành riêng cho Tổng quản lý.");
       return;
     }
     resetAccountForm(null);
@@ -3542,7 +3565,11 @@
       const pub = Array.isArray(auth.accountsPublic) ? auth.accountsPublic : [];
       if (pub.length > 0) {
         staffSelect.innerHTML = pub
-          .map((acc) => `<option value="${escapeHtml(acc.username)}">${escapeHtml(acc.staffName)} — ${escapeHtml(getRoleLabel(acc.role))}</option>`)
+          .map((acc) => {
+            const normRole = normalizeRole(acc.role);
+            const prefix = normRole === "super_admin" ? "👑 " : "";
+            return `<option value="${escapeHtml(acc.username)}">${prefix}${escapeHtml(acc.staffName)} — ${escapeHtml(getRoleLabel(normRole))}</option>`;
+          })
           .join("");
         if (prev && pub.some((a) => a.username === prev)) staffSelect.value = prev;
       } else if (Array.isArray(auth.staffList) && auth.staffList.length > 0) {
@@ -4207,7 +4234,25 @@
           return;
         }
         renderAccountsList(res.accounts || []);
-        showToast(nextActive ? "🔓 Đã mở khóa tài khoản nhân viên" : "🔒 Đã khóa tài khoản & thu hồi phiên đăng nhập");
+        showToast(nextActive ? "🔓 Đã mở chặn truy cập tài khoản nhân viên" : "🚫 Đã chặn truy cập & thu hồi phiên đăng nhập");
+        return;
+      }
+      const deleteBtn = e.target.closest("[data-acc-delete]");
+      if (deleteBtn) {
+        showAccountError("");
+        const id = deleteBtn.dataset.accDelete;
+        const label = deleteBtn.dataset.accLabel || id;
+        if (!window.confirm(`Xác nhận XÓA VĨNH VIỄN tài khoản ${label}?\n\nNhân viên này sẽ bị đăng xuất ngay lập tức và không thể đăng nhập lại.`)) {
+          return;
+        }
+        const res = await store.deleteAccount(id);
+        if (!res || !res.ok) {
+          showAccountError((res && res.error) || "Không thể xóa tài khoản.");
+          return;
+        }
+        if ($("acc-id").value === id) resetAccountForm(null);
+        renderAccountsList(res.accounts || []);
+        showToast(`🗑️ Đã xóa vĩnh viễn tài khoản ${label}`);
       }
     });
 

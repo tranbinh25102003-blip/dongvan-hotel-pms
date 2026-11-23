@@ -58,7 +58,7 @@
         <button id="btn-open-costs" class="btn btn-sm" type="button" title="Chi phí vận hành & giá vốn theo tháng (chỉ Quản lý)">
           <span>💰 Chi phí &amp; Giá vốn</span>
         </button>
-        <button id="btn-open-accounts" class="btn btn-sm" type="button" title="Quản lý tài khoản nhân viên, vai trò & khóa tài khoản (chỉ Quản lý)" style="display:none;">
+        <button id="btn-open-accounts" class="btn btn-sm" type="button" title="Cấp tài khoản &amp; mật khẩu, chặn truy cập &amp; xóa tài khoản nhân viên (chỉ Tổng quản lý)" style="display:none;">
           <span>👤 Tài khoản</span>
         </button>
         <button id="btn-open-history" class="btn btn-sm btn-history" type="button" title="Xem lịch sử chỉnh sửa & cấu hình sao lưu tự động">
@@ -1186,13 +1186,13 @@
     </div>
   </div>
 
-  <!-- Staff Accounts & Roles Management Modal (Manager ONLY) -->
+  <!-- Staff Accounts & Roles Management Modal (Tổng quản lý — super_admin ONLY) -->
   <div id="accounts-modal" class="modal-backdrop costs-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="accounts-modal-title">
     <div class="modal-card modal-wide">
       <div class="modal-header">
         <div>
-          <h2 id="accounts-modal-title" class="modal-title">👤 Quản lý Tài khoản &amp; Phân quyền Nhân viên</h2>
-          <div class="modal-subtitle">Tạo tài khoản riêng cho Quản lý, Lễ tân và Buồng phòng • Khóa tài khoản khi nhân viên nghỉ việc</div>
+          <h2 id="accounts-modal-title" class="modal-title">👑 Quản trị Tài khoản &amp; Phân quyền Nhân viên</h2>
+          <div class="modal-subtitle">Đặc quyền duy nhất của Tổng quản lý • Cấp tài khoản &amp; mật khẩu, chặn truy cập hoặc xóa vĩnh viễn tài khoản</div>
         </div>
         <button id="btn-close-accounts" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
       </div>
@@ -1200,8 +1200,8 @@
         <form id="accounts-form" class="costs-panel-card" novalidate>
           <input type="hidden" id="acc-id" />
           <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
-            <strong id="acc-form-title" style="font-size:13px;">➕ Tạo tài khoản nhân viên mới</strong>
-            <button id="btn-acc-reset" class="btn btn-sm" type="button" style="display:none;">+ Tạo tài khoản mới</button>
+            <strong id="acc-form-title" style="font-size:13px;">➕ Cấp tài khoản &amp; mật khẩu nhân viên mới</strong>
+            <button id="btn-acc-reset" class="btn btn-sm" type="button" style="display:none;">+ Cấp tài khoản mới</button>
           </div>
           <div id="acc-error" class="form-error" role="alert"></div>
           <div class="form-grid">
@@ -1220,7 +1220,7 @@
               <select id="acc-role" class="select" required>
                 <option value="reception">Lễ tân (lịch phòng, tạo/sửa đơn, check-out, xuất PDF, xem buồng phòng)</option>
                 <option value="housekeeping">Buồng phòng (chỉ màn hình dọn phòng &amp; báo sự cố — không thấy giá/khách)</option>
-                <option value="manager">Quản lý (toàn quyền hệ thống, chi phí &amp; quản trị tài khoản)</option>
+                <option value="manager">Quản lý (lịch phòng, buồng phòng, chi phí &amp; báo cáo — không quản trị tài khoản)</option>
               </select>
             </div>
             <div class="field">
@@ -1229,15 +1229,15 @@
             </div>
           </div>
           <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:10px;">
-            <button id="btn-acc-save" class="btn btn-primary btn-sm" type="submit">💾 Lưu tài khoản</button>
+            <button id="btn-acc-save" class="btn btn-primary btn-sm" type="submit">💾 Cấp tài khoản</button>
           </div>
         </form>
 
-        <div style="font-weight:700; font-size:12.5px; margin-bottom:6px;">Danh sách tài khoản nhân viên (luôn giữ ít nhất 1 Quản lý đang hoạt động)</div>
+        <div style="font-weight:700; font-size:12.5px; margin-bottom:6px;">Danh sách tài khoản (hệ thống chỉ có duy nhất 1 Tổng quản lý quyền hạn cao nhất)</div>
         <div id="accounts-list" class="costs-items-list"></div>
       </div>
       <div class="modal-footer">
-        <span style="font-size:12px; color:var(--text-muted);">Khóa tài khoản sẽ lập tức thu hồi quyền đăng nhập và phiên đang mở của nhân viên đó.</span>
+        <span style="font-size:12px; color:var(--text-muted);">Chặn truy cập hoặc xóa tài khoản sẽ lập tức thu hồi phiên đăng nhập đang mở của nhân viên đó.</span>
         <button id="btn-close-accounts-2" class="btn btn-primary" type="button">Đóng</button>
       </div>
     </div>

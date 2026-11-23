@@ -50,8 +50,10 @@
       authRequired: false,
       authConfigured: true,
       authenticated: true,
-      user: isStandaloneLocal ? { id: "local_manager", username: "quanly", staffName: "Quản lý", role: "manager" } : null,
-      staffList: [...(Core.CONFIRMERS || []), "Quản lý"],
+      user: isStandaloneLocal
+        ? { id: "acc_super_admin", username: Core.SUPER_ADMIN_USERNAME, staffName: Core.SUPER_ADMIN_DISPLAY_NAME, role: "super_admin" }
+        : null,
+      staffList: [Core.SUPER_ADMIN_DISPLAY_NAME, ...(Core.CONFIRMERS || []).filter((n) => n !== Core.SUPER_ADMIN_DISPLAY_NAME)],
       accountsPublic: []
     };
 
@@ -71,8 +73,8 @@
     };
 
     function getCurrentRole() {
-      if (mode === "local") return "manager";
-      if (!authState.authRequired) return "manager";
+      if (mode === "local") return "super_admin";
+      if (!authState.authRequired) return "super_admin";
       if (authState.user && authState.user.role) return Core.normalizeRole(authState.user.role);
       return "reception";
     }
@@ -286,6 +288,9 @@
       }
       if (typeof localStore.getMaintenanceIssues === "function") {
         stateCache.maintenanceIssues = localStore.getMaintenanceIssues();
+      }
+      if (typeof localStore.getStaffAccounts === "function") {
+        stateCache.accounts = localStore.getStaffAccounts().map((a) => Core.sanitizeStaffAccountPublic(a)).filter(Boolean);
       }
       stateCache.roomStatuses = Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
       lastSyncedAt = new Date().toISOString();
@@ -622,7 +627,17 @@
     }
 
     async function login(staffNameOrUsername, passcode) {
-      if (mode !== "server") return { ok: true, user: { id: "local_manager", username: "quanly", staffName: staffNameOrUsername || "Quản lý", role: "manager" } };
+      if (mode !== "server") {
+        return {
+          ok: true,
+          user: {
+            id: "acc_super_admin",
+            username: Core.SUPER_ADMIN_USERNAME,
+            staffName: staffNameOrUsername || Core.SUPER_ADMIN_DISPLAY_NAME,
+            role: "super_admin"
+          }
+        };
+      }
       try {
         const res = await fetchJson("/api/auth/login", {
           method: "POST",
@@ -965,6 +980,9 @@
 
     async function listAccounts() {
       if (mode !== "server") {
+        if (localStore && typeof localStore.getStaffAccounts === "function") {
+          stateCache.accounts = localStore.getStaffAccounts().map((a) => Core.sanitizeStaffAccountPublic(a)).filter(Boolean);
+        }
         return { ok: true, accounts: stateCache.accounts };
       }
       try {
@@ -985,10 +1003,47 @@
 
     async function createAccount(payload) {
       if (mode !== "server") {
-        return { ok: false, error: "Quản lý tài khoản nhân viên cần chạy ở chế độ máy chủ có đăng nhập." };
+        if (!localStore || typeof localStore.getStaffAccounts !== "function") {
+          return { ok: false, error: "Không hỗ trợ quản lý tài khoản trên bộ nhớ hiện tại." };
+        }
+        const cleanUser = Core.sanitizeText(payload && payload.username, 60).toLowerCase().replace(/\s+/g, "");
+        const cleanName = Core.sanitizeText(payload && payload.staffName, 80);
+        const normRole = Core.normalizeRole(payload && payload.role);
+        const rawPass = String((payload && payload.passcode) || "").trim();
+        if (!cleanUser || !/^[a-z0-9._-]{3,60}$/.test(cleanUser)) {
+          return { ok: false, code: "INVALID_USERNAME", error: "Tên đăng nhập phải từ 3–60 ký tự (chữ không dấu, số, ., _, -)." };
+        }
+        if (!cleanName) return { ok: false, code: "INVALID_NAME", error: "Vui lòng nhập họ tên nhân viên." };
+        if (rawPass.length < 4) return { ok: false, code: "WEAK_PASSWORD", error: "Mật khẩu phải có ít nhất 4 ký tự." };
+        if (normRole === "super_admin") {
+          return { ok: false, code: "SUPER_ADMIN_UNIQUE", error: "Hệ thống chỉ cho phép duy nhất 1 tài khoản Tổng quản lý." };
+        }
+        const list = localStore.getStaffAccounts();
+        if (list.some((a) => a.username.toLowerCase() === cleanUser)) {
+          return { ok: false, code: "DUPLICATE_USERNAME", error: `Tên đăng nhập "${cleanUser}" đã tồn tại.` };
+        }
+        const nowIso = new Date().toISOString();
+        const newAcc = {
+          id: `acc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+          username: cleanUser,
+          staffName: cleanName,
+          role: normRole,
+          active: true,
+          passHash: rawPass,
+          createdAt: nowIso,
+          updatedAt: nowIso
+        };
+        const saved = localStore.saveStaffAccounts([...list, newAcc]);
+        if (!saved.ok) return saved;
+        syncFromLocalCache("local_commit");
+        return { ok: true, account: Core.sanitizeStaffAccountPublic(newAcc), accounts: saved.accounts };
       }
       try {
         const res = await fetchJson("/api/accounts", { method: "POST", body: payload, timeoutMs: 10000 });
+        if (res.status === 401) {
+          handleAuthExpired((res.data && res.data.error) || "Phiên đăng nhập đã hết hạn.");
+          return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
+        }
         if (!res.data) return { ok: false, error: `Lỗi máy chủ (${res.status}).` };
         if (res.data.ok && Array.isArray(res.data.accounts)) {
           stateCache.accounts = res.data.accounts;
@@ -1003,10 +1058,79 @@
 
     async function updateAccount(accountId, patch) {
       if (mode !== "server") {
-        return { ok: false, error: "Quản lý tài khoản nhân viên cần chạy ở chế độ máy chủ có đăng nhập." };
+        if (!localStore || typeof localStore.getStaffAccounts !== "function") {
+          return { ok: false, error: "Không hỗ trợ quản lý tài khoản trên bộ nhớ hiện tại." };
+        }
+        const list = localStore.getStaffAccounts();
+        const idx = list.findIndex((a) => a.id === accountId);
+        if (idx < 0) return { ok: false, code: "NOT_FOUND", error: "Không tìm thấy tài khoản nhân viên." };
+        const cur = list[idx];
+        const curRole = Core.normalizeRole(cur.role);
+        const nextRole = patch && patch.role !== undefined ? Core.normalizeRole(patch.role) : curRole;
+        const nextActive = patch && patch.active !== undefined ? Boolean(patch.active) : Boolean(cur.active);
+        if (curRole === "super_admin") {
+          if (!nextActive) return { ok: false, code: "SUPER_ADMIN_PROTECTED", error: "Không thể chặn truy cập hoặc khóa tài khoản Tổng quản lý duy nhất." };
+          if (nextRole !== "super_admin") return { ok: false, code: "SUPER_ADMIN_PROTECTED", error: "Không thể thay đổi vai trò của tài khoản Tổng quản lý duy nhất." };
+        } else if (nextRole === "super_admin") {
+          return { ok: false, code: "SUPER_ADMIN_UNIQUE", error: "Hệ thống chỉ cho phép duy nhất 1 tài khoản Tổng quản lý." };
+        }
+        const nextName = patch && patch.staffName !== undefined ? Core.sanitizeText(patch.staffName, 80) : cur.staffName;
+        if (!nextName) return { ok: false, code: "INVALID_NAME", error: "Họ tên nhân viên không được để trống." };
+        const updated = {
+          ...cur,
+          staffName: nextName,
+          role: nextRole,
+          active: nextActive,
+          passHash: patch && patch.passcode ? String(patch.passcode).trim() : cur.passHash,
+          updatedAt: new Date().toISOString()
+        };
+        const nextList = list.slice();
+        nextList[idx] = updated;
+        const saved = localStore.saveStaffAccounts(nextList);
+        if (!saved.ok) return saved;
+        syncFromLocalCache("local_commit");
+        return { ok: true, account: Core.sanitizeStaffAccountPublic(updated), accounts: saved.accounts };
       }
       try {
         const res = await fetchJson(`/api/accounts/${encodeURIComponent(accountId)}`, { method: "PATCH", body: patch, timeoutMs: 10000 });
+        if (res.status === 401) {
+          handleAuthExpired((res.data && res.data.error) || "Phiên đăng nhập đã hết hạn.");
+          return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
+        }
+        if (!res.data) return { ok: false, error: `Lỗi máy chủ (${res.status}).` };
+        if (res.data.ok && Array.isArray(res.data.accounts)) {
+          stateCache.accounts = res.data.accounts;
+          await refreshAuthPublicList();
+          emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        }
+        return res.data;
+      } catch {
+        return { ok: false, offline: true, error: "Không kết nối được tới máy chủ." };
+      }
+    }
+
+    async function deleteAccount(accountId) {
+      if (mode !== "server") {
+        if (!localStore || typeof localStore.getStaffAccounts !== "function") {
+          return { ok: false, error: "Không hỗ trợ quản lý tài khoản trên bộ nhớ hiện tại." };
+        }
+        const list = localStore.getStaffAccounts();
+        const target = list.find((a) => a.id === accountId);
+        if (!target) return { ok: false, code: "NOT_FOUND", error: "Không tìm thấy tài khoản cần xóa." };
+        if (Core.normalizeRole(target.role) === "super_admin") {
+          return { ok: false, code: "SUPER_ADMIN_PROTECTED", error: "Không thể xóa tài khoản Tổng quản lý duy nhất." };
+        }
+        const saved = localStore.saveStaffAccounts(list.filter((a) => a.id !== accountId));
+        if (!saved.ok) return saved;
+        syncFromLocalCache("local_commit");
+        return { ok: true, deleted: Core.sanitizeStaffAccountPublic(target), accounts: saved.accounts };
+      }
+      try {
+        const res = await fetchJson(`/api/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE", body: {}, timeoutMs: 10000 });
+        if (res.status === 401) {
+          handleAuthExpired((res.data && res.data.error) || "Phiên đăng nhập đã hết hạn.");
+          return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
+        }
         if (!res.data) return { ok: false, error: `Lỗi máy chủ (${res.status}).` };
         if (res.data.ok && Array.isArray(res.data.accounts)) {
           stateCache.accounts = res.data.accounts;
@@ -1078,6 +1202,7 @@
       listAccounts,
       createAccount,
       updateAccount,
+      deleteAccount,
       refreshLatest: () => {
         if (mode === "local" && localStore) {
           localStore.refreshLatest();

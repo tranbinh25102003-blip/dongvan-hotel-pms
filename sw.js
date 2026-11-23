@@ -6,7 +6,7 @@
      so existing home-screen icons ALWAYS load the newest deployed version.
    ========================================================================== */
 
-const CACHE_NAME = "dongvan-hotel-shell-v13";
+const CACHE_NAME = "dongvan-hotel-shell-v14";
 const PRECACHE_URLS = [
   "./",
   "./index.html",

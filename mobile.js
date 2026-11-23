@@ -355,7 +355,7 @@
               <span>›</span>
             </button>
             <button id="m-menu-accounts" type="button" class="m-menu-item" style="display:none;">
-              <span>👤 Quản lý tài khoản &amp; phân quyền<span class="m-menu-sub">Tạo tài khoản Quản lý, Lễ tân, Buồng phòng &amp; khóa tài khoản</span></span>
+              <span>👑 Quản lý tài khoản &amp; phân quyền<span class="m-menu-sub">Cấp tài khoản &amp; mật khẩu, chặn truy cập &amp; xóa tài khoản (chỉ Tổng quản lý)</span></span>
               <span>›</span>
             </button>
             <button id="m-menu-costs" type="button" class="m-menu-item">

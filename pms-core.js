@@ -2379,20 +2379,34 @@
 
   /* -------------------- Accounts, RBAC Permissions, Housekeeping & Maintenance Engine -------------------- */
 
+  const SUPER_ADMIN_USERNAME = "tranbinh25102003";
+  const SUPER_ADMIN_DISPLAY_NAME = "Trần Bình";
+  const SUPER_ADMIN_DEFAULT_PASSCODE = "2510";
+
   const STAFF_ROLES = Object.freeze({
+    super_admin: Object.freeze({ key: "super_admin", label: "Tổng quản lý" }),
     manager: Object.freeze({ key: "manager", label: "Quản lý" }),
     reception: Object.freeze({ key: "reception", label: "Lễ tân" }),
     housekeeping: Object.freeze({ key: "housekeeping", label: "Buồng phòng" })
   });
 
   const ROLE_PERMISSIONS = Object.freeze({
+    super_admin: Object.freeze(new Set([
+      "bookings:read", "bookings:write", "bookings:checkout", "bookings:pdf", "bookings:export",
+      "housekeeping:read", "housekeeping:create", "housekeeping:execute",
+      "issues:read", "issues:create", "issues:manage",
+      "photos:upload", "photos:read",
+      "costs:read", "costs:write",
+      "accounts:manage", "accounts:create", "accounts:lock", "accounts:delete",
+      "reports:daily", "reports:management",
+      "admin:backup", "admin:restore", "admin:reset"
+    ])),
     manager: Object.freeze(new Set([
       "bookings:read", "bookings:write", "bookings:checkout", "bookings:pdf", "bookings:export",
       "housekeeping:read", "housekeeping:create", "housekeeping:execute",
       "issues:read", "issues:create", "issues:manage",
       "photos:upload", "photos:read",
       "costs:read", "costs:write",
-      "accounts:manage",
       "reports:daily", "reports:management",
       "admin:backup", "admin:restore", "admin:reset"
     ])),
@@ -2412,9 +2426,14 @@
 
   function normalizeRole(raw) {
     const val = String(raw || "").trim().toLowerCase();
+    if (val === "super_admin" || val === "superadmin" || val === "tongquanly" || val === "tổng quản lý") return "super_admin";
     if (val === "manager" || val === "admin" || val === "quanly" || val === "quản lý") return "manager";
     if (val === "housekeeping" || val === "hk" || val === "buongphong" || val === "buồng phòng") return "housekeeping";
     return "reception";
+  }
+
+  function isSuperAdminRole(role) {
+    return normalizeRole(role) === "super_admin";
   }
 
   function getRoleLabel(role) {
@@ -3572,6 +3591,52 @@
       return { ok: true, idempotentHit: false, booking: updatedBooking, bookings: getBookings(), task: newTask, housekeepingTasks: saveTaskRes.housekeepingTasks };
     }
 
+    function ensureSuperAdminInList(list) {
+      const clean = (Array.isArray(list) ? list : [])
+        .map((a) => {
+          const pub = sanitizeStaffAccountPublic(a);
+          if (!pub) return null;
+          return { ...pub, passHash: typeof a.passHash === "string" ? a.passHash : "" };
+        })
+        .filter(Boolean);
+      const hasSuper = clean.some((a) => a.role === "super_admin");
+      if (!hasSuper) {
+        const nowIso = new Date().toISOString();
+        clean.unshift({
+          id: "acc_super_admin",
+          username: SUPER_ADMIN_USERNAME,
+          staffName: SUPER_ADMIN_DISPLAY_NAME,
+          role: "super_admin",
+          active: true,
+          passHash: "",
+          createdAt: nowIso,
+          updatedAt: nowIso
+        });
+      }
+      return clean;
+    }
+
+    function getStaffAccounts() {
+      try {
+        const raw = storageAdapter.getItem(ACCOUNTS_KEY);
+        if (!raw) return ensureSuperAdminInList([]);
+        const parsed = JSON.parse(raw);
+        return ensureSuperAdminInList(parsed);
+      } catch {
+        return ensureSuperAdminInList([]);
+      }
+    }
+
+    function saveStaffAccounts(accounts) {
+      const next = ensureSuperAdminInList(accounts);
+      try {
+        storageAdapter.setItem(ACCOUNTS_KEY, JSON.stringify(next));
+        return { ok: true, accounts: next.map((a) => sanitizeStaffAccountPublic(a)) };
+      } catch (err) {
+        return { ok: false, error: "Không lưu được danh sách tài khoản cục bộ" + (err && err.message ? ` (${err.message})` : ".") };
+      }
+    }
+
     return {
       load,
       refreshLatest,
@@ -3586,6 +3651,8 @@
       saveHousekeepingTasks,
       getMaintenanceIssues,
       saveMaintenanceIssues,
+      getStaffAccounts,
+      saveStaffAccounts,
       checkoutBooking,
       saveBooking,
       deleteBooking,
@@ -3685,8 +3752,12 @@
     computeMonthlyProratedRevenue,
     computeMonthlyOperatingCosts,
     generateOperatingCostsCsvContent,
+    SUPER_ADMIN_USERNAME,
+    SUPER_ADMIN_DISPLAY_NAME,
+    SUPER_ADMIN_DEFAULT_PASSCODE,
     STAFF_ROLES,
     normalizeRole,
+    isSuperAdminRole,
     getRoleLabel,
     hasPermission,
     HK_TASK_TYPES,

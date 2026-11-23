@@ -3447,6 +3447,16 @@ body[data-user-role="housekeeping"] #hk-workspace .hk-ws-shell {
   padding: 2px 8px;
   border-radius: 999px;
 }
+.role-badge.super_admin {
+  background: linear-gradient(135deg, rgba(217, 119, 6, 0.2), rgba(245, 158, 11, 0.28));
+  color: #92400e;
+  border: 1px solid rgba(217, 119, 6, 0.45);
+}
+[data-theme="dark"] .role-badge.super_admin {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.24), rgba(217, 119, 6, 0.32));
+  color: #fcd34d;
+  border-color: rgba(251, 191, 36, 0.45);
+}
 .role-badge.manager { background: rgba(79, 70, 229, 0.14); color: #4338ca; }
 .role-badge.reception { background: rgba(37, 99, 235, 0.14); color: #1d4ed8; }
 .role-badge.housekeeping { background: rgba(16, 185, 129, 0.15); color: #047857; }
