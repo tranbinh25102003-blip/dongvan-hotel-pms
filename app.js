@@ -77,6 +77,7 @@
     normalizeRole,
     getRoleLabel,
     hasPermission,
+    getVisibleNavGroups,
     HK_TASK_TYPES,
     HK_TASK_STATUSES,
     ISSUE_SEVERITIES,
@@ -189,7 +190,13 @@
 
   function updateTodayDateLabel() {
     const d = new Date();
-    $("today-date-label").textContent = `Hôm nay: ${DOW_FULL_VI[d.getDay()]}, ${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`;
+    const fullText = `Hôm nay: ${DOW_FULL_VI[d.getDay()]}, ${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`;
+    $("today-date-label").textContent = `Hôm nay • ${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}`;
+    const btn = $("btn-today");
+    if (btn) {
+      btn.title = `${fullText} — nhấn để về ngày hôm nay`;
+      btn.setAttribute("aria-label", fullText);
+    }
   }
 
   function scrollToToday(smooth = true) {
@@ -250,13 +257,21 @@
     // Strictly check-in-month attribution prevents double-counting stays spanning two months
     const fin = computeMonthlyFinancials(state.bookings, state.year, state.month);
 
-    $("kpi-today-occ").textContent = `${occRooms} / 26 phòng (trống ${26 - occRooms})`;
-    $("kpi-today-dorm").textContent = `Còn ${dormFree}/8 chỗ (đặt ${dormUsed})`;
+    $("kpi-today-occ").textContent = `${occRooms} / 26 (trống ${26 - occRooms})`;
+    $("kpi-today-dorm").textContent = `Đặt ${dormUsed} • Còn ${dormFree}/8`;
     $("kpi-today-hk").textContent = `${mergeToday} ghép • ${ebToday} EB`;
     $("kpi-today-buffet").textContent = `${buffetGuests} khách`;
     $("kpi-month-paid").textContent = formatVND(fin.totalPaid);
     $("kpi-month-debt").textContent = formatVND(fin.totalDebt);
     $("kpi-month-debt").className = `kpi-value ${fin.totalDebt > 0 ? "warn" : "ok"}`;
+    const monthTag = $("kpi-month-tag");
+    if (monthTag) {
+      const nowD = new Date();
+      const isCurrentMonth = state.year === nowD.getFullYear() && state.month === nowD.getMonth();
+      monthTag.textContent = isCurrentMonth ? "Tháng này" : `Tháng ${state.month + 1}/${state.year}`;
+      const grp = $("kpi-group-month");
+      if (grp) grp.title = `Đã thu & còn phải thu của các đơn nhận phòng trong tháng ${state.month + 1}/${state.year} (theo tháng đang xem trên lịch)`;
+    }
   }
 
   function updateHeaderGroupPill() {
@@ -458,6 +473,7 @@
 
     const filteredRooms = getFilteredRooms();
     const filterOn = hasActiveBookingFilters();
+    const canWriteBookings = userCan("bookings:write");
     const bodyParts = [];
 
     ROOM_SECTIONS.forEach((section) => {
@@ -466,16 +482,17 @@
 
       const isCollapsed = !!state.collapsedFloors[section.key];
       const sectionTitle = section.isDorm
-        ? section.label
+        ? "Dorm (8 chỗ)"
         : `Tầng ${section.floor} (${sectionRooms.length} phòng ngủ)`;
 
       bodyParts.push(`<tr class="floor-row ${section.isDorm ? "is-dorm-section" : ""}" data-section-key="${section.key}">
         <td class="floor-sticky">
-          <div class="floor-row-inner floor-label-inner">
-            <button type="button" class="floor-toggle" data-floor-toggle="${section.key}">
+          <div class="floor-row-inner floor-label-inner" style="justify-content:space-between; gap:6px;">
+            <button type="button" class="floor-toggle" data-floor-toggle="${section.key}" style="white-space:nowrap;">
               <span>${isCollapsed ? "▸" : "▾"}</span>
               <span>${escapeHtml(sectionTitle)}</span>
             </button>
+            ${section.isDorm && canWriteBookings ? `<button type="button" class="btn-inline-dorm" data-inline-dorm-today="1" title="Mở sơ đồ 8 chỗ Dorm hôm nay để đặt slot ngay trên lịch">+ Đặt slot</button>` : ""}
           </div>
         </td>
         <td colspan="${daysCount}"></td>
@@ -645,6 +662,13 @@
     });
 
     $("calendar-tbody").addEventListener("click", (e) => {
+      const inlineDorm = e.target.closest("[data-inline-dorm-today]");
+      if (inlineDorm) {
+        e.stopPropagation();
+        hideTooltip();
+        openDormBoard(getTodayISO());
+        return;
+      }
       const hkPill = e.target.closest("[data-open-room-hk]");
       if (hkPill) {
         e.stopPropagation();
@@ -1827,6 +1851,10 @@
     $("group-report-modal").classList.add("open");
   }
 
+  window.PMSGroupReportModal = {
+    open: () => openGroupReportModal()
+  };
+
   function renderGroupReportModal() {
     const body = $("group-report-body");
     const summaryEl = $("group-report-summary");
@@ -2518,12 +2546,28 @@
     const reader = new FileReader();
     reader.onload = async () => {
       let parsedCosts = null;
+      let parsedCount = null;
       try {
         const parsed = JSON.parse(reader.result);
         if (parsed && typeof parsed === "object" && parsed.operatingCosts && typeof parsed.operatingCosts === "object") {
           parsedCosts = parsed.operatingCosts;
         }
+        if (Array.isArray(parsed)) parsedCount = parsed.length;
+        else if (parsed && Array.isArray(parsed.bookings)) parsedCount = parsed.bookings.length;
       } catch {}
+
+      const confirmMsg = [
+        `Khôi phục dữ liệu từ file "${file.name}"?`,
+        parsedCount !== null ? `• File chứa ${parsedCount} lượt đặt phòng${parsedCosts ? " và dữ liệu chi phí vận hành" : ""}.` : "• Hệ thống sẽ kiểm tra cấu trúc file trước khi nạp.",
+        `• Dữ liệu hiện tại (${state.bookings.length} lượt đặt phòng) sẽ được thay thế.`,
+        "• Một bản hoàn tác được lưu tự động trước khi ghi đè.",
+        "",
+        "Nhấn OK để khôi phục, Hủy để giữ nguyên dữ liệu."
+      ].join("\n");
+      if (!window.confirm(confirmMsg)) {
+        showToast("Đã hủy khôi phục — dữ liệu giữ nguyên");
+        return;
+      }
 
       const res = await store.restoreFromImport(reader.result);
       if (!res.ok) {
@@ -2608,6 +2652,14 @@
 
     const chk = $("chk-auto-download-backup");
     if (chk) chk.checked = isAutoDownloadBackupEnabled();
+
+    const modalSummary = $("backup-modal-auto-summary");
+    if (modalSummary) {
+      const latestText = snaps[0] ? `Mốc gần nhất: ${formatTimestampVN(snaps[0].ts)} (${snaps[0].count} đơn).` : "Chưa có mốc sao lưu tự động nào.";
+      modalSummary.textContent = `Đã tự động sao lưu ${count}/${MAX_AUTOBACKUPS} mốc sau mỗi thao tác lưu/sửa/xóa. ${latestText}`;
+    }
+    const modalRollback = $("btn-backup-rollback-last");
+    if (modalRollback && typeof store.hasRollbackBackup === "function") modalRollback.disabled = !store.hasRollbackBackup();
   }
 
   async function writeToLinkedBackupFile() {
@@ -2801,24 +2853,31 @@
     renderAll();
   }
 
+  function syncThemeToggleLabel() {
+    const isDark = document.documentElement.getAttribute("data-theme") === "dark";
+    const icon = $("pc-theme-icon");
+    const label = $("pc-theme-label");
+    if (icon) icon.textContent = isDark ? "☀️" : "🌙";
+    if (label) label.textContent = isDark ? "Chuyển giao diện Sáng" : "Chuyển giao diện Tối";
+  }
+
   function initTheme() {
     try {
       if (localStorage.getItem(THEME_KEY) === "dark") {
         document.documentElement.setAttribute("data-theme", "dark");
-        $("btn-theme-toggle").textContent = "☀️";
       }
     } catch {}
+    syncThemeToggleLabel();
     $("btn-theme-toggle").addEventListener("click", () => {
       const isDark = document.documentElement.getAttribute("data-theme") === "dark";
       if (isDark) {
         document.documentElement.removeAttribute("data-theme");
         try { localStorage.setItem(THEME_KEY, "light"); } catch {}
-        $("btn-theme-toggle").textContent = "🌙";
       } else {
         document.documentElement.setAttribute("data-theme", "dark");
         try { localStorage.setItem(THEME_KEY, "dark"); } catch {}
-        $("btn-theme-toggle").textContent = "☀️";
       }
+      syncThemeToggleLabel();
     });
   }
 
@@ -2892,6 +2951,21 @@
       if (status.user && status.user.staffName) {
         logoutBtn.title = `Đăng xuất (${status.user.staffName} • ${getRoleLabel(status.user.role)})`;
       }
+    }
+
+    const staffName = status.user && status.user.staffName ? String(status.user.staffName) : "";
+    const roleLabel = getRoleLabel(status.user && status.user.role ? status.user.role : getUserRole());
+    const displayName = staffName || (status.mode === "local" ? "Máy trực ca" : "Tài khoản");
+    const initials = displayName.split(/\s+/).filter(Boolean).slice(-2).map((w) => w[0]).join("").toUpperCase() || "NV";
+    if ($("pc-user-avatar")) $("pc-user-avatar").textContent = initials;
+    if ($("pc-user-name")) $("pc-user-name").textContent = displayName;
+    if ($("pc-user-full")) $("pc-user-full").textContent = staffName || (status.mode === "local" ? "Máy trực ca (chế độ cục bộ)" : "Tài khoản trực ca");
+    if ($("pc-user-role-badge")) $("pc-user-role-badge").textContent = roleLabel;
+    if ($("btn-user-menu")) $("btn-user-menu").title = `${displayName} • ${roleLabel} — Giao diện & Đăng xuất`;
+    if ($("sidebar-version-label")) {
+      $("sidebar-version-label").textContent = status.runningVersion && status.runningVersion.appVersion
+        ? `Dongvan PMS v${status.runningVersion.appVersion}`
+        : "Dongvan PMS";
     }
   }
 
@@ -2971,6 +3045,142 @@
     banner.classList.add("show");
   }
 
+  /* -------------------- Left Sidebar Navigation, Dropdown Menus & Backup Modal (v1.5.0) -------------------- */
+
+  const SIDEBAR_COLLAPSED_KEY = "ks_pms_sidebar_collapsed_v1";
+  // Workspace/modal element -> nav key. Order = priority when several are open (top-most child first).
+  const NAV_SURFACES = [
+    ["backup-restore-modal", "backup_restore"],
+    ["accounts-modal", "accounts"],
+    ["history-modal", "history"],
+    ["costs-modal", "operating_costs"],
+    ["dorm-modal", "dorm"],
+    ["group-report-modal", "groups"],
+    ["hk-workspace", "housekeeping"]
+  ];
+
+  function syncSidebarVisibilityFromConfig(role) {
+    const visibleGroups = getVisibleNavGroups(role || getUserRole(), (p) => userCan(p));
+    const visibleIds = new Set();
+    const visibleGroupKeys = new Set();
+    visibleGroups.forEach((g) => {
+      visibleGroupKeys.add(g.key);
+      g.items.forEach((it) => visibleIds.add(it.id));
+    });
+    document.querySelectorAll("#sidebar-nav [data-nav-key]").forEach((btn) => {
+      btn.style.display = visibleIds.has(btn.id) ? "" : "none";
+    });
+    document.querySelectorAll("#sidebar-nav [data-nav-group]").forEach((grp) => {
+      grp.style.display = visibleGroupKeys.has(grp.dataset.navGroup) ? "" : "none";
+    });
+    // Hide the contextual "Thao tác" menu entirely if none of its items are permitted
+    const actionsMenu = $("calendar-actions-menu");
+    if (actionsMenu && $("calendar-actions-wrap")) {
+      const anyAction = Array.from(actionsMenu.querySelectorAll(".dropdown-item")).some((it) => it.style.display !== "none");
+      $("calendar-actions-wrap").style.display = anyAction ? "" : "none";
+    }
+    refreshActiveSidebarNav();
+  }
+
+  function setActiveSidebarNav(key) {
+    const activeKey = key || "calendar";
+    document.querySelectorAll("#sidebar-nav [data-nav-key]").forEach((btn) => {
+      const on = btn.dataset.navKey === activeKey;
+      btn.classList.toggle("active", on);
+      if (on) btn.setAttribute("aria-current", "page");
+      else btn.removeAttribute("aria-current");
+    });
+    document.body.dataset.activeNav = activeKey;
+  }
+
+  function refreshActiveSidebarNav() {
+    let key = "calendar";
+    for (const [id, navKey] of NAV_SURFACES) {
+      const el = $(id);
+      if (el && el.classList.contains("open")) { key = navKey; break; }
+    }
+    setActiveSidebarNav(key);
+  }
+
+  function initSidebarNavigation() {
+    const sb = $("app-sidebar");
+    const toggle = $("btn-sidebar-toggle");
+    const applyCollapsed = (collapsed) => {
+      sb.classList.toggle("collapsed", collapsed);
+      document.body.classList.toggle("sidebar-collapsed", collapsed);
+      toggle.setAttribute("aria-expanded", String(!collapsed));
+      const label = collapsed ? "Mở rộng menu bên trái" : "Thu gọn menu để mở rộng lịch phòng";
+      toggle.title = label;
+      toggle.setAttribute("aria-label", label);
+    };
+    let collapsed = false;
+    try { collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"; } catch {}
+    applyCollapsed(collapsed);
+    toggle.addEventListener("click", () => {
+      const next = !sb.classList.contains("collapsed");
+      applyCollapsed(next);
+      try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0"); } catch {}
+      hideTooltip();
+    });
+
+    $("btn-nav-calendar").addEventListener("click", () => {
+      if (getUserRole() !== "housekeeping" && $("hk-workspace").classList.contains("open")) {
+        $("hk-workspace").classList.remove("open");
+      }
+      refreshActiveSidebarNav();
+    });
+
+    // Keep the active highlight truthful no matter which code path opens/closes a workspace
+    const observer = new MutationObserver(() => refreshActiveSidebarNav());
+    NAV_SURFACES.forEach(([id]) => {
+      const el = $(id);
+      if (el) observer.observe(el, { attributes: true, attributeFilter: ["class"] });
+    });
+    refreshActiveSidebarNav();
+  }
+
+  function initDropdownMenus() {
+    const pairs = [["btn-calendar-actions", "calendar-actions-menu"], ["btn-user-menu", "user-menu-popover"]];
+    const closeAll = (exceptMenuId) => {
+      pairs.forEach(([btnId, menuId]) => {
+        if (menuId === exceptMenuId) return;
+        $(menuId).classList.remove("open");
+        $(btnId).setAttribute("aria-expanded", "false");
+      });
+    };
+    pairs.forEach(([btnId, menuId]) => {
+      $(btnId).addEventListener("click", (e) => {
+        e.stopPropagation();
+        const willOpen = !$(menuId).classList.contains("open");
+        closeAll(menuId);
+        $(menuId).classList.toggle("open", willOpen);
+        $(btnId).setAttribute("aria-expanded", String(willOpen));
+      });
+      $(menuId).addEventListener("click", (e) => {
+        if (e.target.closest(".dropdown-item")) closeAll();
+      });
+    });
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest(".dropdown-wrap")) closeAll();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeAll();
+    });
+  }
+
+  function openBackupRestoreModal() {
+    if (!userCan("admin:backup")) {
+      showToast("Chức năng Sao lưu & khôi phục chỉ dành cho Quản lý.");
+      return;
+    }
+    updateAutoBackupUI();
+    $("backup-restore-modal").classList.add("open");
+  }
+
+  window.PMSBackupRestoreModal = {
+    open: () => openBackupRestoreModal()
+  };
+
   function applyRolePermissionsUI() {
     const auth = typeof store.getAuthState === "function" ? store.getAuthState() : { authRequired: false, authenticated: true };
     const isAuthed = !auth.authRequired || auth.authenticated;
@@ -2997,12 +3207,15 @@
     if ($("btn-reset-sample")) $("btn-reset-sample").style.display = canBackup ? "" : "none";
     if ($("btn-rollback-last")) $("btn-rollback-last").style.display = canBackup ? "" : "none";
     if ($("btn-history-rollback-last")) $("btn-history-rollback-last").style.display = canBackup ? "" : "none";
+    if ($("btn-backup-rollback-last")) $("btn-backup-rollback-last").style.display = canBackup ? "" : "none";
     if ($("btn-open-hk")) $("btn-open-hk").style.display = role === "housekeeping" ? "none" : "";
+    syncSidebarVisibilityFromConfig(role);
+    if (!canBackup && $("backup-restore-modal")) $("backup-restore-modal").classList.remove("open");
 
     if (role === "housekeeping") {
       // Strictly lock out calendar, booking modals, PDF, costs, and accounts even if ?view=pc was passed
       delete document.body.dataset.viewMode;
-      ["booking-modal", "dorm-modal", "day-report-modal", "group-report-modal", "history-modal", "confirm-pdf-modal", "costs-modal", "accounts-modal"].forEach((id) => {
+      ["booking-modal", "dorm-modal", "day-report-modal", "group-report-modal", "history-modal", "backup-restore-modal", "confirm-pdf-modal", "costs-modal", "accounts-modal"].forEach((id) => {
         if ($(id)) $(id).classList.remove("open");
       });
       if ($("btn-hk-close")) $("btn-hk-close").style.display = "none";
@@ -3642,7 +3855,8 @@
         $("costs-modal").classList.contains("open") ||
         $("hk-complete-modal").classList.contains("open") ||
         $("issue-modal").classList.contains("open") ||
-        $("accounts-modal").classList.contains("open")
+        $("accounts-modal").classList.contains("open") ||
+        $("backup-restore-modal").classList.contains("open")
       );
     }
 
@@ -3862,6 +4076,11 @@
     $("btn-open-costs").addEventListener("click", () => openOperatingCostsModal());
     $("btn-open-accounts").addEventListener("click", openAccountsModal);
     $("btn-open-history").addEventListener("click", openHistoryModal);
+    $("btn-open-backup-restore").addEventListener("click", openBackupRestoreModal);
+    $("btn-open-day-report-today").addEventListener("click", () => openDailyReportModal(getTodayISO()));
+    $("kpi-dorm-quick-btn").addEventListener("click", () => openDormBoard(getTodayISO()));
+    initSidebarNavigation();
+    initDropdownMenus();
     $("btn-cancel-clipboard").addEventListener("click", () => clearClipboard(false));
     $("btn-export-csv").addEventListener("click", exportCSV);
     $("btn-backup-json").addEventListener("click", backupJSON);
@@ -4293,7 +4512,13 @@
       if (openBtn) {
         const bkId = openBtn.dataset.groupOpenBk;
         $("group-report-modal").classList.remove("open");
-        openBookingModal({ bookingId: bkId });
+        if (isPcViewActive()) {
+          openBookingModal({ bookingId: bkId });
+        } else if (window.PMSMobileApi && typeof window.PMSMobileApi.openBooking === "function") {
+          window.PMSMobileApi.openBooking(bkId);
+        } else {
+          openBookingModal({ bookingId: bkId });
+        }
         return;
       }
       const allocBtn = e.target.closest("[data-group-allocate]");
@@ -4924,6 +5149,16 @@
 
     $("btn-rollback-last").onclick = () => doRollbackLast("day-report-modal");
     $("btn-history-rollback-last").onclick = () => doRollbackLast(null);
+    $("btn-backup-rollback-last").onclick = () => doRollbackLast(null);
+
+    // System -> Backup & Restore modal
+    $("btn-close-backup-restore").addEventListener("click", () => closeModal("backup-restore-modal"));
+    $("btn-close-backup-restore-2").addEventListener("click", () => closeModal("backup-restore-modal"));
+    $("backup-restore-modal").addEventListener("click", (e) => { if (e.target === $("backup-restore-modal")) closeModal("backup-restore-modal"); });
+    $("btn-backup-open-history").addEventListener("click", () => {
+      closeModal("backup-restore-modal");
+      openHistoryModal();
+    });
 
     $("btn-reset-sample").onclick = async () => {
       if (!confirm("Khôi phục lại danh sách đặt phòng mẫu ban đầu? (Hệ thống tự lưu bản dự phòng trước khi đặt lại)")) return;
@@ -4950,6 +5185,7 @@
           if ($("dorm-slot-form").style.display !== "none") { setDormModalMode("board"); renderDormBoard(); }
           else closeModal("dorm-modal");
         } else if ($("group-report-modal").classList.contains("open")) closeModal("group-report-modal");
+        else if ($("backup-restore-modal").classList.contains("open")) closeModal("backup-restore-modal");
         else if ($("history-modal").classList.contains("open")) closeModal("history-modal");
         else if ($("day-report-modal").classList.contains("open")) closeModal("day-report-modal");
         else if (state.copiedBooking) clearClipboard(false);

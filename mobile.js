@@ -52,6 +52,9 @@
     buildGroupSyncUpdates,
     getRoleLabel,
     hasPermission,
+    NAV_ICONS_SVG,
+    getVisibleNavGroups,
+    getHousekeepingTasksForDate,
     ISSUE_SEVERITIES,
     ISSUE_STATUSES,
     computeRoomOperationalStatus,
@@ -73,6 +76,8 @@
 
   const mState = {
     activeTab: "schedule", // schedule | bookings | report | more
+    activeNavKey: "calendar",
+    secondaryStatsOpen: false,
     selectedDate: getTodayISO(),
     rangeOpen: false,
     rangeActive: false,
@@ -202,11 +207,16 @@
 
     shell.innerHTML = `
       <header class="m-topbar">
-        <div class="m-brand">
-          <img src="${escapeHtml(logoSrc)}" alt="Dongvan Ville du H'mong Hotel" class="m-brand-logo" />
-          <div class="m-brand-text">
-            <div class="m-brand-title">Dongvan Ville du H'mong</div>
-            <div class="m-brand-sub">26 phòng • 1 Dorm (8 chỗ) • T5 Buffet</div>
+        <div class="m-topbar-left">
+          <button id="m-btn-drawer-open" class="m-menu-trigger" type="button" aria-label="Mở menu điều hướng" aria-expanded="false" aria-controls="m-nav-drawer" title="Mở menu điều hướng">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+          </button>
+          <div class="m-brand">
+            <img src="${escapeHtml(logoSrc)}" alt="Dongvan Ville du H'mong Hotel" class="m-brand-logo" />
+            <div class="m-brand-text">
+              <div class="m-brand-title">Dongvan Ville du H'mong</div>
+              <div class="m-brand-sub">26 phòng • Dorm • T5 Buffet</div>
+            </div>
           </div>
         </div>
         <div id="m-sync-chip" class="m-sync-chip" role="status" aria-live="polite">
@@ -231,8 +241,31 @@
       </div>
 
       <main id="m-main" class="m-main">
-        <!-- Tab 1: Daily Schedule -->
-        <section id="m-view-schedule" class="m-tab-view active" aria-label="Lịch theo ngày">
+        <!-- Tab 1: Daily Schedule (Default Screen) -->
+        <section id="m-view-schedule" class="m-tab-view active" aria-label="Lịch phòng">
+          <div class="m-schedule-action-bar">
+            <button id="m-btn-schedule-new-booking" class="m-cta-booking" type="button">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              <span>Đặt phòng</span>
+            </button>
+            <div id="m-schedule-actions-wrap" class="m-actions-dropdown-wrap">
+              <button id="m-btn-schedule-actions" class="m-actions-btn" type="button" aria-haspopup="menu" aria-expanded="false">
+                <span>Thao tác</span>
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div id="m-schedule-actions-menu" class="m-actions-popover" role="menu">
+                <button id="m-schedule-export-csv" class="m-actions-popover-item" type="button" role="menuitem">
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  <span>Xuất Excel (CSV)</span>
+                </button>
+                <button id="m-schedule-day-report" class="m-actions-popover-item" type="button" role="menuitem">
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                  <span>Báo cáo ngày</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
           <div class="m-date-bar">
             <button id="m-btn-prev-day" class="m-date-btn" type="button" aria-label="Ngày trước">◀</button>
             <div class="m-date-picker-wrap">
@@ -798,10 +831,36 @@
           <div id="m-hist-list" class="history-list"></div>
         </div>
       </div>
+
+      <!-- Mobile Slide-out Navigation Drawer (shared NAV_CONFIG) -->
+      <div id="m-nav-backdrop" class="m-nav-backdrop" aria-hidden="true"></div>
+      <aside id="m-nav-drawer" class="m-nav-drawer" role="dialog" aria-modal="true" aria-label="Menu điều hướng khách sạn">
+        <div class="m-drawer-head">
+          <div class="m-drawer-brand">
+            <img src="${escapeHtml(logoSrc)}" alt="Dongvan Ville du H'mong Hotel" class="m-brand-logo" />
+            <div>
+              <div class="m-drawer-brand-title">Dongvan Ville du H'mong Hotel</div>
+              <div class="m-drawer-brand-sub">Hệ thống quản lý khách sạn</div>
+            </div>
+          </div>
+          <button id="m-btn-drawer-close" class="m-drawer-close" type="button" aria-label="Đóng menu">✕</button>
+        </div>
+        <nav id="m-drawer-nav" class="m-drawer-body" aria-label="Danh mục chức năng"></nav>
+        <div class="m-drawer-foot">
+          <div class="m-drawer-user">
+            <span id="m-drawer-user-name" class="m-drawer-user-name">Tài khoản trực ca</span>
+            <span id="m-drawer-user-role" class="m-drawer-user-role">Lễ tân</span>
+          </div>
+          <div class="m-drawer-foot-actions">
+            <button id="m-drawer-theme" class="m-drawer-foot-btn" type="button">🌙 Giao diện Tối</button>
+            <button id="m-drawer-logout" class="m-drawer-foot-btn danger" type="button" style="display:none;">Đăng xuất</button>
+          </div>
+        </div>
+      </aside>
     `;
   }
 
-  /* -------------------- Sync Status & Visual Viewport -------------------- */
+  /* -------------------- Sync Status, Mobile Drawer & Visual Viewport -------------------- */
 
   function mRole() {
     return typeof client.getRole === "function" ? client.getRole() : "manager";
@@ -809,6 +868,113 @@
 
   function mCan(perm) {
     return typeof client.can === "function" ? client.can(perm) : hasPermission(mRole(), perm);
+  }
+
+  function openMobileNavDrawer() {
+    renderMobileNavDrawer();
+    const drawer = $("m-nav-drawer");
+    const backdrop = $("m-nav-backdrop");
+    const btn = $("m-btn-drawer-open");
+    if (drawer) drawer.classList.add("open");
+    if (backdrop) backdrop.classList.add("open");
+    if (btn) btn.setAttribute("aria-expanded", "true");
+  }
+
+  function closeMobileNavDrawer() {
+    const drawer = $("m-nav-drawer");
+    const backdrop = $("m-nav-backdrop");
+    const btn = $("m-btn-drawer-open");
+    if (drawer) drawer.classList.remove("open");
+    if (backdrop) backdrop.classList.remove("open");
+    if (btn) btn.setAttribute("aria-expanded", "false");
+  }
+
+  function renderMobileNavDrawer() {
+    const navEl = $("m-drawer-nav");
+    if (!navEl) return;
+    const role = mRole();
+    const visibleGroups = getVisibleNavGroups(role, (p) => mCan(p));
+    const groupsCount = computeAllBookingGroups(getBookings(), { minRooms: 2 }).length;
+    const hkTasks = typeof client.getHousekeepingTasks === "function" ? client.getHousekeepingTasks() : [];
+    const hkIssues = typeof client.getMaintenanceIssues === "function" ? client.getMaintenanceIssues() : [];
+    const hkPending = getHousekeepingTasksForDate(hkTasks, getTodayISO()).filter((t) => t.status !== "cleaned").length +
+      hkIssues.filter((i) => i && i.status !== "resolved").length;
+
+    navEl.innerHTML = visibleGroups.map((grp) => `
+      <div class="m-drawer-group" data-m-nav-group="${escapeHtml(grp.key)}">
+        <div class="m-drawer-group-label">${escapeHtml(grp.label)}</div>
+        ${grp.items.map((item) => {
+          const isActive = mState.activeNavKey === item.key;
+          const iconSvg = (NAV_ICONS_SVG && NAV_ICONS_SVG[item.icon]) || "";
+          let badgeHtml = "";
+          if (item.key === "groups" && groupsCount > 0) {
+            badgeHtml = `<span class="m-drawer-badge">${groupsCount}</span>`;
+          } else if (item.key === "housekeeping" && hkPending > 0) {
+            badgeHtml = `<span class="m-drawer-badge warn">${hkPending}</span>`;
+          }
+          return `<button type="button" class="m-drawer-item ${isActive ? "active" : ""}" data-m-nav-key="${escapeHtml(item.key)}" ${isActive ? 'aria-current="page"' : ""}>
+            <span class="m-drawer-icon">${iconSvg}</span>
+            <span class="m-drawer-label">${escapeHtml(item.label)}</span>
+            ${badgeHtml}
+          </button>`;
+        }).join("")}
+      </div>
+    `).join("");
+
+    const status = client.getStatus ? client.getStatus() : { mode: "local" };
+    const staffName = status.user && status.user.staffName ? status.user.staffName : (status.mode === "local" ? "Máy trực ca" : "Tài khoản");
+    const roleLabel = getRoleLabel(status.user && status.user.role ? status.user.role : role);
+    if ($("m-drawer-user-name")) $("m-drawer-user-name").textContent = staffName;
+    if ($("m-drawer-user-role")) $("m-drawer-user-role").textContent = roleLabel;
+    const isDark = document.documentElement.getAttribute("data-theme") === "dark";
+    if ($("m-drawer-theme")) $("m-drawer-theme").textContent = isDark ? "☀️ Giao diện Sáng" : "🌙 Giao diện Tối";
+    const showLogout = status.mode === "server" && status.authRequired && status.authenticated;
+    if ($("m-drawer-logout")) $("m-drawer-logout").style.display = showLogout ? "" : "none";
+  }
+
+  function handleMobileNavAction(key) {
+    mState.activeNavKey = key || "calendar";
+    closeMobileNavDrawer();
+    if (key === "calendar") {
+      switchTab("schedule");
+      return;
+    }
+    if (key === "groups") {
+      if (window.PMSGroupReportModal) window.PMSGroupReportModal.open();
+      return;
+    }
+    if (key === "dorm") {
+      openDormSheet(mState.selectedDate || getTodayISO());
+      return;
+    }
+    if (key === "housekeeping") {
+      if (window.PMSHousekeepingApp) window.PMSHousekeepingApp.open({ tab: "tasks", roomId: "all", dateISO: getTodayISO() });
+      return;
+    }
+    if (key === "operating_costs") {
+      if (!mCan("costs:read")) return showMobileToast("Chi phí & Giá vốn chỉ dành cho Quản lý.");
+      if (window.PMSOperatingCostsModal) {
+        window.PMSOperatingCostsModal.open(mState.selectedDate ? mState.selectedDate.slice(0, 7) : undefined);
+      }
+      return;
+    }
+    if (key === "history") {
+      renderMobileHistorySheet();
+      $("m-sheet-history").classList.add("open");
+      if (typeof client.pullLatest === "function" && client.getStatus().mode === "server") {
+        client.pullLatest().catch(() => {});
+      }
+      return;
+    }
+    if (key === "backup_restore") {
+      if (!mCan("admin:backup")) return showMobileToast("Sao lưu & khôi phục chỉ dành cho Quản lý.");
+      if (window.PMSBackupRestoreModal) window.PMSBackupRestoreModal.open();
+      return;
+    }
+    if (key === "accounts") {
+      if (!mCan("accounts:manage")) return showMobileToast("Quản trị tài khoản chỉ dành cho Tổng quản lý.");
+      if (window.PMSHousekeepingApp) window.PMSHousekeepingApp.openAccounts();
+    }
   }
 
   function applyMobileRolePermissionsUI() {
@@ -822,10 +988,12 @@
     if ($("m-menu-costs")) $("m-menu-costs").style.display = canCosts ? "" : "none";
     if ($("m-menu-rollback")) $("m-menu-rollback").style.display = canBackup ? "" : "none";
     if ($("m-menu-export-csv")) $("m-menu-export-csv").style.display = canBackup ? "" : "none";
+    if ($("m-schedule-export-csv")) $("m-schedule-export-csv").style.display = canBackup ? "" : "none";
     if ($("m-menu-backup-json")) $("m-menu-backup-json").style.display = canBackup ? "" : "none";
     if ($("m-menu-restore-json")) $("m-menu-restore-json").style.display = canBackup ? "" : "none";
     if ($("m-menu-reset-sample")) $("m-menu-reset-sample").style.display = canBackup ? "" : "none";
 
+    renderMobileNavDrawer();
     renderMobileIssueBanner();
   }
 
@@ -1128,12 +1296,19 @@
     let occupiedCount = 0;
     let checkinsToday = 0;
     let checkoutsToday = 0;
+    let mergeToday = 0;
+    let ebToday = 0;
+    let buffetGuests = 0;
 
     regularRooms.forEach((r) => {
       const { staying, checkingOut } = getTurnsFast(r.id);
       if (staying.length > 0) {
         occupiedCount += 1;
-        if (staying[0].checkin === dateISO) checkinsToday += 1;
+        const bk = staying[0];
+        if (bk.checkin === dateISO) checkinsToday += 1;
+        if (bk.mergeBed && r.type === "Twins") mergeToday += 1;
+        ebToday += Number(bk.extraBed) || 0;
+        buffetGuests += Number(bk.guestCount) || r.defaultGuests;
       }
       checkoutsToday += checkingOut.length;
     });
@@ -1143,22 +1318,68 @@
     const dormUsed = Object.keys(dormMap).length;
     const dormFree = Math.max(0, 8 - dormUsed);
 
+    const [selYearStr, selMonthStr] = String(dateISO || getTodayISO()).split("-");
+    const selYear = Number(selYearStr) || new Date().getFullYear();
+    const selMonth = (Number(selMonthStr) || (new Date().getMonth() + 1)) - 1;
+    const fin = computeMonthlyFinancials(allBookings, selYear, selMonth);
+    const nowD = new Date();
+    const isSelCurrentMonth = selYear === nowD.getFullYear() && selMonth === nowD.getMonth();
+    const dayTag = isToday ? "Hôm nay" : formatDateVN(dateISO).slice(0, 5);
+    const monthTag = isSelCurrentMonth ? "Tháng này" : `Tháng ${selMonth + 1}/${selYear}`;
+    const secOpen = Boolean(mState.secondaryStatsOpen);
+
     $("m-stats-grid").innerHTML = `
-      <div class="m-stat-card">
-        <span class="m-stat-label">Phòng trống</span>
-        <span class="m-stat-val ok">${vacantCount} / 26 phòng</span>
-      </div>
-      <div class="m-stat-card">
-        <span class="m-stat-label">Đang có khách</span>
-        <span class="m-stat-val">${occupiedCount} / 26 phòng</span>
-      </div>
-      <div class="m-stat-card">
-        <span class="m-stat-label">Lượt đến / đi</span>
-        <span class="m-stat-val">${checkinsToday} đến • ${checkoutsToday} đi</span>
-      </div>
-      <div class="m-stat-card" id="m-stat-dorm-card" style="cursor:pointer;">
-        <span class="m-stat-label">Dorm nội bộ trống</span>
-        <span class="m-stat-val ${dormFree === 0 ? "warn" : "ok"}">${dormFree} / 8 slot</span>
+      <div class="m-kpi-panel">
+        <div class="m-kpi-group-box">
+          <div class="m-kpi-group-head">
+            <span class="m-kpi-group-badge">${escapeHtml(dayTag)}</span>
+            <button id="m-stats-more-toggle" type="button" class="m-kpi-more-btn" aria-expanded="${secOpen ? "true" : "false"}">
+              ${secOpen ? "Thu gọn chỉ số phụ ▴" : "Chỉ số phụ & Tháng này ▾"}
+            </button>
+          </div>
+          <div class="m-kpi-two-col">
+            <div class="m-kpi-cell">
+              <span class="m-kpi-cell-label">Phòng đang ở / trống</span>
+              <span id="m-kpi-today-occ" class="m-kpi-cell-val">${occupiedCount} / 26 phòng</span>
+              <span class="m-kpi-cell-sub">Còn trống ${vacantCount} • ${checkinsToday} đến / ${checkoutsToday} đi</span>
+            </div>
+            <div class="m-kpi-cell is-clickable" id="m-stat-dorm-card" role="button" tabindex="0" title="Chạm mở sơ đồ 8 chỗ Dorm nội bộ">
+              <span class="m-kpi-cell-label">Dorm nội bộ (8 chỗ)</span>
+              <span id="m-kpi-today-dorm" class="m-kpi-cell-val ${dormFree === 0 ? "warn" : "ok"}">Đặt ${dormUsed} • Còn ${dormFree}/8</span>
+              <span class="m-kpi-cell-sub">Chạm để đặt slot Dorm</span>
+            </div>
+          </div>
+
+          <div id="m-stats-more-body" class="m-kpi-secondary ${secOpen ? "open" : ""}">
+            <div class="m-kpi-two-col">
+              <div class="m-kpi-cell">
+                <span class="m-kpi-cell-label">Giường ghép / Extra bed</span>
+                <span id="m-kpi-today-hk" class="m-kpi-cell-val">${mergeToday} ghép • ${ebToday} EB</span>
+              </div>
+              <div class="m-kpi-cell">
+                <span class="m-kpi-cell-label">Buffet sáng tầng 5</span>
+                <span id="m-kpi-today-buffet" class="m-kpi-cell-val">${buffetGuests} khách</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="m-kpi-month-group" class="m-kpi-group-box m-kpi-secondary ${secOpen ? "open" : ""}">
+          <div class="m-kpi-group-head">
+            <span class="m-kpi-group-badge month">${escapeHtml(monthTag)}</span>
+            <span style="font-size:10.5px; color:var(--text-muted);">Thu chi nhận phòng trong tháng</span>
+          </div>
+          <div class="m-kpi-two-col">
+            <div class="m-kpi-cell">
+              <span class="m-kpi-cell-label">Đã thu</span>
+              <span id="m-kpi-month-paid" class="m-kpi-cell-val ok">${formatVND(fin.totalPaid)}</span>
+            </div>
+            <div class="m-kpi-cell">
+              <span class="m-kpi-cell-label">Còn phải thu</span>
+              <span id="m-kpi-month-debt" class="m-kpi-cell-val ${fin.totalDebt > 0 ? "warn" : "ok"}">${formatVND(fin.totalDebt)}</span>
+            </div>
+          </div>
+        </div>
       </div>
     `;
 
@@ -2556,6 +2777,7 @@
 
   function switchTab(tabName) {
     mState.activeTab = tabName;
+    if (tabName === "schedule") mState.activeNavKey = "calendar";
     document.querySelectorAll(".m-tab-view").forEach((v) => v.classList.remove("active"));
     const target = $(`m-view-${tabName}`);
     if (target) target.classList.add("active");
@@ -2579,6 +2801,58 @@
   }
 
   function bindMobileEvents() {
+    // Mobile ☰ Navigation Drawer (shared NAV_CONFIG)
+    $("m-btn-drawer-open").addEventListener("click", openMobileNavDrawer);
+    $("m-btn-drawer-close").addEventListener("click", closeMobileNavDrawer);
+    $("m-nav-backdrop").addEventListener("click", closeMobileNavDrawer);
+    $("m-drawer-nav").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-m-nav-key]");
+      if (!btn) return;
+      handleMobileNavAction(btn.dataset.mNavKey);
+    });
+    $("m-drawer-theme").addEventListener("click", () => {
+      $("m-menu-theme").click();
+      renderMobileNavDrawer();
+    });
+    $("m-drawer-logout").addEventListener("click", () => {
+      closeMobileNavDrawer();
+      $("m-menu-logout").click();
+    });
+
+    // Schedule Primary "+ Đặt phòng" CTA & Contextual "Thao tác" menu
+    const closeScheduleActions = () => {
+      if ($("m-schedule-actions-menu")) $("m-schedule-actions-menu").classList.remove("open");
+      if ($("m-btn-schedule-actions")) $("m-btn-schedule-actions").setAttribute("aria-expanded", "false");
+    };
+    $("m-btn-schedule-new-booking").addEventListener("click", () => {
+      closeScheduleActions();
+      openMobileBookingSheet({ checkin: mState.selectedDate || getTodayISO() });
+    });
+    $("m-btn-schedule-actions").addEventListener("click", (e) => {
+      e.stopPropagation();
+      const menu = $("m-schedule-actions-menu");
+      const willOpen = !menu.classList.contains("open");
+      menu.classList.toggle("open", willOpen);
+      $("m-btn-schedule-actions").setAttribute("aria-expanded", String(willOpen));
+    });
+    $("m-schedule-export-csv").addEventListener("click", () => {
+      closeScheduleActions();
+      $("m-menu-export-csv").click();
+    });
+    $("m-schedule-day-report").addEventListener("click", () => {
+      closeScheduleActions();
+      switchTab("report");
+    });
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest("#m-schedule-actions-wrap")) closeScheduleActions();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        closeScheduleActions();
+        closeMobileNavDrawer();
+      }
+    });
+
     // Bottom nav
     document.querySelectorAll("[data-m-tab]").forEach((btn) => {
       btn.addEventListener("click", () => switchTab(btn.dataset.mTab));
@@ -2679,6 +2953,11 @@
       if (issPill) {
         e.stopPropagation();
         if (window.PMSHousekeepingApp) window.PMSHousekeepingApp.open({ tab: "issues", roomId: issPill.dataset.mOpenRoomIssues });
+        return;
+      }
+      if (e.target.closest("#m-stats-more-toggle")) {
+        mState.secondaryStatsOpen = !mState.secondaryStatsOpen;
+        renderScheduleView();
         return;
       }
       if (e.target.closest("#m-stat-dorm-card")) return openDormSheet(mState.selectedDate);
@@ -3147,12 +3426,27 @@
       const reader = new FileReader();
       reader.onload = async () => {
         let parsedCosts = null;
+        let parsedCount = null;
         try {
           const parsed = JSON.parse(reader.result);
           if (parsed && typeof parsed === "object" && parsed.operatingCosts && typeof parsed.operatingCosts === "object") {
             parsedCosts = parsed.operatingCosts;
           }
+          if (Array.isArray(parsed)) parsedCount = parsed.length;
+          else if (parsed && Array.isArray(parsed.bookings)) parsedCount = parsed.bookings.length;
         } catch {}
+
+        const confirmMsg = [
+          `Khôi phục dữ liệu từ file "${file.name}"?`,
+          parsedCount !== null ? `• File chứa ${parsedCount} lượt đặt phòng${parsedCosts ? " và chi phí vận hành" : ""}.` : "• Hệ thống sẽ kiểm tra cấu trúc file trước khi nạp.",
+          `• Dữ liệu hiện tại (${getBookings().length} lượt đặt phòng) sẽ được thay thế (có lưu bản hoàn tác tự động).`,
+          "",
+          "Nhấn OK để khôi phục, Hủy để giữ nguyên."
+        ].join("\n");
+        if (!window.confirm(confirmMsg)) {
+          showMobileToast("Đã hủy khôi phục — dữ liệu giữ nguyên");
+          return;
+        }
 
         const res = await client.restoreFromImport(reader.result);
         if (!res.ok) return alert("Không thể khôi phục:\n" + res.error);

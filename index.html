@@ -19,164 +19,272 @@
   <link rel="stylesheet" href="mobile.css" />
 </head>
 <body>
-  <div class="app-shell">
-    <!-- Top Header -->
-    <header class="topbar">
-      <div class="brand-group">
-        <img src="logo.jpg" alt="Dongvan Ville du H'mong Hotel" class="brand-logo" />
-        <div>
-          <h1 class="brand-title">Dongvan Ville du H'mong Hotel</h1>
-          <div class="brand-sub">Lịch Đặt Phòng • 26 phòng (4 tầng ngủ) • 1 Dorm nội bộ (8 chỗ) • Tầng 5 Buffet sáng</div>
+  <div class="app-shell" id="app-shell">
+    <!-- Left Navigation Sidebar (PC) -->
+    <aside id="app-sidebar" class="app-sidebar" aria-label="Điều hướng chính">
+      <div class="sidebar-head">
+        <div class="sidebar-brand">
+          <img src="logo.jpg" alt="Dongvan Ville du H'mong Hotel" class="brand-logo" />
+          <div class="sidebar-brand-text">
+            <div class="brand-title">Dongvan Ville du H'mong Hotel</div>
+            <div class="brand-sub">26 phòng • Dorm • T5 Buffet</div>
+          </div>
+        </div>
+        <button id="btn-sidebar-toggle" class="sidebar-collapse-btn" type="button" title="Thu gọn / mở rộng menu bên trái" aria-label="Thu gọn menu" aria-expanded="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+      </div>
+
+      <nav id="sidebar-nav" class="sidebar-nav" aria-label="Danh mục chức năng">
+        <div class="nav-group" data-nav-group="reception">
+          <div class="nav-group-label">Lễ tân</div>
+          <button id="btn-nav-calendar" class="nav-item active" type="button" data-nav-key="calendar" aria-current="page" title="Lịch phòng">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></span>
+            <span class="nav-label">Lịch phòng</span>
+          </button>
+          <button id="btn-open-groups" class="nav-item" type="button" data-nav-key="groups" title="Khách đoàn — tổng tiền &amp; thu gộp theo mã đặt phòng">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
+            <span class="nav-label">Khách đoàn</span>
+            <span id="groups-count-pill" class="nav-badge" style="display:none;">0</span>
+          </button>
+          <button id="btn-open-dorm-today" class="nav-item" type="button" data-nav-key="dorm" title="Dorm nội bộ — sơ đồ 8 chỗ (4 giường tầng)">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4v16"/><path d="M2 8h18a2 2 0 0 1 2 2v10"/><path d="M2 17h20"/><path d="M6 8v9"/></svg></span>
+            <span class="nav-label">Dorm nội bộ</span>
+          </button>
+          <button id="btn-open-hk" class="nav-item" type="button" data-nav-key="housekeeping" title="Buồng phòng, tiến độ dọn, ảnh hoàn tất &amp; sự cố">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z"/></svg></span>
+            <span class="nav-label">Buồng phòng</span>
+            <span id="hk-badge-pill" class="nav-badge nav-badge-warn" style="display:none;">0</span>
+          </button>
+        </div>
+
+        <div class="nav-group" data-nav-group="finance">
+          <div class="nav-group-label">Tài chính</div>
+          <button id="btn-open-costs" class="nav-item" type="button" data-nav-key="operating_costs" title="Chi phí vận hành &amp; giá vốn theo tháng">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3"/><path d="M16 12h5v4h-5a2 2 0 0 1 0-4z"/></svg></span>
+            <span class="nav-label">Chi phí &amp; giá vốn</span>
+          </button>
+        </div>
+
+        <div class="nav-group" data-nav-group="system">
+          <div class="nav-group-label">Hệ thống</div>
+          <button id="btn-open-history" class="nav-item" type="button" data-nav-key="history" title="Lịch sử thao tác &amp; sao lưu tự động">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg></span>
+            <span class="nav-label">Lịch sử thao tác</span>
+          </button>
+          <button id="btn-open-backup-restore" class="nav-item" type="button" data-nav-key="backup_restore" title="Sao lưu &amp; khôi phục dữ liệu JSON">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span>
+            <span class="nav-label">Sao lưu &amp; khôi phục</span>
+          </button>
+          <button id="btn-open-accounts" class="nav-item" type="button" data-nav-key="accounts" title="Quản trị tài khoản &amp; phân quyền (chỉ Tổng quản lý)" style="display:none;">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>
+            <span class="nav-label">Quản trị tài khoản</span>
+          </button>
+        </div>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span id="sidebar-version-label" class="sidebar-version">Dongvan PMS</span>
+      </div>
+    </aside>
+
+    <!-- Main Right Workspace -->
+    <div class="app-workspace">
+      <!-- Compact Calendar Top Header -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1 id="topbar-view-title" class="topbar-title">Lịch phòng</h1>
+          <nav class="month-nav" aria-label="Điều hướng ngày và tháng">
+            <button id="btn-prev-month" class="btn btn-icon" type="button" title="Tháng trước" aria-label="Tháng trước">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+            <span id="month-label" class="month-label">Tháng 11 / 2026</span>
+            <button id="btn-next-month" class="btn btn-icon" type="button" title="Tháng sau" aria-label="Tháng sau">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+            <span class="month-nav-sep" aria-hidden="true"></span>
+            <button id="btn-today" class="btn btn-sm btn-today-nav" type="button" title="Nhấn để về ngày hôm nay">
+              <span id="today-date-label">Hôm nay</span>
+            </button>
+          </nav>
+        </div>
+
+        <div class="header-actions">
+          <span id="pc-sync-status" class="pc-sync-pill" title="Trạng thái đồng bộ dữ liệu">
+            <span class="sync-dot"></span>
+            <span id="pc-sync-text">Đang tải...</span>
+          </span>
+
+          <!-- Screen-contextual Actions Menu (contains Xuất Excel) -->
+          <div id="calendar-actions-wrap" class="dropdown-wrap">
+            <button id="btn-calendar-actions" class="btn btn-sm" type="button" aria-haspopup="menu" aria-expanded="false" title="Thao tác trên lịch phòng">
+              <span>Thao tác</span>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div id="calendar-actions-menu" class="dropdown-menu" role="menu">
+              <button id="btn-export-csv" class="dropdown-item" type="button" role="menuitem" title="Xuất file Excel (CSV) danh sách đặt phòng">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span>Xuất Excel (CSV)</span>
+              </button>
+              <button id="btn-open-day-report-today" class="dropdown-item" type="button" role="menuitem" title="Xem báo cáo nhanh ngày hôm nay">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                <span>Báo cáo hôm nay</span>
+              </button>
+            </div>
+          </div>
+
+          <button id="btn-new-booking" class="btn btn-primary btn-cta-booking" type="button">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            <span>Đặt phòng</span>
+          </button>
+
+          <!-- User Menu (Theme toggle + Logout) -->
+          <div id="user-menu-wrap" class="dropdown-wrap">
+            <button id="btn-user-menu" class="btn btn-sm user-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="false" title="Tài khoản &amp; Giao diện">
+              <span id="pc-user-avatar" class="user-avatar">NV</span>
+              <span id="pc-user-name" class="user-trigger-name">Tài khoản</span>
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div id="user-menu-popover" class="dropdown-menu dropdown-menu-right" role="menu">
+              <div class="user-menu-header">
+                <div id="pc-user-full" class="user-menu-fullname">Tài khoản trực ca</div>
+                <div id="pc-user-role-badge" class="user-menu-role">Lễ tân</div>
+              </div>
+              <div class="dropdown-divider"></div>
+              <button id="btn-theme-toggle" class="dropdown-item" type="button" role="menuitem" title="Đổi giao diện Sáng / Tối">
+                <span id="pc-theme-icon" class="dropdown-item-icon">🌙</span>
+                <span id="pc-theme-label">Chuyển giao diện Tối</span>
+              </button>
+              <button id="btn-pc-logout" class="dropdown-item dropdown-item-danger" type="button" role="menuitem" title="Đăng xuất tài khoản" style="display:none;">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                <span>Đăng xuất</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- Live In-App Maintenance Issue Notification Banner (Reception & Manager) -->
+      <div id="issue-alert-banner" class="issue-alert-banner" role="alert" aria-live="polite">
+        <span id="issue-alert-text"></span>
+        <div style="display:flex; gap:6px; align-items:center; flex-shrink:0;">
+          <button id="btn-issue-alert-view" class="btn btn-sm btn-primary" type="button">Xem sự cố</button>
+          <button id="btn-issue-alert-dismiss" class="btn btn-sm" type="button" aria-label="Ẩn thông báo">✕</button>
         </div>
       </div>
 
-      <nav class="month-nav" aria-label="Điều hướng ngày và tháng">
-        <button id="btn-prev-month" class="btn btn-icon" type="button" title="Tháng trước">◀</button>
-        <span id="month-label" class="month-label">Tháng 11 / 2026</span>
-        <button id="btn-next-month" class="btn btn-icon" type="button" title="Tháng sau">▶</button>
-        <button id="btn-today" class="btn btn-sm" type="button" title="Nhấn để về ngày hôm nay">
-          <span>📅</span>
-          <span id="today-date-label">Hôm nay: 21/11/2026</span>
-        </button>
-      </nav>
+      <!-- Grouped Live Summary KPI Strip ("Hôm nay" & "Tháng này") -->
+      <section class="summary-strip" aria-label="Thống kê nhanh">
+        <div class="kpi-group kpi-group-today">
+          <span class="kpi-group-tag">Hôm nay</span>
+          <div class="kpi-group-items">
+            <div class="kpi-metric">
+              <span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 4h3a2 2 0 0 1 2 2v14"/><path d="M2 20h20"/><path d="M13 20V4a1 1 0 0 0-1-1H6a2 2 0 0 0-2 2v15"/><circle cx="10" cy="12" r="1"/></svg></span>
+              <span class="kpi-label">Phòng</span>
+              <span id="kpi-today-occ" class="kpi-value">0 / 26 (trống 26)</span>
+            </div>
+            <span class="kpi-sep" aria-hidden="true"></span>
+            <button type="button" id="kpi-dorm-quick-btn" class="kpi-metric kpi-metric-btn" title="Nhấn mở sơ đồ 8 chỗ Dorm nội bộ hôm nay">
+              <span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4v16"/><path d="M2 8h18a2 2 0 0 1 2 2v10"/><path d="M2 17h20"/><path d="M6 8v9"/></svg></span>
+              <span class="kpi-label">Dorm</span>
+              <span id="kpi-today-dorm" class="kpi-value">Đặt 0 • Còn 8/8</span>
+            </button>
+            <span class="kpi-sep" aria-hidden="true"></span>
+            <div class="kpi-metric">
+              <span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="12" rx="2"/><line x1="12" y1="7" x2="12" y2="19"/></svg></span>
+              <span class="kpi-label">Giường</span>
+              <span id="kpi-today-hk" class="kpi-value">0 ghép • 0 EB</span>
+            </div>
+            <span class="kpi-sep" aria-hidden="true"></span>
+            <div class="kpi-metric">
+              <span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/><line x1="6" y1="2" x2="6" y2="4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="14" y1="2" x2="14" y2="4"/></svg></span>
+              <span class="kpi-label">Buffet T5</span>
+              <span id="kpi-today-buffet" class="kpi-value">0 khách</span>
+            </div>
+          </div>
+        </div>
 
-      <div class="header-actions">
-        <span id="pc-sync-status" class="pc-sync-pill" title="Trạng thái đồng bộ dữ liệu">
-          <span class="sync-dot"></span>
-          <span id="pc-sync-text">Đang tải...</span>
-        </span>
-        <button id="btn-new-booking" class="btn btn-primary" type="button">+ Đặt phòng</button>
-        <button id="btn-open-dorm-today" class="btn btn-sm" type="button">🛏️ Đặt slot Dorm</button>
-        <button id="btn-open-groups" class="btn btn-sm" type="button" title="Báo cáo tổng tiền & thu tiền chung theo Đoàn / Mã đặt phòng">
-          <span>👥 Đoàn</span>
-          <span id="groups-count-pill" class="autobackup-pill" style="display:none;">0</span>
-        </button>
-        <button id="btn-open-hk" class="btn btn-sm" type="button" title="Buồng phòng, tiến độ dọn, ảnh hoàn tất & báo cáo sự cố">
-          <span>🧹 Buồng phòng</span>
-          <span id="hk-badge-pill" class="autobackup-pill" style="display:none;">0</span>
-        </button>
-        <button id="btn-open-costs" class="btn btn-sm" type="button" title="Chi phí vận hành & giá vốn theo tháng (chỉ Quản lý)">
-          <span>💰 Chi phí &amp; Giá vốn</span>
-        </button>
-        <button id="btn-open-accounts" class="btn btn-sm" type="button" title="Cấp tài khoản &amp; mật khẩu, chặn truy cập &amp; xóa tài khoản nhân viên (chỉ Tổng quản lý)" style="display:none;">
-          <span>👤 Tài khoản</span>
-        </button>
-        <button id="btn-open-history" class="btn btn-sm btn-history" type="button" title="Xem lịch sử chỉnh sửa & cấu hình sao lưu tự động">
-          <span>🕒 Lịch sử</span>
-          <span id="autobackup-status-pill" class="autobackup-pill">Auto</span>
-        </button>
-        <button id="btn-export-csv" class="btn btn-sm" type="button" title="Xuất file Excel (CSV)">Xuất Excel</button>
-        <button id="btn-backup-json" class="btn btn-sm" type="button" title="Sao lưu dữ liệu JSON">Sao lưu</button>
-        <label id="lbl-restore-json" class="btn btn-sm" for="input-restore-json" title="Khôi phục từ file JSON">
-          Khôi phục
-          <input id="input-restore-json" type="file" accept=".json" hidden />
-        </label>
-        <button id="btn-theme-toggle" class="btn btn-sm" type="button" title="Đổi giao diện Sáng / Tối">🌙</button>
-        <button id="btn-pc-logout" class="btn btn-sm" type="button" title="Đăng xuất tài khoản" style="display:none;">Đăng xuất</button>
-      </div>
-    </header>
+        <div id="kpi-group-month" class="kpi-group kpi-group-month">
+          <span id="kpi-month-tag" class="kpi-group-tag">Tháng này</span>
+          <div class="kpi-group-items">
+            <div class="kpi-metric">
+              <span class="kpi-label">Đã thu</span>
+              <span id="kpi-month-paid" class="kpi-value ok">0 đ</span>
+            </div>
+            <span class="kpi-sep" aria-hidden="true"></span>
+            <div class="kpi-metric">
+              <span class="kpi-label">Còn phải thu</span>
+              <span id="kpi-month-debt" class="kpi-value warn">0 đ</span>
+            </div>
+          </div>
+        </div>
+      </section>
 
-    <!-- Live In-App Maintenance Issue Notification Banner (Reception & Manager) -->
-    <div id="issue-alert-banner" class="issue-alert-banner" role="alert" aria-live="polite">
-      <span id="issue-alert-text"></span>
-      <div style="display:flex; gap:6px; align-items:center; flex-shrink:0;">
-        <button id="btn-issue-alert-view" class="btn btn-sm btn-primary" type="button">Xem sự cố</button>
-        <button id="btn-issue-alert-dismiss" class="btn btn-sm" type="button" aria-label="Ẩn thông báo">✕</button>
+      <!-- Filters & Platform Legend -->
+      <section class="toolbar" aria-label="Bộ lọc và chú thích nền tảng">
+        <div class="filters-row">
+          <input id="filter-search" class="search-input" type="search" placeholder="Tìm khách, SĐT, mã ĐP, tour..." />
+          <select id="filter-floor" class="filter-select" aria-label="Lọc theo tầng">
+            <option value="all">Tất cả tầng &amp; Dorm</option>
+            <option value="dorm">Dorm nội bộ (8 chỗ)</option>
+            <option value="1">Tầng 1 (5 phòng ngủ)</option>
+            <option value="2">Tầng 2 (7 phòng ngủ)</option>
+            <option value="3">Tầng 3 (7 phòng ngủ)</option>
+            <option value="4">Tầng 4 (7 phòng ngủ)</option>
+          </select>
+          <select id="filter-type" class="filter-select" aria-label="Lọc theo hạng phòng">
+            <option value="all">Tất cả hạng phòng</option>
+            <option value="Double">Double (1 giường đôi)</option>
+            <option value="Twins">Twins (2 giường đơn)</option>
+            <option value="Triple">Triple (3 giường đơn)</option>
+            <option value="Family">Family (1 đôi + 1 đơn)</option>
+            <option value="Dorm">Dorm nội bộ (8 chỗ ngủ)</option>
+          </select>
+          <select id="filter-view" class="filter-select" aria-label="Lọc theo view">
+            <option value="all">Tất cả view</option>
+            <option value="View núi">View núi</option>
+            <option value="View thung lũng">View thung lũng</option>
+          </select>
+          <select id="filter-payment" class="filter-select" aria-label="Lọc theo thanh toán">
+            <option value="all">Mọi thanh toán</option>
+            <option value="debt">Còn nợ / Chưa trả hết</option>
+            <option value="paid">Đã thanh toán hết</option>
+          </select>
+          <button id="btn-reset-filters" class="btn btn-sm" type="button">Đặt lại</button>
+        </div>
+
+        <div id="legend-strip" class="legend-strip" role="group" aria-label="Lọc nhanh theo nguồn book"></div>
+      </section>
+
+      <!-- Active Filter Notice Banner -->
+      <div id="active-filter-bar" class="active-filter-bar">
+        <span id="active-filter-text"></span>
+        <button id="btn-clear-filter-bar" class="btn btn-primary btn-sm" type="button">Hiện tất cả</button>
       </div>
+
+      <!-- Copy / Paste Active Clipboard Bar -->
+      <div id="pc-clipboard-bar" class="clipboard-bar" role="status" aria-live="polite">
+        <div class="clipboard-info">
+          <span id="pc-clipboard-text"></span>
+        </div>
+        <div class="clipboard-actions">
+          <label class="clipboard-chk">
+            <input id="chk-paste-keep-group" type="checkbox" checked />
+            <span>Giữ cùng đoàn (Mã ĐP)</span>
+          </label>
+          <button id="btn-cancel-clipboard" class="btn btn-sm" type="button">✕ Hủy dán (Esc)</button>
+        </div>
+      </div>
+
+      <!-- Monthly Calendar Matrix -->
+      <main id="cal-scroll-wrap" class="calendar-wrap">
+        <table id="calendar-table" class="calendar-table">
+          <thead id="calendar-thead"></thead>
+          <tbody id="calendar-tbody"></tbody>
+          <tfoot id="calendar-tfoot"></tfoot>
+        </table>
+      </main>
     </div>
-
-    <!-- Live Summary KPI Strip -->
-    <section class="summary-strip" aria-label="Thống kê nhanh">
-      <div class="kpi-item">
-        <span class="kpi-label">Hôm nay đang ở:</span>
-        <span id="kpi-today-occ" class="kpi-value">0 / 26 phòng</span>
-      </div>
-      <div class="kpi-item">
-        <span class="kpi-label">Dorm nội bộ hôm nay:</span>
-        <span id="kpi-today-dorm" class="kpi-value">Còn 8/8 chỗ</span>
-      </div>
-      <div class="kpi-item">
-        <span class="kpi-label">Ghép giường / Extra bed hôm nay:</span>
-        <span id="kpi-today-hk" class="kpi-value">0 ghép • 0 EB</span>
-      </div>
-      <div class="kpi-item">
-        <span class="kpi-label">Buffet sáng T5 (dự kiến hôm nay):</span>
-        <span id="kpi-today-buffet" class="kpi-value">0 khách</span>
-      </div>
-      <div class="kpi-item">
-        <span class="kpi-label">Đã thu tháng này:</span>
-        <span id="kpi-month-paid" class="kpi-value ok">0 đ</span>
-      </div>
-      <div class="kpi-item">
-        <span class="kpi-label">Còn phải thu tháng này:</span>
-        <span id="kpi-month-debt" class="kpi-value warn">0 đ</span>
-      </div>
-    </section>
-
-    <!-- Filters & Platform Legend -->
-    <section class="toolbar" aria-label="Bộ lọc và chú thích nền tảng">
-      <div class="filters-row">
-        <input id="filter-search" class="search-input" type="search" placeholder="Tìm khách, SĐT, mã ĐP, tour..." />
-        <select id="filter-floor" class="filter-select" aria-label="Lọc theo tầng">
-          <option value="all">Tất cả tầng &amp; Dorm</option>
-          <option value="dorm">Dorm nội bộ (8 chỗ)</option>
-          <option value="1">Tầng 1 (5 phòng ngủ)</option>
-          <option value="2">Tầng 2 (7 phòng ngủ)</option>
-          <option value="3">Tầng 3 (7 phòng ngủ)</option>
-          <option value="4">Tầng 4 (7 phòng ngủ)</option>
-        </select>
-        <select id="filter-type" class="filter-select" aria-label="Lọc theo hạng phòng">
-          <option value="all">Tất cả hạng phòng</option>
-          <option value="Double">Double (1 giường đôi)</option>
-          <option value="Twins">Twins (2 giường đơn)</option>
-          <option value="Triple">Triple (3 giường đơn)</option>
-          <option value="Family">Family (1 đôi + 1 đơn)</option>
-          <option value="Dorm">Dorm nội bộ (8 chỗ ngủ)</option>
-        </select>
-        <select id="filter-view" class="filter-select" aria-label="Lọc theo view">
-          <option value="all">Tất cả view</option>
-          <option value="View núi">View núi</option>
-          <option value="View thung lũng">View thung lũng</option>
-        </select>
-        <select id="filter-payment" class="filter-select" aria-label="Lọc theo thanh toán">
-          <option value="all">Mọi thanh toán</option>
-          <option value="debt">Còn nợ / Chưa trả hết</option>
-          <option value="paid">Đã thanh toán hết</option>
-        </select>
-        <button id="btn-reset-filters" class="btn btn-sm" type="button">Đặt lại</button>
-      </div>
-
-      <div id="legend-strip" class="legend-strip" role="group" aria-label="Lọc nhanh theo nguồn book"></div>
-    </section>
-
-    <!-- Active Filter Notice Banner -->
-    <div id="active-filter-bar" class="active-filter-bar">
-      <span id="active-filter-text"></span>
-      <button id="btn-clear-filter-bar" class="btn btn-primary btn-sm" type="button">Hiện tất cả</button>
-    </div>
-
-    <!-- Copy / Paste Active Clipboard Bar -->
-    <div id="pc-clipboard-bar" class="clipboard-bar" role="status" aria-live="polite">
-      <div class="clipboard-info">
-        <span id="pc-clipboard-text"></span>
-      </div>
-      <div class="clipboard-actions">
-        <label class="clipboard-chk">
-          <input id="chk-paste-keep-group" type="checkbox" checked />
-          <span>Giữ cùng đoàn (Mã ĐP)</span>
-        </label>
-        <button id="btn-cancel-clipboard" class="btn btn-sm" type="button">✕ Hủy dán (Esc)</button>
-      </div>
-    </div>
-
-    <!-- Monthly Calendar Matrix -->
-    <main id="cal-scroll-wrap" class="calendar-wrap">
-      <table id="calendar-table" class="calendar-table">
-        <thead id="calendar-thead"></thead>
-        <tbody id="calendar-tbody"></tbody>
-        <tfoot id="calendar-tfoot"></tfoot>
-      </table>
-    </main>
   </div>
 
   <!-- Hover Tooltip -->
@@ -647,7 +755,10 @@
         <div class="autobackup-panel">
           <div class="autobackup-top">
             <div>
-              <strong style="font-size:13px; color:var(--status-paid);">🛡️ Sao lưu tự động mỗi lần chỉnh sửa: ĐANG BẬT</strong>
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <strong style="font-size:13px; color:var(--status-paid);">🛡️ Sao lưu tự động mỗi lần chỉnh sửa: ĐANG BẬT</strong>
+                <span id="autobackup-status-pill" class="autobackup-pill">Auto</span>
+              </div>
               <div id="autobackup-info-text" style="font-size:12px; color:var(--text-secondary); margin-top:2px;">
                 Tự động chụp bản sao lưu an toàn sau mọi thao tác (lưu tối đa 30 mốc gần nhất).
               </div>
@@ -695,6 +806,54 @@
           <button id="btn-history-rollback-last" class="btn btn-sm" type="button">↩ Hoàn tác thao tác gần nhất</button>
           <button id="btn-close-history-2" class="btn btn-primary" type="button">Đóng</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- System Backup & Restore Modal (Hệ thống -> Sao lưu & khôi phục) -->
+  <div id="backup-restore-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="backup-restore-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="backup-restore-title" class="modal-title">Sao lưu &amp; Khôi phục dữ liệu</h2>
+          <div class="modal-subtitle">Tải bản sao lưu toàn bộ sổ phòng &amp; chi phí hoặc khôi phục an toàn từ file JSON</div>
+        </div>
+        <button id="btn-close-backup-restore" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="backup-action-card">
+          <div>
+            <strong>Sao lưu dữ liệu thủ công (JSON)</strong>
+            <div class="backup-action-desc">Tải về máy toàn bộ danh sách đặt phòng, lịch sử thao tác và dữ liệu chi phí vận hành hiện tại.</div>
+          </div>
+          <button id="btn-backup-json" class="btn btn-primary btn-sm" type="button" title="Sao lưu dữ liệu JSON">Sao lưu JSON</button>
+        </div>
+
+        <div class="backup-action-card">
+          <div>
+            <strong>Khôi phục từ file sao lưu JSON</strong>
+            <div class="backup-action-desc">Kiểm tra cấu trúc &amp; xung đột trước khi nạp, yêu cầu xác nhận và tự tạo bản hoàn tác trước khi ghi đè.</div>
+          </div>
+          <label id="lbl-restore-json" class="btn btn-sm" for="input-restore-json" title="Chọn file JSON để khôi phục dữ liệu">
+            Chọn file khôi phục
+            <input id="input-restore-json" type="file" accept=".json" hidden />
+          </label>
+        </div>
+
+        <div class="backup-action-card backup-action-card-soft">
+          <div>
+            <strong>Sao lưu tự động &amp; Hoàn tác</strong>
+            <div id="backup-modal-auto-summary" class="backup-action-desc">Hệ thống tự chụp mốc sao lưu sau mỗi thao tác lưu/sửa/xóa.</div>
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button id="btn-backup-rollback-last" class="btn btn-sm" type="button">↩ Hoàn tác gần nhất</button>
+            <button id="btn-backup-open-history" class="btn btn-sm" type="button">Xem lịch sử</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <span style="font-size:12px; color:var(--text-muted);">Mọi thao tác khôi phục đều được thẩm định tính toàn vẹn trước khi áp dụng.</span>
+        <button id="btn-close-backup-restore-2" class="btn btn-primary" type="button">Đóng</button>
       </div>
     </div>
   </div>

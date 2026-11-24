@@ -2447,6 +2447,104 @@
     return Boolean(set && set.has(permission));
   }
 
+  // Unified inline SVG icon set (16px/18px stroke-1.8) shared across PC Sidebar, Topbar, KPIs & Mobile Drawer
+  const NAV_ICONS_SVG = Object.freeze({
+    calendar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
+    users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+    bed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4v16"/><path d="M2 8h18a2 2 0 0 1 2 2v10"/><path d="M2 17h20"/><path d="M6 8v9"/></svg>',
+    sparkles: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z"/></svg>',
+    wallet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3"/><path d="M16 12h5v4h-5a2 2 0 0 1 0-4z"/></svg>',
+    receipt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1-2-1z"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="12" y2="16"/></svg>',
+    book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+    tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>',
+    bag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>',
+    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+    chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>',
+    trending: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>',
+    target: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>',
+    history: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>',
+    database: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>',
+    shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+    coffee: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg>',
+    door: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 4h3a2 2 0 0 1 2 2v14"/><path d="M2 20h20"/><path d="M13 20V4a1 1 0 0 0-1-1H6a2 2 0 0 0-2 2v15"/><circle cx="10" cy="12" r="1"/></svg>'
+  });
+
+  // Single source of truth for PC left sidebar & Mobile ☰ drawer navigation.
+  // Only items with implemented: true AND permitted for the active user role are shown.
+  // Groups with 0 visible items are automatically hidden.
+  const NAV_CONFIG = Object.freeze([
+    Object.freeze({
+      key: "reception",
+      label: "Lễ tân",
+      items: Object.freeze([
+        Object.freeze({ key: "calendar", label: "Lịch phòng", id: "btn-nav-calendar", icon: "calendar", permission: "bookings:read", implemented: true }),
+        Object.freeze({ key: "groups", label: "Khách đoàn", id: "btn-open-groups", badgeId: "groups-count-pill", icon: "users", permission: "bookings:read", implemented: true }),
+        Object.freeze({ key: "dorm", label: "Dorm nội bộ", id: "btn-open-dorm-today", icon: "bed", permission: "bookings:read", implemented: true }),
+        Object.freeze({ key: "housekeeping", label: "Buồng phòng", id: "btn-open-hk", badgeId: "hk-badge-pill", icon: "sparkles", permission: "housekeeping:read", excludeRoles: Object.freeze(["housekeeping"]), implemented: true })
+      ])
+    }),
+    Object.freeze({
+      key: "finance",
+      label: "Tài chính",
+      items: Object.freeze([
+        Object.freeze({ key: "operating_costs", label: "Chi phí & giá vốn", id: "btn-open-costs", icon: "wallet", permission: "costs:read", implemented: true }),
+        Object.freeze({ key: "receivables", label: "Thu tiền & công nợ", id: "btn-nav-receivables", icon: "receipt", permission: "costs:read", implemented: false }),
+        Object.freeze({ key: "cashbook", label: "Sổ quỹ & quyết toán", id: "btn-nav-cashbook", icon: "book", permission: "costs:read", implemented: false })
+      ])
+    }),
+    Object.freeze({
+      key: "sales",
+      label: "Kinh doanh",
+      items: Object.freeze([
+        Object.freeze({ key: "rate_plan", label: "Bảng giá phòng", id: "btn-nav-rates", icon: "tag", permission: "costs:read", implemented: false }),
+        Object.freeze({ key: "extra_services", label: "Dịch vụ ngoài phòng", id: "btn-nav-services", icon: "bag", permission: "bookings:read", implemented: false })
+      ])
+    }),
+    Object.freeze({
+      key: "hr",
+      label: "Nhân sự",
+      items: Object.freeze([
+        Object.freeze({ key: "shifts_payroll", label: "Ca làm & bảng lương", id: "btn-nav-payroll", icon: "clock", permission: "costs:read", implemented: false })
+      ])
+    }),
+    Object.freeze({
+      key: "reports",
+      label: "Báo cáo",
+      items: Object.freeze([
+        Object.freeze({ key: "occupancy_report", label: "Công suất phòng", id: "btn-nav-occ-report", icon: "chart", permission: "reports:management", implemented: false }),
+        Object.freeze({ key: "pnl_report", label: "Doanh thu & lãi/lỗ", id: "btn-nav-pnl-report", icon: "trending", permission: "reports:management", implemented: false }),
+        Object.freeze({ key: "budget_forecast", label: "Dự toán", id: "btn-nav-budget", icon: "target", permission: "reports:management", implemented: false })
+      ])
+    }),
+    Object.freeze({
+      key: "system",
+      label: "Hệ thống",
+      items: Object.freeze([
+        Object.freeze({ key: "history", label: "Lịch sử thao tác", id: "btn-open-history", icon: "history", permission: "bookings:read", implemented: true }),
+        Object.freeze({ key: "backup_restore", label: "Sao lưu & khôi phục", id: "btn-open-backup-restore", icon: "database", permission: "admin:backup", implemented: true }),
+        Object.freeze({ key: "accounts", label: "Quản trị tài khoản", id: "btn-open-accounts", icon: "shield", permission: "accounts:manage", implemented: true })
+      ])
+    })
+  ]);
+
+  function getVisibleNavGroups(role, canFn) {
+    const normRole = normalizeRole(role);
+    const check = typeof canFn === "function" ? canFn : (perm) => hasPermission(normRole, perm);
+    const result = [];
+    for (const group of NAV_CONFIG) {
+      const visibleItems = group.items.filter((item) => {
+        if (!item.implemented) return false;
+        if (Array.isArray(item.excludeRoles) && item.excludeRoles.includes(normRole)) return false;
+        if (item.permission && !check(item.permission)) return false;
+        return true;
+      });
+      if (visibleItems.length > 0) {
+        result.push({ key: group.key, label: group.label, items: visibleItems });
+      }
+    }
+    return result;
+  }
+
   const HK_TASK_TYPES = Object.freeze({
     checkout: Object.freeze({ key: "checkout", label: "Dọn sau trả phòng", shortLabel: "Sau trả phòng" }),
     stayover: Object.freeze({ key: "stayover", label: "Dọn trong kỳ lưu trú", shortLabel: "Trong kỳ lưu trú" })
@@ -3760,6 +3858,9 @@
     isSuperAdminRole,
     getRoleLabel,
     hasPermission,
+    NAV_ICONS_SVG,
+    NAV_CONFIG,
+    getVisibleNavGroups,
     HK_TASK_TYPES,
     HK_TASK_STATUSES,
     ISSUE_SEVERITIES,
