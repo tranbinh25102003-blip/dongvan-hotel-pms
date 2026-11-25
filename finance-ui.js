@@ -866,9 +866,10 @@
 
     const nextServices = [
       ...(booking.services || []),
-      { id: `svc_${Date.now().toString(36)}`, name, amount, date }
+      { id: `svc_${Date.now().toString(36)}`, name, qty: 1, unitPrice: amount, amount, serviceDate: date, dateISO: date, status: "active" }
     ];
     const res = await store.updateBookingCharges(bookingId, {
+      expectedRevision: booking.revision,
       services: nextServices,
       effectiveDate: date,
       reason: `Thêm dịch vụ: ${name} (${formatVND(amount)})`
@@ -891,6 +892,7 @@
     const removed = booking.services[idx];
     const nextServices = booking.services.filter((_, i) => i !== idx);
     const res = await store.updateBookingCharges(bookingId, {
+      expectedRevision: booking.revision,
       services: nextServices,
       effectiveDate: getVietnamTodayISO(),
       reason: `Gỡ dịch vụ: ${removed.name}`
@@ -917,9 +919,10 @@
 
     const nextAdjustments = [
       ...(booking.adjustments || []),
-      { id: `adj_${Date.now().toString(36)}`, amount, reason, date }
+      { id: `adj_${Date.now().toString(36)}`, amount, reason, effectiveDate: date, date, status: "active" }
     ];
     const res = await store.updateBookingCharges(bookingId, {
+      expectedRevision: booking.revision,
       adjustments: nextAdjustments,
       effectiveDate: date,
       reason: `Điều chỉnh ${formatSignedVND(amount)}: ${reason}`
@@ -991,8 +994,8 @@
     if (!retainDeposit && !reason) return showInlineError("Vui lòng nhập lý do hủy đơn.");
 
     const payload = retainDeposit
-      ? { reason, depositDisposition: "retained" }
-      : { reason, depositDisposition: "pending" };
+      ? { reason, depositDisposition: "retained", confirmRevenuePolicy: true, idempotencyKey: makeIdempotencyKey("cancel") }
+      : { reason, depositDisposition: "pending", idempotencyKey: makeIdempotencyKey("cancel") };
     const res = await store.cancelBookingWithDeposit(bookingId, payload);
     if (res && res.ok) {
       uiState.bookingInlineForm = null;

@@ -6,7 +6,8 @@
      so existing home-screen icons ALWAYS load the newest deployed version.
    ========================================================================== */
 
-const CACHE_NAME = "dongvan-hotel-shell-v20";
+const CACHE_NAME = "dongvan-hotel-shell-v24";
+const isHotelCache = key => /^dongvan-hotel-shell-v[0-9]+$/.test(key);
 const PRECACHE_URLS = [
   "./",
   "./index.html",
@@ -18,6 +19,8 @@ const PRECACHE_URLS = [
   "./pms-client.js",
   "./app.js",
   "./finance-ui.js",
+  "./enterprise-report.js",
+  "./enterprise-ui.js",
   "./mobile.js",
   "./logo.jpg",
   "./apple-touch-icon.png",
@@ -41,7 +44,7 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => isHotelCache(k) && k !== CACHE_NAME).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -52,7 +55,7 @@ self.addEventListener("message", (event) => {
     self.skipWaiting();
   } else if (data.type === "CLEAR_APP_CACHE") {
     event.waitUntil(
-      caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+      caches.keys().then((keys) => Promise.all(keys.filter(isHotelCache).map((k) => caches.delete(k))))
     );
   }
 });
@@ -61,6 +64,8 @@ self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   const reqUrl = new URL(event.request.url);
   if (reqUrl.origin !== self.location.origin) return;
+  const shellFile = PRECACHE_URLS.some(path => new URL(path, self.registration.scope).pathname === reqUrl.pathname);
+  if (!shellFile) return;
   // Never intercept or cache API calls, auth endpoints, version checks, or SSE streams
   if (reqUrl.pathname.startsWith("/api/") || reqUrl.pathname.endsWith("/version.json")) return;
 
@@ -74,6 +79,15 @@ self.addEventListener("fetch", (event) => {
         }
         return networkRes;
       })
-      .catch(() => caches.match(event.request).then((cached) => cached || caches.match("./") || caches.match("./index.html")))
+      .catch(async () => {
+        const cache = await caches.open(CACHE_NAME);
+        const asset = await cache.match(event.request, { ignoreSearch: true });
+        if (asset) return asset;
+        if (event.request.mode === "navigate") {
+          const page = await cache.match("./index.html");
+          if (page) return page;
+        }
+        return Response.error();
+      })
   );
 });

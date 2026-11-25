@@ -973,6 +973,10 @@
       if (window.PMSFinanceApp) window.PMSFinanceApp.openPayables();
       return;
     }
+    if (key === "enterprise_report") {
+      if (mCan("reports:management")) window.PMSEnterpriseUI.open();
+      return;
+    }
     if (key === "operating_costs") {
       if (!mCan("costs:read")) return showMobileToast("Chi phí & Giá vốn chỉ dành cho Quản lý.");
       if (window.PMSOperatingCostsModal) {

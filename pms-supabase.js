@@ -27,7 +27,6 @@
   const HEARTBEAT_TIMEOUT_MS = 5000;
   const DEGRADED_PROBE_MS = 3500;
   const HEALTHY_PROBE_MS = 12000;
-  const MAX_BROADCAST_PDF_CHARS = 32000;
 
   function normalizeBaseUrl(rawUrl) {
     return String(rawUrl || "")
@@ -128,6 +127,7 @@
       hasRollbackBackup: false,
       operatingCosts: Core.createDefaultOperatingCostsState(),
       financeState: null, // Strictly null until server confirms authoritative load!
+      enterpriseGlState: null,
       housekeepingTasks: [],
       maintenanceIssues: [],
       roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
@@ -310,6 +310,7 @@
         hasRollbackBackup: isHk ? false : stateCache.hasRollbackBackup,
         operatingCosts: can("costs:read") ? stateCache.operatingCosts : null,
         financeState: getFinanceStateForCurrentRole(),
+        enterpriseGlState: can("reports:management") ? stateCache.enterpriseGlState : null,
         financeLoadState,
         financeLoadError,
         housekeepingTasks: stateCache.housekeepingTasks,
@@ -533,9 +534,10 @@
           error: "Đang mất kết nối mạng — dữ liệu CHƯA được lưu lên máy chủ. Nội dung bạn đang nhập vẫn được giữ nguyên."
         };
       }
+      const requestOwner = session && (session.sessionToken || session.accountId || session.username || session.email);
       const token = await ensureValidAccessToken(false);
       if (!token) {
-        return { ok: false, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập tài khoản Dongvan Hotel." };
+        return { ok: false, status: 401, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập tài khoản Dongvan Hotel." };
       }
       const reqBody = isStaffSession()
         ? { ...params, p_session_token: session.sessionToken }
@@ -547,6 +549,9 @@
           body: reqBody,
           timeoutMs: 12000
         });
+        if (!session || requestOwner !== (session.sessionToken || session.accountId || session.username || session.email)) {
+          return { ok: false, code: "SESSION_CHANGED", error: "Đã đổi tài khoản. Hãy xác minh giao dịch trong phiên ban đầu." };
+        }
         const errMsg = res.data && String(res.data.message || res.data.error || "");
         if (res.status === 401 || errMsg.includes("AUTH_REQUIRED")) {
           if (allowRetry && !isStaffSession() && session && session.refresh_token) {
@@ -558,10 +563,10 @@
               ? "Phiên đăng nhập đã hết hạn hoặc tài khoản đã bị chặn/xóa. Vui lòng đăng nhập lại."
               : "Phiên đăng nhập đã hết hạn — nội dung đang nhập vẫn được giữ nguyên."
           );
-          return { ok: false, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại rồi bấm Lưu." };
+          return { ok: false, status: 401, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại rồi bấm Lưu." };
         }
         if (res.status === 403 || errMsg.includes("FORBIDDEN")) {
-          return { ok: false, code: "FORBIDDEN", error: "Tài khoản của bạn không có quyền thực hiện thao tác hoặc xem dữ liệu này." };
+          return { ok: false, status: 403, code: "FORBIDDEN", error: "Tài khoản của bạn không có quyền thực hiện thao tác hoặc xem dữ liệu này." };
         }
         if (!res.httpOk) {
           return {
@@ -590,11 +595,13 @@
     function applyCloudState(data, meta = {}) {
       if (!data || !Array.isArray(data.bookings)) return false;
       const incomingVer = typeof data.storeVersion === "number" ? data.storeVersion : null;
-      const allowReset = meta.type === "init" || meta.type === "auth_login" || meta.force === true;
+      const allowReset = meta.type === "auth_login" && storeVersion === 0;
       // Prevent out-of-order stale responses from overwriting a newer committed version
       if (!allowReset && incomingVer !== null && incomingVer < storeVersion) {
         return false;
       }
+
+      if (data.financeState && Number(data.financeState.ledgerVersion || 0) < lastFinanceLedgerVersion) return false;
 
       if (data.user && isStaffSession() && session) {
         const nextRole = Core.normalizeRole(data.user.role);
@@ -628,14 +635,10 @@
         financeLoadState = "loaded";
         financeLoadError = "";
       } else if (Object.prototype.hasOwnProperty.call(data, "financeState")) {
-        if (data.financeState && typeof data.financeState === "object") {
+        if (data.financeState && Array.isArray(data.financeState.transactions)) {
           stateCache.financeState = Core.sanitizeFinanceState(data.financeState);
           lastFinanceUpdatedAt = stateCache.financeState.updatedAt || lastFinanceUpdatedAt;
           lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || 0;
-          financeLoadState = "loaded";
-          financeLoadError = "";
-        } else if (data.financeState === null && data.financeLoaded === true) {
-          stateCache.financeState = null;
           financeLoadState = "loaded";
           financeLoadError = "";
         } else {
@@ -645,6 +648,15 @@
       } else {
         financeLoadState = "error";
         financeLoadError = "Máy chủ chưa trả về sổ tài chính (cần cập nhật supabase/schema.sql bản v1.9.0).";
+      }
+
+      if (!can("reports:management")) {
+        stateCache.enterpriseGlState = null;
+      } else if (Object.prototype.hasOwnProperty.call(data, "enterpriseGlState")) {
+        const ER = root.PMSEnterpriseReport;
+        stateCache.enterpriseGlState = data.enterpriseGlState && typeof data.enterpriseGlState === "object"
+          ? (ER && typeof ER.sanitizeEnterpriseGlState === "function" ? ER.sanitizeEnterpriseGlState(data.enterpriseGlState) : data.enterpriseGlState)
+          : (ER && typeof ER.createDefaultEnterpriseGlState === "function" ? ER.createDefaultEnterpriseGlState() : null);
       }
 
       if (Array.isArray(data.housekeepingTasks)) {
@@ -713,32 +725,8 @@
       return true;
     }
 
-    function prepareBroadcastPayload(delta) {
-      const copy = { ...delta };
-      // SECURITY (v1.9.0): NEVER broadcast raw financeState blobs to peers!
-      if (Object.prototype.hasOwnProperty.call(copy, "financeState")) {
-        delete copy.financeState;
-      }
-      // Keep Realtime broadcast frame compact (<32KB); if a huge base64 PDF is attached, strip dataUrl
-      // so peers paint the booking cell in <80ms and fetch the full PDF cleanly in the background.
-      if (copy.booking && copy.booking.confirmationPdf && copy.booking.confirmationPdf.dataUrl) {
-        if (String(copy.booking.confirmationPdf.dataUrl).length > MAX_BROADCAST_PDF_CHARS) {
-          copy.booking = {
-            ...copy.booking,
-            confirmationPdf: {
-              name: copy.booking.confirmationPdf.name,
-              size: copy.booking.confirmationPdf.size,
-              uploadedAt: copy.booking.confirmationPdf.uploadedAt
-            }
-          };
-          copy.needsFullPull = true;
-        }
-      }
-      return copy;
-    }
-
     function broadcastDeltaToPeers(delta) {
-      const payload = prepareBroadcastPayload(delta);
+      const payload = { senderId: clientId, action: "STATE_CHANGED", storeVersion: delta.storeVersion, ts: new Date().toISOString() };
       // 1. Sub-100ms cross-device push via Supabase Realtime Phoenix Broadcast
       if (ws && ws.readyState === 1 && wsJoined) {
         try {
@@ -776,126 +764,14 @@
     }
 
     function applyIncomingPeerDelta(delta) {
-      if (!delta || typeof delta !== "object") return;
-      if (delta.senderId && delta.senderId === clientId) return;
-
-      // v1.9.0: Lightweight finance change notification -> each peer pulls ONLY its own role-filtered view from server!
-      if (delta.action === "FINANCE_CHANGED" || delta.action === "FINANCE_UPDATE") {
-        if (getCurrentRole() === "housekeeping") return;
-        pullLatestFromCloud({
-          type: "remote_change",
-          remoteEvent: { action: "FINANCE_CHANGED", actor: delta.actor || "", ts: delta.ts || new Date().toISOString() },
-          force: true
-        });
-        return;
-      }
-
-      if (delta.action === "COSTS_UPDATE" && delta.operatingCosts) {
-        if (!can("costs:read")) return;
-        stateCache.operatingCosts = Core.sanitizeOperatingCostsState(delta.operatingCosts);
-        lastOperatingCostsUpdatedAt = stateCache.operatingCosts.updatedAt || delta.ts || new Date().toISOString();
-        lastSyncedAt = new Date().toISOString();
-        connectionStatus = "connected";
-        emit({
-          type: "remote_change",
-          remoteEvent: { action: "COSTS_UPDATE", actor: delta.actor || "", ts: delta.ts || lastSyncedAt },
-          state: getSnapshot(),
-          status: getStatus()
-        });
-        return;
-      }
-
-      if (delta.action === "ACCOUNTS_UPDATE") {
-        if (delta.revokedAccountId && session && session.accountId && delta.revokedAccountId === session.accountId && getCurrentRole() !== "super_admin") {
-          handleAuthExpired("Tài khoản của bạn đã bị Tổng quản lý chặn truy cập hoặc xóa.");
-          return;
-        }
-        if (Array.isArray(delta.accounts)) {
-          applyAccountsUpdate(delta.accounts, delta.ts || new Date().toISOString());
-        }
-        lastSyncedAt = new Date().toISOString();
-        emit({
-          type: "remote_change",
-          remoteEvent: { action: "ACCOUNTS_UPDATE", actor: delta.actor || "", ts: delta.ts || lastSyncedAt },
-          state: getSnapshot(),
-          status: getStatus()
-        });
-        return;
-      }
-
-      if (delta.action === "CHECKOUT" || delta.action === "HK_TASK_CREATE" || delta.action === "HK_TASK_START" || delta.action === "HK_TASK_COMPLETE" || delta.action === "ISSUE_CREATE" || delta.action === "ISSUE_UPDATE") {
-        pullLatestFromCloud({
-          type: "remote_change",
-          remoteEvent: { action: delta.action, actor: delta.actor || "", ts: delta.ts || new Date().toISOString() },
-          force: true
-        });
-        return;
-      }
-
-      // Housekeeping must NEVER ingest raw booking payloads from Broadcast
-      if (getCurrentRole() === "housekeeping") return;
-
-      const remoteVer = typeof delta.storeVersion === "number" ? delta.storeVersion : null;
-      if (remoteVer !== null && remoteVer <= storeVersion) return;
-
-      const remoteEvent = {
-        action: delta.action || "REMOTE_CHANGE",
-        roomId: delta.roomId || (delta.booking && delta.booking.roomId) || "",
-        guestName: delta.guestName || (delta.booking && delta.booking.guestName) || "",
-        actor: delta.actor || "",
-        storeVersion: remoteVer,
-        ts: delta.ts || new Date().toISOString()
-      };
-
-      // Bulk replace (restore/rollback/reset) or skipped version gap -> authoritative coalesced full pull
-      const isSequentialNext = remoteVer !== null && remoteVer === storeVersion + 1;
-      const canPatchDirectly = !delta.bulkReplace && isSequentialNext && (delta.booking || delta.deletedId);
-
-      if (canPatchDirectly) {
-        let nextBookings;
-        if (delta.deletedId) {
-          nextBookings = stateCache.bookings.filter((b) => b.id !== delta.deletedId);
-        } else {
-          const bk = delta.booking;
-          const idx = stateCache.bookings.findIndex((b) => b.id === bk.id);
-          if (idx >= 0) {
-            nextBookings = stateCache.bookings.slice();
-            nextBookings[idx] = bk;
-          } else {
-            nextBookings = [...stateCache.bookings, bk];
-          }
-        }
-        Core.normalizeDormSlots(nextBookings);
-        stateCache.bookings = nextBookings;
-        if (delta.auditEntry && typeof delta.auditEntry === "object") {
-          stateCache.auditLogs = [
-            delta.auditEntry,
-            ...stateCache.auditLogs.filter((l) => l && l.id !== delta.auditEntry.id)
-          ].slice(0, 300);
-        }
-        storeVersion = remoteVer;
-        lastSyncedAt = new Date().toISOString();
-        connectionStatus = "connected";
-        emit({
-          type: "remote_change",
-          remoteEvent,
-          state: getSnapshot(),
-          status: getStatus()
-        });
-        // If PDF dataUrl was stripped from broadcast frame, pull full state seamlessly in background
-        if (delta.needsFullPull) {
-          pullLatestFromCloud({ type: "remote_change", remoteEvent, force: true });
-        }
-        return;
-      }
-
-      // Version gap or bulk change -> immediate coalesced authoritative pull
-      pullLatestFromCloud({ type: "remote_change", remoteEvent });
+      if (!delta || delta.senderId === clientId || !isSessionActive()) return;
+      // The RPC applies the recipient's current role and returns its authoritative view.
+      pullLatestFromCloud({ type: "remote_change", remoteEvent: { action: "REMOTE_CHANGE" } });
     }
 
     async function pullLatestFromCloud(meta = {}) {
       if (!isSessionActive()) {
-        return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
+        return { ok: false, status: 401, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
       }
 
       // Coalesce concurrent pulls so rapid bursts never cause out-of-order overwrites or N duplicate RPCs
@@ -918,43 +794,6 @@
             emit({ type: "status", status: getStatus() });
           }
           return res || { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Không thể tải dữ liệu." };
-        }
-        // In legacy Supabase Auth JWT mode (non-staff_session), also fetch extended meta directly
-        if (!isStaffSession()) {
-          try {
-            const token = await ensureValidAccessToken(false);
-            if (token) {
-              const cRes = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=in.(operating_costs_v1,finance_ledger_v1,housekeeping_v1,issues_v1,staff_accounts_v1)&select=key,value,updated_at`, {
-                method: "GET",
-                headers: { "Authorization": `Bearer ${token}` },
-                timeoutMs: 6000
-              });
-              if (cRes.httpOk && Array.isArray(cRes.data)) {
-                for (const row of cRes.data) {
-                  if (!row || !row.value) continue;
-                  const key = row.key || "operating_costs_v1";
-                  if (key === "operating_costs_v1") {
-                    stateCache.operatingCosts = Core.sanitizeOperatingCostsState(row.value);
-                    lastOperatingCostsUpdatedAt = (row.value && row.value.updatedAt) || row.updated_at || stateCache.operatingCosts.updatedAt || "";
-                  } else if (key === "finance_ledger_v1" && !Object.prototype.hasOwnProperty.call(res, "financeState")) {
-                    res.financeState = row.value;
-                    res.financeLoaded = true;
-                  } else if (key === "housekeeping_v1" && Array.isArray(row.value.tasks)) {
-                    stateCache.housekeepingTasks = row.value.tasks.map((t) => Core.sanitizeHousekeepingTask(t)).filter(Boolean);
-                  } else if (key === "issues_v1" && Array.isArray(row.value.issues)) {
-                    stateCache.maintenanceIssues = row.value.issues.map((i) => Core.sanitizeMaintenanceIssue(i)).filter(Boolean);
-                  } else if (key === "staff_accounts_v1" && Array.isArray(row.value.accounts)) {
-                    applyAccountsUpdate(row.value.accounts, (row.value && row.value.updatedAt) || row.updated_at || "");
-                  }
-                }
-                if (!Object.prototype.hasOwnProperty.call(res, "financeState")) {
-                  res.financeState = Core.createDefaultFinanceState();
-                  res.financeLoaded = true;
-                }
-                stateCache.roomStatuses = Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
-              }
-            }
-          } catch {}
         }
         connectionStatus = "connected";
         applyCloudState(res, currentMeta);
@@ -1577,6 +1416,7 @@
         hasRollbackBackup: false,
         operatingCosts: Core.createDefaultOperatingCostsState(),
         financeState: null,
+        enterpriseGlState: null,
         housekeepingTasks: [],
         maintenanceIssues: [],
         roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
@@ -1693,35 +1533,25 @@
     }
 
     async function exportUnifiedBackup(meta = {}) {
-      if (!can("admin:backup")) {
-        return { ok: false, code: "FORBIDDEN", error: "Chức năng sao lưu chỉ dành cho Quản lý." };
+      if (!can("admin:backup")) return { ok: false, status: 403, code: "FORBIDDEN", error: "Chức năng sao lưu chỉ dành cho Quản lý." };
+      const owner = session && (session.sessionToken || session.access_token);
+      const snapshot = await callRpc("pms_get_state", {});
+      if (!snapshot || !snapshot.ok) return snapshot || { ok: false, error: "Không đọc được dữ liệu máy chủ." };
+      if (!session || owner !== (session.sessionToken || session.access_token) || !can("admin:backup") ||
+          !snapshot.user || !Core.hasPermission(snapshot.user.role, "admin:backup")) {
+        return { ok: false, status: 403, code: "FORBIDDEN", error: "Phiên đăng nhập hoặc quyền sao lưu đã thay đổi." };
       }
-      if (financeLoadState !== "loaded") {
-        const pulled = await pullLatestFromCloud({ type: "manual_refresh", force: true });
-        if (!pulled.ok || financeLoadState !== "loaded") {
-          return { ok: false, code: "FINANCE_NOT_LOADED", error: "Chưa tải xong sổ tài chính từ máy chủ — không thể xuất bản sao lưu đầy đủ." };
-        }
+      try {
+        const backup = Core.buildUnifiedBackupPayload(snapshot, { ...meta, exportedBy: snapshot.user.staffName });
+        return { ok: true, backup };
+      } catch (err) {
+        return { ok: false, code: "INVALID_BACKUP_STATE", error: err.message };
       }
-      const backup = Core.buildUnifiedBackupPayload(
-        {
-          bookings: stateCache.bookings,
-          operatingCosts: stateCache.operatingCosts,
-          financeState: stateCache.financeState,
-          housekeepingTasks: stateCache.housekeepingTasks,
-          maintenanceIssues: stateCache.maintenanceIssues,
-          auditLogs: stateCache.auditLogs
-        },
-        {
-          ...meta,
-          exportedBy: (session && session.staffName) || ""
-        }
-      );
-      return { ok: true, backup };
     }
 
     async function restoreFromImport(rawPayload) {
       if (!can("admin:restore")) {
-        return { ok: false, code: "FORBIDDEN", error: "Chức năng khôi phục dữ liệu chỉ dành cho Quản lý." };
+        return { ok: false, status: 403, code: "FORBIDDEN", error: "Chức năng khôi phục dữ liệu chỉ dành cho Quản lý." };
       }
       const inspected = Core.inspectBackupPayload(rawPayload);
       if (!inspected.ok) {
@@ -1730,19 +1560,23 @@
       const preExisting = {
         bookings: stateCache.bookings.slice(),
         financeState: stateCache.financeState ? Core.sanitizeFinanceState(stateCache.financeState) : null,
-        operatingCosts: stateCache.operatingCosts
+        operatingCosts: stateCache.operatingCosts,
+        enterpriseGlState: stateCache.enterpriseGlState
       };
 
-      // Construct atomic RPC payload containing ONLY explicitly present sections (omitted v3 sections stay untouched on server!)
+      // Construct atomic RPC payload containing ONLY explicitly present sections (omitted v3/v5 sections stay untouched on server!)
       const backupForRpc = {
         version: inspected.version,
         bookings: inspected.sanitized.bookings
       };
       if (inspected.hasFinanceState && inspected.sanitized.financeState) {
-        backupForRpc.financeState = inspected.sanitized.financeState;
+        backupForRpc.financeState = inspected.rawFinanceState;
       }
       if (inspected.hasOperatingCosts && inspected.sanitized.operatingCosts) {
         backupForRpc.operatingCosts = inspected.sanitized.operatingCosts;
+      }
+      if (inspected.hasEnterpriseGlState && inspected.sanitized.enterpriseGlState) {
+        backupForRpc.enterpriseGlState = inspected.sanitized.enterpriseGlState;
       }
       if (inspected.hasHousekeepingTasks && inspected.sanitized.housekeepingTasks) {
         backupForRpc.housekeepingTasks = inspected.sanitized.housekeepingTasks;
@@ -1761,7 +1595,7 @@
 
       // Read back persisted state directly from authoritative server BEFORE declaring success
       const readBack = await pullLatestFromCloud({ type: "local_commit", force: true });
-      if (!readBack || !readBack.ok) {
+      if (!readBack || !readBack.ok || financeLoadState !== "loaded" || !stateCache.financeState) {
         return {
           ok: false,
           code: "READBACK_FAILED",
@@ -1772,10 +1606,17 @@
         bookings: stateCache.bookings,
         financeState: stateCache.financeState,
         operatingCosts: stateCache.operatingCosts,
+        enterpriseGlState: stateCache.enterpriseGlState,
         housekeepingTasks: stateCache.housekeepingTasks,
         maintenanceIssues: stateCache.maintenanceIssues
       };
-      const verification = Core.verifyRestoredState(inspected, actualState, preExisting);
+      // The restore RPC returns the ledger captured under the database lock.
+      const committedBaseline = {
+        ...preExisting,
+        ...(!inspected.hasFinanceState && rpcRes.financeState ? { financeState: rpcRes.financeState } : {}),
+        ...(!inspected.hasEnterpriseGlState && rpcRes.enterpriseGlState ? { enterpriseGlState: rpcRes.enterpriseGlState } : {})
+      };
+      const verification = Core.verifyRestoredState(inspected, actualState, committedBaseline);
       if (!verification.ok) {
         return {
           ok: false,
@@ -1850,7 +1691,7 @@
         return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Đang mất kết nối mạng — không thể lưu chi phí vận hành." };
       }
       if (!can("costs:write")) {
-        return { ok: false, code: "FORBIDDEN", error: "Tài khoản của bạn không có quyền chỉnh sửa chi phí vận hành." };
+        return { ok: false, status: 403, code: "FORBIDDEN", error: "Tài khoản của bạn không có quyền chỉnh sửa chi phí vận hành." };
       }
       const clean = Core.sanitizeOperatingCostsState(nextState);
       clean.updatedAt = new Date().toISOString();
@@ -1878,7 +1719,7 @@
 
       const token = await ensureValidAccessToken(false);
       if (!token) {
-        return { ok: false, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập để lưu chi phí vận hành." };
+        return { ok: false, status: 401, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập để lưu chi phí vận hành." };
       }
       try {
         const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?on_conflict=key`, {
@@ -1896,7 +1737,7 @@
         });
         if (res.status === 401) {
           handleAuthExpired("Phiên đăng nhập hết hạn khi lưu chi phí.");
-          return { ok: false, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
+          return { ok: false, status: 401, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
         }
         if (!res.httpOk) {
           return { ok: false, code: "SERVER_ERROR", error: "Không thể lưu chi phí vận hành lên Supabase." };
@@ -1949,7 +1790,7 @@
 
       const token = await ensureValidAccessToken(false);
       if (!token) {
-        return { ok: false, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập lại." };
+        return { ok: false, status: 401, code: "AUTH_REQUIRED", error: "Vui lòng đăng nhập lại." };
       }
       try {
         const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?on_conflict=key`, {
@@ -1963,7 +1804,7 @@
         });
         if (res.status === 401) {
           handleAuthExpired("Phiên đăng nhập hết hạn.");
-          return { ok: false, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
+          return { ok: false, status: 401, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
         }
         if (!res.httpOk) {
           return { ok: false, code: "SERVER_ERROR", error: "Không thể lưu dữ liệu lên Supabase." };
@@ -1986,7 +1827,7 @@
     }
 
     async function checkoutBooking(bookingId, opts = {}) {
-      if (!can("bookings:checkout")) return { ok: false, code: "FORBIDDEN", error: "Tài khoản không có quyền check-out." };
+      if (!can("bookings:checkout")) return { ok: false, status: 403, code: "FORBIDDEN", error: "Tài khoản không có quyền check-out." };
       const target = stateCache.bookings.find((b) => b.id === bookingId);
       if (!target) return { ok: false, code: "NOT_FOUND", error: "Không tìm thấy đặt phòng." };
       const actor = (session && session.staffName) || "Lễ tân";
@@ -2019,7 +1860,7 @@
     }
 
     async function createHousekeepingTask(payload) {
-      if (!can("housekeeping:create")) return { ok: false, code: "FORBIDDEN", error: "Không có quyền tạo yêu cầu dọn phòng." };
+      if (!can("housekeeping:create")) return { ok: false, status: 403, code: "FORBIDDEN", error: "Không có quyền tạo yêu cầu dọn phòng." };
       const actor = (session && session.staffName) || "Lễ tân";
       const task = Core.sanitizeHousekeepingTask({ ...payload, status: "dirty", createdBy: actor });
       if (!task) return { ok: false, error: "Thông tin phòng không hợp lệ." };
@@ -2030,7 +1871,7 @@
     }
 
     async function startHousekeepingTask(taskId) {
-      if (!can("housekeeping:execute")) return { ok: false, code: "FORBIDDEN", error: "Không có quyền thực hiện dọn phòng." };
+      if (!can("housekeeping:execute")) return { ok: false, status: 403, code: "FORBIDDEN", error: "Không có quyền thực hiện dọn phòng." };
       const idx = stateCache.housekeepingTasks.findIndex((t) => t.id === taskId);
       if (idx < 0) return { ok: false, error: "Không tìm thấy công việc." };
       const actor = (session && session.staffName) || "Buồng phòng";
@@ -2060,7 +1901,7 @@
     }
 
     async function completeHousekeepingTask(taskId, { photos = [], note = "" } = {}) {
-      if (!can("housekeeping:execute")) return { ok: false, code: "FORBIDDEN", error: "Không có quyền hoàn tất dọn phòng." };
+      if (!can("housekeeping:execute")) return { ok: false, status: 403, code: "FORBIDDEN", error: "Không có quyền hoàn tất dọn phòng." };
       const idx = stateCache.housekeepingTasks.findIndex((t) => t.id === taskId);
       if (idx < 0) return { ok: false, error: "Không tìm thấy công việc." };
       const cleanPhotos = Core.sanitizePhotoList(photos);
@@ -2076,7 +1917,7 @@
     }
 
     async function reportMaintenanceIssue(payload) {
-      if (!can("issues:create")) return { ok: false, code: "FORBIDDEN", error: "Không có quyền báo sự cố." };
+      if (!can("issues:create")) return { ok: false, status: 403, code: "FORBIDDEN", error: "Không có quyền báo sự cố." };
       const actor = (session && session.staffName) || "Nhân viên";
       const issue = Core.sanitizeMaintenanceIssue({ ...payload, reportedBy: actor });
       if (!issue) return { ok: false, error: "Vui lòng nhập đầy đủ số phòng và mô tả sự cố." };
@@ -2087,7 +1928,7 @@
     }
 
     async function updateMaintenanceIssue(issueId, patch) {
-      if (!can("issues:manage")) return { ok: false, code: "FORBIDDEN", error: "Không có quyền xử lý sự cố." };
+      if (!can("issues:manage")) return { ok: false, status: 403, code: "FORBIDDEN", error: "Không có quyền xử lý sự cố." };
       const idx = stateCache.maintenanceIssues.findIndex((i) => i.id === issueId);
       if (idx < 0) return { ok: false, error: "Không tìm thấy sự cố." };
       const actor = (session && session.staffName) || "Quản lý";
@@ -2103,7 +1944,7 @@
 
     async function listAccounts() {
       if (!can("accounts:manage")) {
-        return { ok: false, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền xem và quản trị tài khoản." };
+        return { ok: false, status: 403, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền xem và quản trị tài khoản." };
       }
       if (isStaffSession()) {
         const rpcRes = await callRpc("pms_list_accounts", {});
@@ -2137,7 +1978,7 @@
 
     async function createAccount(payload) {
       if (!can("accounts:create")) {
-        return { ok: false, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền cấp tài khoản mới." };
+        return { ok: false, status: 403, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền cấp tài khoản mới." };
       }
       if (isStaffSession()) {
         const rpcRes = await callRpc("pms_create_account", {
@@ -2196,7 +2037,7 @@
 
     async function updateAccount(accountId, patch) {
       if (!can("accounts:manage")) {
-        return { ok: false, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền chỉnh sửa tài khoản." };
+        return { ok: false, status: 403, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền chỉnh sửa tài khoản." };
       }
       if (isStaffSession()) {
         const rpcRes = await callRpc("pms_update_account", {
@@ -2255,7 +2096,7 @@
 
     async function deleteAccount(accountId) {
       if (!can("accounts:delete")) {
-        return { ok: false, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền xóa tài khoản." };
+        return { ok: false, status: 403, code: "FORBIDDEN", error: "Chỉ Tổng quản lý mới có quyền xóa tài khoản." };
       }
       if (isStaffSession()) {
         const rpcRes = await callRpc("pms_delete_account", { p_account_id: accountId });
@@ -2291,54 +2132,81 @@
 
     /* -------------------- Persistent Pending Finance Intents (Survives Reload/Offline) -------------------- */
 
-    function readPendingFinanceIntents() {
-      try {
-        const raw = root.localStorage.getItem(PENDING_FINANCE_KEY);
-        if (!raw) return [];
-        const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed.filter((x) => x && x.idempotencyKey) : [];
-      } catch {
-        return [];
-      }
+    function intentPrefix() {
+      const owner = session && (session.accountId || session.username || session.email);
+      return owner ? "dongvan_pms_finance_v2:" + encodeURIComponent(baseUrl) + ":" + encodeURIComponent(owner) + ":" : "";
     }
 
-    function writePendingFinanceIntents(list) {
-      const clean = (Array.isArray(list) ? list : []).slice(0, 50);
+    function oldFinanceIntents() {
       try {
-        root.localStorage.setItem(PENDING_FINANCE_KEY, JSON.stringify(clean));
+        const all = JSON.parse(root.localStorage.getItem(PENDING_FINANCE_KEY) || "[]");
+        return Array.isArray(all) ? all.filter(item => item && item.idempotencyKey) : [];
+      } catch { return []; }
+    }
+
+    function readPendingFinanceIntents() {
+      const prefix = intentPrefix();
+      if (!prefix) return [];
+      const entries = new Map();
+      // Earlier versions stored a single queue on this browser without an account identifier.
+      if (can("admin:backup")) for (const item of oldFinanceIntents()) entries.set(item.idempotencyKey, item);
+      try {
+        const storage = root.localStorage;
+        for (let i = 0; i < storage.length; i++) {
+          const key = storage.key(i);
+          if (!key || !key.startsWith(prefix)) continue;
+          const item = JSON.parse(storage.getItem(key));
+          if (item && item.idempotencyKey) entries.set(item.idempotencyKey, item);
+        }
       } catch {}
-      return clean;
+      return Array.from(entries.values()).sort((a,b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    }
+
+    function notifyPendingIntents() {
+      const pendingIntents = readPendingFinanceIntents();
+      emit({ type: "pending_finance_intents", pendingIntents, status: getStatus() });
+      return pendingIntents;
     }
 
     function upsertPendingFinanceIntent(intent) {
-      if (!intent || !intent.idempotencyKey) return [];
-      const cur = readPendingFinanceIntents();
-      const idx = cur.findIndex((x) => x.idempotencyKey === intent.idempotencyKey);
-      if (idx >= 0) cur[idx] = { ...cur[idx], ...intent };
-      else cur.unshift(intent);
-      const next = writePendingFinanceIntents(cur);
-      emit({ type: "pending_finance_intents", pendingIntents: next, status: getStatus() });
-      return next;
+      const prefix = intentPrefix();
+      if (prefix && intent && intent.idempotencyKey) {
+        try { root.localStorage.setItem(prefix + intent.idempotencyKey, JSON.stringify(intent)); } catch {}
+      }
+      return notifyPendingIntents();
     }
 
     function removePendingFinanceIntent(key) {
-      const cur = readPendingFinanceIntents();
-      const next = cur.filter((x) => x.idempotencyKey !== key);
-      writePendingFinanceIntents(next);
-      emit({ type: "pending_finance_intents", pendingIntents: next, status: getStatus() });
-      return next;
+      const prefix = intentPrefix();
+      if (!prefix) return [];
+      try {
+        root.localStorage.removeItem(prefix + key);
+        if (can("admin:backup")) {
+          const old = oldFinanceIntents();
+          if (old.some(item => item.idempotencyKey === key)) {
+            root.localStorage.setItem(PENDING_FINANCE_KEY, JSON.stringify(old.filter(item => item.idempotencyKey !== key)));
+          }
+        }
+      } catch {}
+      return notifyPendingIntents();
+    }
+
+    function acceptsFinanceResponse(result) {
+      return result && result.financeState && Array.isArray(result.financeState.transactions)
+        && Number(result.financeState.ledgerVersion || 0) >= lastFinanceLedgerVersion
+        && (typeof result.storeVersion !== "number" || result.storeVersion >= storeVersion);
     }
 
     function applyFinanceRpcResult(rpcRes, actionName) {
       if (!rpcRes || typeof rpcRes !== "object") return;
-      if (rpcRes.financeState && typeof rpcRes.financeState === "object") {
+      if (acceptsFinanceResponse(rpcRes)) {
         stateCache.financeState = Core.sanitizeFinanceState(rpcRes.financeState);
         lastFinanceUpdatedAt = stateCache.financeState.updatedAt || new Date().toISOString();
         lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || lastFinanceLedgerVersion;
         financeLoadState = "loaded";
         financeLoadError = "";
       }
-      if (Array.isArray(rpcRes.bookings)) {
+      if (Array.isArray(rpcRes.bookings) && typeof rpcRes.storeVersion === "number" && rpcRes.storeVersion >= storeVersion && (!rpcRes.financeState || acceptsFinanceResponse(rpcRes))) {
         Core.normalizeDormSlots(rpcRes.bookings);
         stateCache.bookings = rpcRes.bookings;
       }
@@ -2404,9 +2272,16 @@
           updatedAt: new Date().toISOString()
         };
         upsertPendingFinanceIntent(intentRecord);
+        if (!readPendingFinanceIntents().some(x => x.idempotencyKey === idemKey)) {
+          return { ok: false, code: "INTENT_NOT_SAVED", error: "Chưa lưu được mã chống trùng trên thiết bị. Giao dịch chưa gửi." };
+        }
       }
 
+      const requestScope = intentPrefix();
       const rpcRes = await callRpc(rpcName, rpcParams);
+      if (requestScope !== intentPrefix() || (rpcRes && rpcRes.code === "SESSION_CHANGED")) {
+        return { ok: false, code: "SESSION_CHANGED", error: "Đã đổi tài khoản. Kiểm tra giao dịch trong phiên ban đầu." };
+      }
       if (rpcRes && rpcRes.ok) {
         if (idemKey) removePendingFinanceIntent(idemKey);
         applyFinanceRpcResult(rpcRes, opts.op || rpcName);
@@ -2420,7 +2295,7 @@
       // Deterministic server rejection (400/403/404/409) — NOT ambiguous, clear pending intent & sync fresh state if returned
       if (rpcRes && !rpcRes.offline && rpcRes.status && rpcRes.status >= 400 && rpcRes.status < 500) {
         if (idemKey) removePendingFinanceIntent(idemKey);
-        if (rpcRes.financeState && typeof rpcRes.financeState === "object") {
+        if (acceptsFinanceResponse(rpcRes)) {
           stateCache.financeState = Core.sanitizeFinanceState(rpcRes.financeState);
           lastFinanceUpdatedAt = stateCache.financeState.updatedAt || lastFinanceUpdatedAt;
           lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || lastFinanceLedgerVersion;
@@ -2456,7 +2331,7 @@
       if (!cleanKey) return { ok: true, found: false, transaction: null };
       const res = await callRpc("pms_finance_lookup_idempotency", { p_key: cleanKey, p_kind: "tx" });
       if (res && res.ok) {
-        if (res.financeState && typeof res.financeState === "object") {
+        if (acceptsFinanceResponse(res)) {
           stateCache.financeState = Core.sanitizeFinanceState(res.financeState);
           lastFinanceUpdatedAt = stateCache.financeState.updatedAt || lastFinanceUpdatedAt;
           lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || lastFinanceLedgerVersion;
@@ -2473,7 +2348,7 @@
       if (!cleanKey) return { ok: true, found: false, shift: null };
       const res = await callRpc("pms_finance_lookup_idempotency", { p_key: cleanKey, p_kind: "shift" });
       if (res && res.ok) {
-        if (res.financeState && typeof res.financeState === "object") {
+        if (acceptsFinanceResponse(res)) {
           stateCache.financeState = Core.sanitizeFinanceState(res.financeState);
           lastFinanceUpdatedAt = stateCache.financeState.updatedAt || lastFinanceUpdatedAt;
           lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || lastFinanceLedgerVersion;
@@ -2491,16 +2366,15 @@
         return { ok: true, resolved: [], remaining: intents };
       }
       const resolved = [];
-      const remaining = [];
       for (const intent of intents) {
         const lookup = intent.kind === "shift"
           ? await lookupShiftByIdempotency(intent.idempotencyKey)
           : await lookupFinanceByIdempotency(intent.idempotencyKey);
         if (!lookup.ok) {
-          remaining.push(intent);
           continue;
         }
         if (lookup.found) {
+          removePendingFinanceIntent(intent.idempotencyKey);
           resolved.push({
             idempotencyKey: intent.idempotencyKey,
             status: "committed_on_server",
@@ -2508,10 +2382,11 @@
             shift: lookup.shift || null
           });
         } else {
-          remaining.push({ ...intent, status: "ready_to_retry", updatedAt: new Date().toISOString() });
+          const latest = readPendingFinanceIntents().find(x => x.idempotencyKey === intent.idempotencyKey);
+          if (latest && latest.updatedAt === intent.updatedAt) upsertPendingFinanceIntent({ ...latest, status: "ready_to_retry", updatedAt: new Date().toISOString() });
         }
       }
-      writePendingFinanceIntents(remaining);
+      const remaining = readPendingFinanceIntents();
       if (resolved.length > 0) {
         await pullLatestFromCloud({ type: "remote_change", force: true, _skipIntentReconcile: true });
       }
@@ -2619,6 +2494,110 @@
       };
     }
 
+    async function callGlRpc(rpcName, rpcArgs = {}, actionLabel = "GL_CHANGED") {
+      if (!can("reports:management")) {
+        return { ok: false, status: 403, code: "FORBIDDEN", error: "Chỉ Quản lý / Kế toán trưởng mới có quyền thao tác Sổ cái doanh nghiệp." };
+      }
+      const res = await callRpc(rpcName, rpcArgs);
+      if (!res || !res.ok) {
+        return res || { ok: false, code: "SERVER_ERROR", error: "Không thể thực hiện thao tác Sổ cái trên máy chủ." };
+      }
+      if (res.enterpriseGlState && typeof res.enterpriseGlState === "object") {
+        const ER = root.PMSEnterpriseReport;
+        stateCache.enterpriseGlState = (ER && typeof ER.sanitizeEnterpriseGlState === "function")
+          ? ER.sanitizeEnterpriseGlState(res.enterpriseGlState)
+          : res.enterpriseGlState;
+      }
+      if (typeof res.storeVersion === "number" && res.storeVersion >= storeVersion) {
+        storeVersion = res.storeVersion;
+      }
+      if (res.auditEntry) {
+        stateCache.auditLogs = [res.auditEntry, ...stateCache.auditLogs.filter((a) => a.id !== res.auditEntry.id)].slice(0, 300);
+      }
+      lastSyncedAt = new Date().toISOString();
+      if (actionLabel !== "GL_READ") {
+        broadcastDeltaToPeers({ senderId: clientId, storeVersion, action: actionLabel, actor: (session && session.staffName) || "", ts: lastSyncedAt });
+      }
+      emit({ type: actionLabel === "GL_READ" ? "state" : "local_commit", state: getSnapshot(), status: getStatus() });
+      return res;
+    }
+
+    async function syncPmsToGlCloud(payload = {}) {
+      if (!can("reports:management")) {
+        return { ok: false, status: 403, code: "FORBIDDEN", error: "Chỉ Quản lý / Kế toán trưởng mới được đồng bộ PMS vào Sổ cái." };
+      }
+      const ER = root.PMSEnterpriseReport;
+      if (!ER || typeof ER.buildPmsAutoPostEntries !== "function") {
+        return { ok: false, code: "MODULE_MISSING", error: "Thiếu mô-đun enterprise-report.js." };
+      }
+      // Pull freshest state before computing auto-post batch
+      const latestGlRes = await callGlRpc("pms_gl_get_state", {}, "GL_READ");
+      if (!latestGlRes || !latestGlRes.ok) return latestGlRes;
+      const gl = stateCache.enterpriseGlState || ER.createDefaultEnterpriseGlState();
+      const entityId = payload.entityId || gl.activeEntityId;
+      const anchor = payload.anchor || payload.month || Core.getVietnamTodayISO().slice(0, 7);
+      const kind = ["month", "quarter", "year", "ytd"].includes(payload.kind) ? payload.kind : "month";
+      const p = ER.period(anchor, kind);
+      const built = ER.buildPmsAutoPostEntries(
+        { bookings: stateCache.bookings, financeState: stateCache.financeState, operatingCosts: stateCache.operatingCosts },
+        gl,
+        p,
+        { entityId, actorName: (session && session.staffName) || "Quản lý", sourceMode: payload.sourceMode || gl.sourceMode }
+      );
+      const rpcRes = await callGlRpc("pms_gl_sync_pms", {
+        p_payload: {
+          entityId,
+          periodLabel: p.label,
+          sourceMode: built.sourceMode,
+          entries: built.entries
+        }
+      }, "GL_SYNC_PMS");
+      if (!rpcRes || !rpcRes.ok) return rpcRes;
+      return {
+        ...rpcRes,
+        period: p,
+        sourceMode: built.sourceMode,
+        unresolvedLegacy: built.unresolvedLegacy,
+        reconciledExternalLinks: built.reconciledExternalLinks
+      };
+    }
+
+    async function transitionGlPeriodCloud(payload = {}) {
+      if (!can("reports:management")) {
+        return { ok: false, status: 403, code: "FORBIDDEN", error: "Chỉ Quản lý / Kế toán trưởng mới được khóa / mở khóa kỳ kế toán." };
+      }
+      const ER = root.PMSEnterpriseReport;
+      const body = { ...(payload || {}) };
+      if (ER && body.action === "lock" && /^\d{4}-\d{2}$/.test(String(body.periodKey || body.month || ""))) {
+        const gl = stateCache.enterpriseGlState || ER.createDefaultEnterpriseGlState();
+        const pk = String(body.periodKey || body.month);
+        const entityId = body.entityId || gl.activeEntityId;
+        const p = ER.period(pk, "month");
+        const computed = ER.computeGlStatements(gl, p, { entityId });
+        const recon = ER.computeSubledgerReconciliation(gl, {
+          bookings: stateCache.bookings,
+          financeState: stateCache.financeState,
+          operatingCosts: stateCache.operatingCosts
+        }, p, { entityId });
+        body.snapshotPayload = {
+          periodLabel: p.label,
+          trialBalanceTotals: computed.trialBalance.totals,
+          incomeStatement: computed.incomeStatement,
+          balanceSheet: computed.balanceSheet,
+          cashFlow: computed.cashFlow,
+          equityStatement: computed.equityStatement,
+          reconciliationSummary: {
+            hasIssues: recon.hasIssues,
+            cashDiff: recon.cash.diff,
+            arDiff: recon.ar.diff,
+            apDiff: recon.ap.diff,
+            unresolvedLegacyCount: recon.flags.unresolvedLegacy.length
+          }
+        };
+      }
+      return callGlRpc("pms_gl_transition_period", { p_payload: body }, "GL_PERIOD_TRANSITION");
+    }
+
     return {
       init,
       subscribe,
@@ -2628,6 +2607,14 @@
       checkAppVersion,
       getVersionInfo,
       getAuthState,
+      getEnterpriseGlState: () => (can("reports:management") ? stateCache.enterpriseGlState : null),
+      refreshEnterpriseGlState: () => callGlRpc("pms_gl_get_state", {}, "GL_READ"),
+      saveEnterpriseGlSetup: (payload = {}) => callGlRpc("pms_gl_save_setup", { p_payload: payload }, "GL_SETUP_SAVE"),
+      postGlJournalEntry: (payload = {}) => callGlRpc("pms_gl_post_entry", { p_payload: payload }, "GL_POST_ENTRY"),
+      reverseGlJournalEntry: (entryId, payload = {}) => callGlRpc("pms_gl_reverse_entry", { p_entry_id: entryId, p_payload: payload }, "GL_REVERSE_ENTRY"),
+      importGlJournal: (payload = {}) => callGlRpc("pms_gl_import_journal", { p_payload: payload }, "GL_IMPORT_JOURNAL"),
+      syncPmsToGl: syncPmsToGlCloud,
+      transitionGlPeriod: transitionGlPeriodCloud,
       getRole: getCurrentRole,
       can,
       login,
@@ -2703,7 +2690,12 @@
         return callAuthoritativeFinanceRpc("pms_finance_save_reconcile_check", { p_payload: payload }, { op: "reconcile_check" });
       },
       cancelBookingWithDeposit: (bookingId, payload = {}) => {
-        return callAuthoritativeFinanceRpc("pms_finance_cancel_booking_deposit", { p_booking_id: bookingId, p_payload: payload }, { op: "cancel_booking_deposit" });
+        const key = (payload && (payload.idempotencyKey || payload.cancelIdempotencyKey)) || `cancel_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+        return callAuthoritativeFinanceRpc(
+          "pms_finance_cancel_booking_deposit",
+          { p_booking_id: bookingId, p_payload: { ...payload, idempotencyKey: key } },
+          { op: "cancel_booking_deposit", idempotencyKey: key, label: "Hủy phòng & xử lý cọc", amount: Number(payload.refundAmount) || 0 }
+        );
       },
       updateBookingCharges: (bookingId, payload = {}) => {
         return callAuthoritativeFinanceRpc("pms_finance_update_booking_charges", { p_booking_id: bookingId, p_payload: payload }, { op: "update_booking_charges" });

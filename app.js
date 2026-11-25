@@ -619,8 +619,8 @@
 
             const chKey = bk.channelKey || detectChannelKey(bk.sourceName);
             const showLabel = !hasPrev;
-            const shortSource = bk.sourceName.replace(/\.com$/i, "");
-            const shortGuest = bk.guestName.split(" ").slice(-2).join(" ");
+            const shortSource = String(bk.sourceName || "").replace(/\.com$/i, "");
+            const shortGuest = String(bk.guestName || "").split(" ").slice(-2).join(" ");
             const groupInfo = bk.bookingCode ? groupMap.get(normalizeGroupCode(bk.bookingCode)) : null;
             const payBadge = groupInfo ? getGroupCellPaymentBadge(groupInfo) : getCellPaymentBadge(bk);
 
@@ -1256,7 +1256,8 @@
       includeGroup: scopeVal !== "single",
       discountPercent,
       vatOverride,
-      extraBedRate
+      extraBedRate,
+      financeState: typeof store.getFinanceState === "function" ? store.getFinanceState() : null
     });
     confirmPdfState.lastData = data;
     if (!data) return;
@@ -2617,16 +2618,17 @@
       showToast("Chức năng Sao lưu dữ liệu chỉ dành cho Quản lý.");
       return;
     }
+    const source = window.matchMedia("(max-width: 768px)").matches ? "mobile" : "desktop";
     let payload = null;
     if (typeof store.exportUnifiedBackup === "function") {
-      const expRes = await store.exportUnifiedBackup({ source: "desktop" });
+      const expRes = await store.exportUnifiedBackup({ source });
       if (!expRes || !expRes.ok || !expRes.backup) {
         showToast((expRes && expRes.error) || "Không thể xuất bản sao lưu đầy đủ.");
         return;
       }
       payload = expRes.backup;
     } else {
-      payload = buildFullBackupPayload({ source: "desktop" });
+      payload = buildFullBackupPayload({ source });
     }
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -2932,17 +2934,29 @@
     if (modalRollback && typeof store.hasRollbackBackup === "function") modalRollback.disabled = !store.hasRollbackBackup();
   }
 
+  let backupWriteQueue = Promise.resolve();
+  async function getAutoBackup() {
+    if (!userCan("admin:backup")) throw new Error("Cần quyền quản lý để sao lưu.");
+    const result = await store.exportUnifiedBackup({ source: "auto", autoBackup: true });
+    if (!result || !result.ok || !result.backup || !userCan("admin:backup")) {
+      throw new Error((result && result.error) || "Chưa đọc đủ dữ liệu sao lưu.");
+    }
+    return result.backup;
+  }
+
   async function writeToLinkedBackupFile() {
     if (!autoBackupFileHandle) return false;
     try {
+      const data = JSON.stringify(await getAutoBackup(), null, 2);
       const writable = await autoBackupFileHandle.createWritable();
-      await writable.write(JSON.stringify(buildFullBackupPayload({ autoBackup: true }), null, 2));
+      await writable.write(data);
       await writable.close();
       const now = new Date();
       lastAutoFileSavedAt = `${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
       updateAutoBackupUI();
       return true;
-    } catch {
+    } catch (err) {
+      showToast("Chưa ghi được bản sao lưu tự động. " + err.message);
       return false;
     }
   }
@@ -2970,18 +2984,24 @@
 
   function onDataMutated(reason = "edit") {
     updateAutoBackupUI();
-    if (autoBackupFileHandle) {
-      writeToLinkedBackupFile();
-    } else if (isAutoDownloadBackupEnabled() && reason !== "restore") {
-      const now = new Date();
-      const stamp = `${getTodayISO()}_${pad2(now.getHours())}${pad2(now.getMinutes())}${pad2(now.getSeconds())}`;
-      const blob = new Blob([JSON.stringify(buildFullBackupPayload({ autoBackup: true }), null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `autobackup-dongvan-hotel-${stamp}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+    if (userCan("admin:backup") && (autoBackupFileHandle || isAutoDownloadBackupEnabled())) {
+      backupWriteQueue = backupWriteQueue.then(async () => {
+        if (!userCan("admin:backup")) return;
+        if (autoBackupFileHandle) {
+          await writeToLinkedBackupFile();
+        } else if (isAutoDownloadBackupEnabled() && reason !== "restore") {
+          const backup = await getAutoBackup();
+          const now = new Date();
+          const stamp = `${getTodayISO()}_${pad2(now.getHours())}${pad2(now.getMinutes())}${pad2(now.getSeconds())}`;
+          const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `autobackup-dongvan-hotel-${stamp}.json`;
+          a.click();
+          URL.revokeObjectURL(url);
+        }
+      }).catch(err => showToast("Chưa tạo được bản sao lưu tự động. " + err.message));
     }
     if ($("history-modal").classList.contains("open")) {
       renderHistoryModal();

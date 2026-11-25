@@ -69,6 +69,7 @@
       hasRollbackBackup: false,
       operatingCosts: Core.createDefaultOperatingCostsState(),
       financeState: isStandaloneLocal ? Core.createDefaultFinanceState() : null,
+      enterpriseGlState: null,
       housekeepingTasks: [],
       maintenanceIssues: [],
       roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
@@ -168,6 +169,7 @@
         hasRollbackBackup: stateCache.hasRollbackBackup,
         operatingCosts: stateCache.operatingCosts,
         financeState: stateCache.financeState,
+        enterpriseGlState: can("reports:management") ? stateCache.enterpriseGlState : null,
         financeLoadState,
         financeLoadError,
         housekeepingTasks: stateCache.housekeepingTasks,
@@ -298,6 +300,14 @@
         financeLoadState = "error";
         financeLoadError = "Máy chủ chưa trả về sổ tài chính hợp lệ.";
       }
+      if (!can("reports:management")) {
+        stateCache.enterpriseGlState = null;
+      } else if (Object.prototype.hasOwnProperty.call(data, "enterpriseGlState")) {
+        const ER = root.PMSEnterpriseReport;
+        stateCache.enterpriseGlState = data.enterpriseGlState && typeof data.enterpriseGlState === "object"
+          ? (ER && typeof ER.sanitizeEnterpriseGlState === "function" ? ER.sanitizeEnterpriseGlState(data.enterpriseGlState) : data.enterpriseGlState)
+          : (ER && typeof ER.createDefaultEnterpriseGlState === "function" ? ER.createDefaultEnterpriseGlState() : null);
+      }
       if (Array.isArray(data.housekeepingTasks)) {
         stateCache.housekeepingTasks = data.housekeepingTasks;
       }
@@ -324,6 +334,28 @@
       });
     }
 
+    function readLocalGlState() {
+      const ER = root.PMSEnterpriseReport;
+      if (!ER || typeof ER.createDefaultEnterpriseGlState !== "function") return null;
+      try {
+        const raw = root.localStorage && root.localStorage.getItem("ks_pms_enterprise_gl_v1");
+        if (raw) return ER.sanitizeEnterpriseGlState(JSON.parse(raw));
+      } catch {}
+      return ER.createDefaultEnterpriseGlState();
+    }
+
+    function writeLocalGlState(nextGl) {
+      const ER = root.PMSEnterpriseReport;
+      const clean = ER && typeof ER.sanitizeEnterpriseGlState === "function" ? ER.sanitizeEnterpriseGlState(nextGl) : nextGl;
+      if (clean) {
+        clean.glVersion = (Number(clean.glVersion) || 0) + 1;
+        clean.updatedAt = new Date().toISOString();
+        try { root.localStorage && root.localStorage.setItem("ks_pms_enterprise_gl_v1", JSON.stringify(clean)); } catch {}
+      }
+      stateCache.enterpriseGlState = clean;
+      return clean;
+    }
+
     function syncFromLocalCache(type = "state") {
       if (!localStore) return;
       stateCache.bookings = localStore.getBookings();
@@ -338,6 +370,7 @@
         financeLoadState = "loaded";
         financeLoadError = "";
       }
+      stateCache.enterpriseGlState = readLocalGlState();
       if (typeof localStore.getHousekeepingTasks === "function") {
         stateCache.housekeepingTasks = localStore.getHousekeepingTasks();
       }
@@ -740,6 +773,7 @@
         hasRollbackBackup: false,
         operatingCosts: null,
         financeState: null,
+        enterpriseGlState: null,
         housekeepingTasks: [],
         maintenanceIssues: [],
         roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
@@ -866,6 +900,7 @@
           bookings: stateCache.bookings,
           operatingCosts: stateCache.operatingCosts,
           financeState: stateCache.financeState,
+          enterpriseGlState: stateCache.enterpriseGlState,
           housekeepingTasks: stateCache.housekeepingTasks,
           maintenanceIssues: stateCache.maintenanceIssues,
           auditLogs: stateCache.auditLogs
@@ -882,8 +917,14 @@
       if (mode === "server") {
         return serverMutate("/api/import", "POST", { rawPayload });
       }
+      const inspected = Core.inspectBackupPayload(rawPayload);
       const res = await Core.runWithCrossTabLock(() => localStore.restoreFromImport(rawPayload));
-      if (res.ok) syncFromLocalCache("local_commit");
+      if (res.ok) {
+        if (inspected.ok && inspected.hasEnterpriseGlState && inspected.sanitized.enterpriseGlState) {
+          writeLocalGlState(inspected.sanitized.enterpriseGlState);
+        }
+        syncFromLocalCache("local_commit");
+      }
       return res;
     }
 
@@ -2262,6 +2303,158 @@
       }
     }
 
+    async function callGlEndpoint(url, method = "POST", body = null) {
+      if (!can("reports:management")) {
+        return { ok: false, status: 403, code: "FORBIDDEN", error: "Chỉ Quản lý / Kế toán trưởng mới có quyền thao tác Sổ cái doanh nghiệp." };
+      }
+      if (mode === "server") {
+        try {
+          const res = await fetchJson(url, { method, body: method === "GET" ? undefined : (body || {}), timeoutMs: 15000 });
+          if (res.status === 401) {
+            handleAuthExpired(res.data && res.data.error);
+            return { ok: false, status: 401, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
+          }
+          const data = res.data || { ok: false, error: "Lỗi máy chủ." };
+          if (data.ok && data.enterpriseGlState) {
+            const ER = root.PMSEnterpriseReport;
+            stateCache.enterpriseGlState = ER && typeof ER.sanitizeEnterpriseGlState === "function"
+              ? ER.sanitizeEnterpriseGlState(data.enterpriseGlState)
+              : data.enterpriseGlState;
+            if (typeof data.storeVersion === "number" && data.storeVersion >= storeVersion) {
+              storeVersion = data.storeVersion;
+            }
+            lastSyncedAt = new Date().toISOString();
+            emit({ type: method === "GET" ? "state" : "local_commit", state: getSnapshot(), status: getStatus() });
+          }
+          return data;
+        } catch {
+          return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Mất kết nối tới máy chủ." };
+        }
+      }
+      return { ok: false, code: "LOCAL_NOT_SUPPORTED", error: "Không hỗ trợ trực tiếp." };
+    }
+
+    async function refreshEnterpriseGlState() {
+      if (mode === "server") return callGlEndpoint("/api/gl/state", "GET");
+      stateCache.enterpriseGlState = readLocalGlState();
+      return { ok: true, enterpriseGlState: stateCache.enterpriseGlState };
+    }
+
+    async function saveEnterpriseGlSetup(payload = {}) {
+      if (mode === "server") return callGlEndpoint("/api/gl/setup", "POST", payload);
+      const gl = readLocalGlState();
+      const next = { ...gl, ...(payload || {}) };
+      const saved = writeLocalGlState(next);
+      emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+      return { ok: true, enterpriseGlState: saved };
+    }
+
+    async function postGlJournalEntry(payload = {}) {
+      if (mode === "server") return callGlEndpoint("/api/gl/entries", "POST", payload);
+      const ER = root.PMSEnterpriseReport;
+      const gl = readLocalGlState();
+      try {
+        const clean = ER.validateJournalEntry(payload, gl);
+        if (ER.isPeriodLocked(gl, clean.entityId, clean.periodKey)) {
+          return { ok: false, status: 409, code: "PERIOD_LOCKED", error: `Kỳ ${clean.periodKey} đã khóa.` };
+        }
+        gl.entries = [...gl.entries, clean];
+        const saved = writeLocalGlState(gl);
+        emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        return { ok: true, entry: clean, enterpriseGlState: saved };
+      } catch (err) {
+        return { ok: false, status: 400, code: "INVALID_JOURNAL_ENTRY", error: err && err.message ? err.message : "Bút toán không hợp lệ." };
+      }
+    }
+
+    async function reverseGlJournalEntry(entryId, payload = {}) {
+      if (mode === "server") return callGlEndpoint(`/api/gl/entries/${encodeURIComponent(entryId)}/reverse`, "POST", payload);
+      const ER = root.PMSEnterpriseReport;
+      const gl = readLocalGlState();
+      const idx = gl.entries.findIndex((e) => e.id === entryId);
+      if (idx < 0) return { ok: false, status: 404, code: "NOT_FOUND", error: "Không tìm thấy bút toán." };
+      const orig = gl.entries[idx];
+      const reason = Core.sanitizeText(payload.reason || payload.note, 300);
+      if (!reason) return { ok: false, status: 400, code: "REASON_REQUIRED", error: "Vui lòng nhập lý do đảo bút toán." };
+      const revDate = Core.isValidISODate(payload.reversalDate) ? payload.reversalDate : orig.postingDate;
+      if (ER.isPeriodLocked(gl, orig.entityId, revDate.slice(0, 7))) {
+        return { ok: false, status: 409, code: "PERIOD_LOCKED", error: `Kỳ ${revDate.slice(0, 7)} đã khóa.` };
+      }
+      const rev = ER.validateJournalEntry({
+        ...orig,
+        id: undefined,
+        voucherNo: `REV-${orig.voucherNo}`,
+        postingDate: revDate,
+        sourceType: "reversal",
+        sourceEventId: orig.id,
+        eventType: "reversal",
+        reversesEntryId: orig.id,
+        note: `Đảo bút toán ${orig.voucherNo}: ${reason}`,
+        lines: orig.lines.map((l) => ({ ...l, debit: l.credit || 0, credit: l.debit || 0 }))
+      }, gl);
+      gl.entries[idx] = { ...orig, status: "reversed", reversedByEntryId: rev.id };
+      gl.entries.push(rev);
+      const saved = writeLocalGlState(gl);
+      emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+      return { ok: true, originalEntry: gl.entries[idx], reversalEntry: rev, enterpriseGlState: saved };
+    }
+
+    async function importGlJournal(payload = {}) {
+      if (mode === "server") return callGlEndpoint("/api/gl/import", "POST", payload);
+      const ER = root.PMSEnterpriseReport;
+      const gl = readLocalGlState();
+      const journal = payload && payload.journal ? payload.journal : payload;
+      try {
+        const validated = (journal.entries || []).map((e, i) => ER.validateJournalEntry({
+          ...e,
+          id: undefined,
+          voucherNo: e.voucherNo || e.id || `IMP-${i + 1}`,
+          sourceType: "external_import",
+          sourceEventId: e.id || `imp_${i + 1}`,
+          eventType: "import"
+        }, gl));
+        gl.entries = [...gl.entries.filter((e) => e.sourceType !== "external_import"), ...validated];
+        const saved = writeLocalGlState(gl);
+        emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        return { ok: true, insertedCount: validated.length, enterpriseGlState: saved };
+      } catch (err) {
+        return { ok: false, status: 400, code: "INVALID_ENTRY_IN_IMPORT", error: err && err.message ? err.message : "File nhập lỗi." };
+      }
+    }
+
+    async function syncPmsToGl(payload = {}) {
+      if (mode === "server") return callGlEndpoint("/api/gl/sync-pms", "POST", payload);
+      const ER = root.PMSEnterpriseReport;
+      const gl = readLocalGlState();
+      const p = ER.period(payload.anchor || Core.getVietnamTodayISO().slice(0, 7), payload.kind || "month");
+      const built = ER.buildPmsAutoPostEntries({ bookings: stateCache.bookings, financeState: stateCache.financeState, operatingCosts: stateCache.operatingCosts }, gl, p, { sourceMode: payload.sourceMode || gl.sourceMode });
+      const openEntries = built.entries.filter((e) => !ER.isPeriodLocked(gl, e.entityId, e.periodKey));
+      gl.entries = [...gl.entries, ...openEntries];
+      const saved = writeLocalGlState(gl);
+      emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+      return { ok: true, postedCount: openEntries.length, unresolvedLegacy: built.unresolvedLegacy, enterpriseGlState: saved };
+    }
+
+    async function transitionGlPeriod(payload = {}) {
+      if (mode === "server") return callGlEndpoint("/api/gl/periods/transition", "POST", payload);
+      const ER = root.PMSEnterpriseReport;
+      const gl = readLocalGlState();
+      const pk = String(payload.periodKey || payload.month || "");
+      const entityId = payload.entityId || gl.activeEntityId;
+      const stateKey = ER.periodStateKey(entityId, pk);
+      const prev = (gl.periods && gl.periods[stateKey]) || { entityId, periodKey: pk, status: "draft", version: 0, history: [], unlockHistory: [] };
+      const mapAct = { reconcile: "reconciled", approve: "approved", lock: "locked", unlock: "draft" };
+      const nextStatus = mapAct[payload.action];
+      if (!nextStatus) return { ok: false, status: 400, error: "Hành động không hợp lệ." };
+      if (payload.action === "unlock" && !Core.sanitizeText(payload.reason, 400)) {
+        return { ok: false, status: 400, code: "REASON_REQUIRED", error: "Vui lòng nhập lý do mở khóa." };
+      }
+      gl.periods[stateKey] = { ...prev, status: nextStatus, updatedAt: new Date().toISOString() };
+      const saved = writeLocalGlState(gl);
+      emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+      return { ok: true, periodState: gl.periods[stateKey], enterpriseGlState: saved };
+    }
+
     function runHealthCheck() {
       if (mode === "server") {
         const consistency = Core.auditBookingConsistency(stateCache.bookings);
@@ -2295,6 +2488,14 @@
       checkAppVersion,
       getVersionInfo,
       getAuthState,
+      getEnterpriseGlState: () => (can("reports:management") ? stateCache.enterpriseGlState : null),
+      refreshEnterpriseGlState,
+      saveEnterpriseGlSetup,
+      postGlJournalEntry,
+      reverseGlJournalEntry,
+      importGlJournal,
+      syncPmsToGl,
+      transitionGlPeriod,
       getRole: getCurrentRole,
       can,
       login,

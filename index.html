@@ -83,6 +83,7 @@
             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3"/><path d="M16 12h5v4h-5a2 2 0 0 1 0-4z"/></svg></span>
             <span class="nav-label">Chi phí &amp; giá vốn</span>
           </button>
+          <button id="btn-enterprise-report" hidden class="nav-item" type="button" data-nav-key="enterprise_report"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-label">Báo cáo tài chính</span></button>
         </div>
 
         <div class="nav-group" data-nav-group="system">
@@ -1745,6 +1746,58 @@
     </div>
   </div>
 
+  <dialog id="enterprise-report" aria-labelledby="er-title">
+    <header>
+      <div class="er-head-title">
+        <h2 id="er-title">Báo cáo tài chính &amp; Sổ cái doanh nghiệp</h2>
+        <span id="er-lock-badge" class="er-badge" hidden></span>
+      </div>
+      <button id="er-close" type="button">Đóng</button>
+    </header>
+    <div class="er-tools">
+      <label>Nguồn số liệu
+        <select id="er-mode">
+          <option value="hotel">Hoạt động khách sạn (PMS)</option>
+          <option value="server_gl">Sổ cái doanh nghiệp (Máy chủ)</option>
+          <option value="ledger">Sổ kế toán toàn doanh nghiệp (File JSON)</option>
+        </select>
+      </label>
+      <label>Kỳ
+        <select id="er-kind">
+          <option value="month">Tháng</option>
+          <option value="quarter">Quý</option>
+          <option value="year">Năm</option>
+          <option value="ytd">Lũy kế năm (YTD)</option>
+        </select>
+      </label>
+      <label>Tháng thuộc kỳ<input type="month" id="er-month" required></label>
+      <label>So sánh
+        <select id="er-compare">
+          <option value="none">Không so sánh</option>
+          <option value="prev_period">Kỳ trước</option>
+          <option value="yoy">Cùng kỳ năm trước</option>
+        </select>
+      </label>
+      <button type="button" id="er-refresh">Cập nhật</button>
+      <button type="button" id="er-csv">Xuất CSV</button>
+      <button type="button" id="er-xlsx">Xuất Excel (.xlsx)</button>
+      <button type="button" id="er-pdf">In / PDF A4</button>
+    </div>
+    <div id="er-import" hidden>
+      <button id="er-template" type="button">Tải mẫu nhật ký JSON</button>
+      <label>Nạp sổ kế toán <input type="file" id="er-file" accept=".json,application/json"></label>
+    </div>
+    <div id="er-tabs" class="er-tabs" role="tablist">
+      <button type="button" class="er-tab active" data-tab="statements" role="tab" aria-selected="true">Báo cáo tài chính</button>
+      <button type="button" class="er-tab" data-tab="hotel_kpi" role="tab" aria-selected="false">Quản trị KS &amp; Dự báo 13 tuần</button>
+      <button type="button" class="er-tab" data-tab="gl_ops" role="tab" aria-selected="false">Sổ cái &amp; Nhập liệu</button>
+      <button type="button" class="er-tab" data-tab="reconcile_close" role="tab" aria-selected="false">Cân đối, Đối chiếu &amp; Khóa kỳ</button>
+      <button type="button" class="er-tab" data-tab="notes" role="tab" aria-selected="false">Thuyết minh &amp; Bản đã chốt</button>
+    </div>
+    <p id="er-status" role="status"></p>
+    <div id="er-drilldown" class="er-drilldown" hidden></div>
+    <div id="er-body"></div>
+  </dialog>
   <script src="pms-core.js"></script>
   <script src="supabase-config.js"></script>
   <script src="pms-supabase.js"></script>
@@ -1752,5 +1805,7 @@
   <script src="app.js"></script>
   <script src="finance-ui.js"></script>
   <script src="mobile.js"></script>
+  <script src="enterprise-report.js"></script>
+  <script src="enterprise-ui.js"></script>
 </body>
 </html>
