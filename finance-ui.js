@@ -40,8 +40,10 @@
     computeReceivablesReport,
     computeCashbookReport,
     computeCalendarFinanceKPIs,
+    computeSupplierPayablesReport,
     generateReceivablesCsvContent,
     generateCashbookCsvContent,
+    generateSupplierPayablesCsvContent,
     getFinanceFundById,
     getPaymentMethodMeta
   } = Core;
@@ -51,13 +53,22 @@
     bookingInlineForm: null, // null | "collect" | "service" | "adjust" | "refund" | "cancel"
     bookingStaleConflict: null, // { message, currentBalance, pendingPayload }
     arTab: "list", // "list" | "legacy"
+    arDueFilter: "all", // "all" | "debt" | "due" | "overdue" | "no_due_date"
     arExpandedKeys: new Set(),
     arQuickCollectKey: null,
     arLastMigrationResult: null,
     cbTab: "ledger", // "ledger" | "legacy" | "logs"
     cbDrawer: null, // null | "transfer" | "opening" | "reconcile" | "adjust"
     monthlyReceiptsYear: null,
-    monthlyReceiptsMonth0: null
+    monthlyReceiptsMonth0: null,
+    // Phase 2: Supplier Invoices & Accounts Payable
+    apFormOpen: false,
+    apEditId: null,
+    apFormAttachment: null,
+    apExpandedIds: new Set(),
+    apPayInvoiceId: null,
+    apFocusInvoiceId: null,
+    apStaleConflict: null // { invoiceId, code, message, currentRemaining, pendingPayload }
   };
 
   const $ = (id) => document.getElementById(id);
@@ -84,6 +95,11 @@
   function getFinanceState() {
     const f = typeof store.getFinanceState === "function" ? store.getFinanceState() : null;
     return f || Core.createDefaultFinanceState();
+  }
+
+  function getOperatingCostsState() {
+    const c = typeof store.getOperatingCosts === "function" ? store.getOperatingCosts() : null;
+    return c || Core.createDefaultOperatingCostsState();
   }
 
   function formatDateTimeVN(iso) {
@@ -115,6 +131,7 @@
     if (!bookingId) return;
     closeReceivables();
     closeCashbook();
+    closePayables();
     closeMonthlyReceipts();
     const isMobile = document.body.classList.contains("is-mobile-ui") || window.innerWidth <= 768;
     if (isMobile && root.PMSMobileApi && typeof root.PMSMobileApi.openBooking === "function") {
@@ -153,14 +170,14 @@
       </div>
     `).join("");
     return `
-      <div style="font-weight:800;">⚠️ Có ${pending.length} giao dịch chưa nhận phản hồi từ máy chủ (KHÔNG tự ghi "Đã thu" để tránh thu trùng)</div>
+      <div style="font-weight:800;">⚠️ Có ${pending.length} giao dịch chưa nhận phản hồi từ máy chủ (KHÔNG tự ghi nhận hoàn tất để tránh tạo chứng từ trùng)</div>
       ${rowsHtml}
     `;
   }
 
   function syncPendingBars() {
     const html = renderPendingIntentsMarkup();
-    ["ar-pending-intents-bar", "cb-pending-intents-bar"].forEach((id) => {
+    ["ar-pending-intents-bar", "cb-pending-intents-bar", "ap-pending-intents-bar"].forEach((id) => {
       const el = $(id);
       if (!el) return;
       if (html) {
@@ -880,6 +897,7 @@
     if (!modal) return;
 
     if (opts.tab) uiState.arTab = opts.tab;
+    if (opts.dueFilter !== undefined) uiState.arDueFilter = opts.dueFilter || "all";
     if (opts.asOfDate !== undefined && $("ar-filter-asof")) {
       $("ar-filter-asof").value = opts.asOfDate || getVietnamTodayISO();
     } else if ($("ar-filter-asof") && !$("ar-filter-asof").value) {
@@ -918,6 +936,7 @@
       search: ($("ar-filter-search") && $("ar-filter-search").value) || "",
       entityType: ($("ar-filter-entity") && $("ar-filter-entity").value) || "all",
       status: ($("ar-filter-status") && $("ar-filter-status").value) || "all",
+      dueFilter: uiState.arDueFilter || "all",
       asOfDate: ($("ar-filter-asof") && $("ar-filter-asof").value) || getVietnamTodayISO()
     };
   }
@@ -943,24 +962,33 @@
       legBadge.style.display = legCount > 0 ? "" : "none";
     }
 
-    // KPI Summary Strip
+    // KPI Summary Strip (explicitly splits Đã thu ròng into confirmed fund vs opening-included vs unassigned legacy)
     const strip = $("ar-summary-strip");
     if (strip) {
+      const paidSourceParts = [
+        `Đã xác định quỹ: <strong id="ar-kpi-paid-confirmed">${escapeHtml(formatVND(report.totalConfirmedFundNetPaid))}</strong>`
+      ];
+      if (report.totalOpeningIncludedLegacyPaid > 0) {
+        paidSourceParts.push(`Trong số dư đầu kỳ: <strong id="ar-kpi-paid-opening">${escapeHtml(formatVND(report.totalOpeningIncludedLegacyPaid))}</strong>`);
+      }
+      paidSourceParts.push(`Chuyển tiếp chưa xác định quỹ: <strong id="ar-kpi-paid-legacy" style="color:${report.totalUnassignedLegacyPaid > 0 ? "#b45309" : "inherit"};">${escapeHtml(formatVND(report.totalUnassignedLegacyPaid))}</strong>`);
+
       strip.innerHTML = `
         <div class="fin-kpi-card">
           <span class="fin-stat-lbl">Tổng giá trị đơn (đến ${escapeHtml(formatDateVN(report.asOfDate))})</span>
           <span class="fin-stat-val">${escapeHtml(formatVND(report.totalPayable))}</span>
-          <span class="fin-stat-sub">${report.rows.length} mục đang lọc</span>
+          <span class="fin-stat-sub">${report.rows.length} mục đang hiển thị</span>
         </div>
         <div class="fin-kpi-card success">
           <span class="fin-stat-lbl">Đã thu ròng</span>
-          <span class="fin-stat-val ok">${escapeHtml(formatVND(report.totalNetPaid))}</span>
-          <span class="fin-stat-sub">${report.totalRefunded > 0 ? `Đã hoàn ${escapeHtml(formatVND(report.totalRefunded))}` : "Thu thực tế sau hoàn"}</span>
+          <span class="fin-stat-val ok" id="ar-kpi-net-paid">${escapeHtml(formatVND(report.totalNetPaid))}</span>
+          <div class="fin-paid-source-line">${paidSourceParts.join("<br/>")}</div>
+          ${report.totalRefunded > 0 ? `<span class="fin-stat-sub">Đã hoàn: ${escapeHtml(formatVND(report.totalRefunded))}</span>` : ""}
         </div>
         <div class="fin-kpi-card danger">
           <span class="fin-stat-lbl">Tổng công nợ còn phải thu</span>
           <span class="fin-stat-val warn" id="ar-kpi-total-debt">${escapeHtml(formatVND(report.totalRemaining))}</span>
-          <span class="fin-stat-sub">${report.debtCount} đơn/đoàn còn nợ</span>
+          <span class="fin-stat-sub">${report.debtCount} đơn/đoàn còn nợ${uiState.arDueFilter !== "all" ? " (đang lọc theo hạn)" : ""}</span>
         </div>
         <div class="fin-kpi-card highlight">
           <span class="fin-stat-lbl">Trả thừa / Cọc đơn hủy</span>
@@ -968,6 +996,40 @@
           <span class="fin-stat-sub">${report.totalCancelledHeldDeposit > 0 ? `Gồm ${escapeHtml(formatVND(report.totalCancelledHeldDeposit))} cọc đơn hủy` : `${report.overpaidCount} mục trả thừa`}</span>
         </div>
       `;
+    }
+
+    // Phase 2: Clickable Due-Date Buckets Strip (each card clicks to filter exact constituent bookings)
+    const dueStrip = $("ar-due-buckets-strip");
+    if (dueStrip) {
+      if (uiState.arTab === "legacy") {
+        dueStrip.style.display = "none";
+        dueStrip.innerHTML = "";
+      } else {
+        dueStrip.style.display = "grid";
+        const curDue = uiState.arDueFilter || "all";
+        dueStrip.innerHTML = `
+          <button type="button" class="fin-due-card all_debt ${curDue === "debt" ? "active" : ""}" id="btn-ar-bucket-all-debt" data-ar-due-filter="debt" title="Bấm để xem toàn bộ đơn còn nợ">
+            <span class="fin-due-label">Còn lại (tất cả đơn)</span>
+            <span class="fin-due-val" id="ar-bucket-all-debt-val">${escapeHtml(formatVND(report.allDebtAmount))}</span>
+            <span class="fin-due-sub">${report.allDebtCount} đơn/đoàn • ${curDue === "debt" ? "Đang lọc (bấm để bỏ)" : "Bấm xem danh sách"}</span>
+          </button>
+          <button type="button" class="fin-due-card due ${curDue === "due" ? "active" : ""}" id="btn-ar-bucket-due" data-ar-due-filter="due" title="Bấm để xem danh sách đơn đến hạn thanh toán / hạn cọc">
+            <span class="fin-due-label">Đến hạn thanh toán</span>
+            <span class="fin-due-val amber" id="ar-bucket-due-val">${escapeHtml(formatVND(report.dueAmount))}</span>
+            <span class="fin-due-sub">${report.dueCount} đơn/đoàn • ${curDue === "due" ? "Đang lọc (bấm để bỏ)" : "Bấm xem danh sách"}</span>
+          </button>
+          <button type="button" class="fin-due-card overdue ${curDue === "overdue" ? "active" : ""}" id="btn-ar-bucket-overdue" data-ar-due-filter="overdue" title="Bấm để xem danh sách đơn quá hạn thanh toán / hạn cọc">
+            <span class="fin-due-label">Quá hạn thanh toán</span>
+            <span class="fin-due-val warn" id="ar-bucket-overdue-val">${escapeHtml(formatVND(report.overdueAmount))}</span>
+            <span class="fin-due-sub">${report.overdueCount} đơn/đoàn • ${curDue === "overdue" ? "Đang lọc (bấm để bỏ)" : "Bấm xem danh sách"}</span>
+          </button>
+          <button type="button" class="fin-due-card no_due_date ${curDue === "no_due_date" ? "active" : ""}" id="btn-ar-bucket-nodue" data-ar-due-filter="no_due_date" title="Bấm để xem đơn cũ chưa khai báo hạn cọc / hạn thanh toán">
+            <span class="fin-due-label">Chưa xác định hạn</span>
+            <span class="fin-due-val" id="ar-bucket-nodue-val">${escapeHtml(formatVND(report.noDueDateAmount))}</span>
+            <span class="fin-due-sub">${report.noDueDateCount} đơn/đoàn • ${curDue === "no_due_date" ? "Đang lọc (bấm để bỏ)" : "Bấm xem danh sách"}</span>
+          </button>
+        `;
+      }
     }
 
     // Optional Migration Preview/Result Box
@@ -1020,12 +1082,12 @@
     if (!content) return;
 
     if (uiState.arTab === "legacy") {
-      renderReceivablesLegacyTab(content, allReportForBadge);
+      renderReceivablesLegacyTab(content, allReportForBadge, fState);
       return;
     }
 
     if (report.rows.length === 0) {
-      content.innerHTML = `<div class="fin-empty">Không có đơn hoặc đoàn nào khớp bộ lọc hiện tại (tính đến ${escapeHtml(formatDateVN(report.asOfDate))}).</div>`;
+      content.innerHTML = `<div class="fin-empty">Không có đơn hoặc đoàn nào khớp bộ lọc hiện tại (tính đến ${escapeHtml(formatDateVN(report.asOfDate))}).${uiState.arDueFilter !== "all" ? ` <button type="button" class="fin-link-btn" data-ar-due-filter="all">Xem tất cả hạn</button>` : ""}</div>`;
       return;
     }
 
@@ -1047,19 +1109,30 @@
           : row.overpaid > 0
             ? `<span class="fin-pill info">Trả thừa ${escapeHtml(formatVND(row.overpaid))}</span>`
             : '<span class="fin-pill ok">Đã thu đủ</span>';
+      const dueBadge = row.remaining > 0
+        ? (row.dueBucket === "overdue"
+            ? `<span class="fin-pill warn">Quá hạn ${escapeHtml(formatDateVN(row.effectiveDueDate))}</span>`
+            : row.dueBucket === "due"
+              ? `<span class="fin-pill amber">Đến hạn ${escapeHtml(formatDateVN(row.effectiveDueDate))}</span>`
+              : row.dueBucket === "not_due"
+                ? `<span class="fin-pill muted">Hạn ${escapeHtml(formatDateVN(row.effectiveDueDate))}</span>`
+                : `<span class="fin-pill muted">Chưa xác định hạn</span>`)
+        : "";
       const title = row.entityType === "group"
         ? `👥 Đoàn ${escapeHtml(row.groupCodeDisplay)} (${row.roomCount} phòng: ${escapeHtml(row.roomLabel)})`
         : `🚪 ${escapeHtml(row.roomLabel)} • ${escapeHtml(row.guestName)}`;
       const primaryBkId = row.bookingId || (row.bookings[0] && row.bookings[0].id) || "";
 
       return `
-        <div class="fin-ar-card ${cardClass}" data-ar-entity="${escapeHtml(row.entityKey)}">
+        <div class="fin-ar-card ${cardClass}" data-ar-entity="${escapeHtml(row.entityKey)}" data-ar-due-bucket="${escapeHtml(row.dueBucket || "")}">
           <div class="fin-ar-card-head" data-ar-toggle="${escapeHtml(row.entityKey)}">
             <div style="min-width:0; flex:1;">
               <div style="font-weight:800; font-size:13px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
                 <span>${title}</span>
                 ${statusPill}
-                ${row.hasLegacyNeedsReconcile ? '<span class="fin-pill amber">Dữ liệu chuyển tiếp – cần đối soát</span>' : ""}
+                ${dueBadge}
+                ${row.hasLegacyNeedsReconcile ? '<span class="fin-pill amber">Chuyển tiếp – cần đối soát</span>' : ""}
+                ${row.openingIncludedLegacyPaid > 0 ? `<span class="fin-pill info">Đầu kỳ ${escapeHtml(formatVND(row.openingIncludedLegacyPaid))}</span>` : ""}
               </div>
               <div style="font-size:11.5px; color:var(--text-secondary); margin-top:3px;">
                 ${escapeHtml(row.guestName)} ${row.phone ? `• ${escapeHtml(row.phone)}` : ""}
@@ -1078,7 +1151,10 @@
                 <div style="font-size:11.5px; color:var(--text-secondary);">
                   Tiền phòng: <strong>${escapeHtml(formatVND(row.roomAmount))}</strong> •
                   Dịch vụ: <strong>${escapeHtml(formatVND(row.servicesTotal))}</strong> •
-                  Điều chỉnh: <strong>${escapeHtml(formatSignedVND(row.adjustmentsTotal))}</strong>
+                  Điều chỉnh: <strong>${escapeHtml(formatSignedVND(row.adjustmentsTotal))}</strong> •
+                  Đã xác định quỹ: <strong>${escapeHtml(formatVND(row.confirmedFundNetPaid))}</strong>
+                  ${row.openingIncludedLegacyPaid > 0 ? ` • Trong đầu kỳ: <strong>${escapeHtml(formatVND(row.openingIncludedLegacyPaid))}</strong>` : ""}
+                  ${row.unassignedLegacyPaid > 0 ? ` • Chuyển tiếp chưa gán quỹ: <strong style="color:#b45309;">${escapeHtml(formatVND(row.unassignedLegacyPaid))}</strong>` : ""}
                 </div>
                 <div style="display:flex; gap:6px; flex-wrap:wrap;">
                   ${canCollect && !row.allCancelled ? `<button type="button" class="btn btn-sm btn-primary" data-ar-quick-collect="${escapeHtml(row.entityKey)}">+ Thu tiền nhanh</button>` : ""}
@@ -1089,20 +1165,22 @@
               ${row.transactions.length > 0 ? `
                 <div class="fin-table-wrap">
                   <table class="fin-tx-table">
-                    <thead><tr><th>Mã CT</th><th>Ngày thực nhận</th><th>Loại</th><th>Quỹ</th><th class="num">Số tiền</th><th>Người thao tác</th><th>Ghi chú</th></tr></thead>
+                    <thead><tr><th>Mã CT</th><th>Ngày thực nhận</th><th>Loại</th><th>Quỹ / Nguồn</th><th class="num">Số tiền</th><th>Người thao tác</th><th>Ghi chú / Căn cứ</th></tr></thead>
                     <tbody>
                       ${row.transactions.map((tx) => {
                         const isRef = tx.txType === "customer_refund";
+                        const isOpeningLeg = tx.txType === "legacy_payment" && tx.legacyStatus === "reconciled_in_opening";
                         const amt = isRef ? -parseVND(tx.amount) : parseVND(tx.amount);
+                        const fundText = isOpeningLeg ? "Đã nằm trong số dư đầu kỳ" : getFinanceFundById(tx.fundId).shortName;
                         return `
                           <tr>
                             <td><span class="fin-voucher-code">${escapeHtml(tx.voucherCode)}</span></td>
-                            <td>${tx.receivedDate ? escapeHtml(formatDateVN(tx.receivedDate)) : '<span class="fin-pill amber">Cần đối soát</span>'}</td>
-                            <td>${isRef ? '<span class="fin-pill warn">Hoàn tiền</span>' : tx.txType === "legacy_payment" ? '<span class="fin-pill amber">Chuyển tiếp</span>' : '<span class="fin-pill ok">Thu tiền</span>'}</td>
-                            <td>${escapeHtml(getFinanceFundById(tx.fundId).shortName)}</td>
+                            <td>${tx.receivedDate ? escapeHtml(formatDateVN(tx.receivedDate)) : (isOpeningLeg ? '<span class="fin-pill info">Trong đầu kỳ</span>' : '<span class="fin-pill amber">Cần đối soát</span>')}</td>
+                            <td>${isRef ? '<span class="fin-pill warn">Hoàn tiền</span>' : isOpeningLeg ? '<span class="fin-pill info">Chuyển tiếp (Đầu kỳ)</span>' : tx.txType === "legacy_payment" ? '<span class="fin-pill amber">Chuyển tiếp</span>' : '<span class="fin-pill ok">Thu tiền</span>'}</td>
+                            <td>${escapeHtml(fundText)}</td>
                             <td class="num" style="font-weight:800;">${escapeHtml(formatSignedVND(amt))}</td>
                             <td>${escapeHtml(tx.operator || "—")}</td>
-                            <td>${escapeHtml(tx.reason || tx.note || "—")}</td>
+                            <td>${escapeHtml(tx.reconcileEvidence ? `Căn cứ: ${tx.reconcileEvidence}` : (tx.reason || tx.note || "—"))}</td>
                           </tr>
                         `;
                       }).join("")}
@@ -1162,13 +1240,16 @@
     `;
   }
 
-  function renderReceivablesLegacyTab(content, report) {
+  function renderReceivablesLegacyTab(content, report, fState) {
     const legRows = report.rows.filter((r) => r.hasLegacyNeedsReconcile);
+    const legTxs = (report.legacyTransactions || []);
     const isManager = can("admin:backup");
+    const canVerify = can("finance:reconcile");
     const headerHtml = `
       <div class="fin-panel-head" style="margin-bottom:8px;">
         <div style="font-size:12px; color:var(--text-secondary);">
-          Các đơn cũ có tổng "đã thu" nhưng thiếu ngày thực nhận hoặc tài khoản/quỹ nhận được bảo toàn chính xác số tiền, đánh dấu <strong>"Dữ liệu chuyển tiếp – cần đối soát"</strong> (không tự bịa ngày hôm nay hoặc tự gán Tiền mặt/Ngân hàng).
+          Các đơn cũ có tổng "đã thu" nhưng thiếu ngày thực nhận hoặc quỹ nhận được tách riêng thành <strong>"Chuyển tiếp chưa xác định quỹ"</strong>.
+          Khi Quản lý xác minh, cần chọn rõ khoản này <strong>đã nằm trong số dư đầu kỳ</strong> (không cộng lại vào quỹ) hay <strong>ghi bổ sung vào quỹ</strong> kèm căn cứ đối soát.
         </div>
         ${isManager ? `
           <div style="display:flex; gap:6px; flex-wrap:wrap;">
@@ -1179,45 +1260,98 @@
       </div>
     `;
 
-    if (legRows.length === 0) {
+    if (legRows.length === 0 && legTxs.length === 0) {
       content.innerHTML = `${headerHtml}<div class="fin-empty">✅ Hiện không có dữ liệu chuyển tiếp nào cần đối soát.</div>`;
       return;
     }
 
-    content.innerHTML = `
-      ${headerHtml}
-      <div class="fin-table-wrap">
+    const todayVN = getVietnamTodayISO();
+    const verifyTxTable = (canVerify && legTxs.length > 0) ? `
+      <div style="font-weight:800; font-size:12.5px; margin:10px 0 6px;">Xác minh chứng từ chuyển tiếp (${legTxs.length} phiếu)</div>
+      <div class="fin-table-wrap" style="margin-bottom:12px;">
         <table class="fin-tx-table">
           <thead>
             <tr>
-              <th>Đơn / Đoàn</th>
-              <th>Khách hàng</th>
-              <th class="num">Đã thu chuyển tiếp</th>
-              <th class="num">Còn nợ</th>
-              <th>Trạng thái</th>
-              <th>Thao tác</th>
+              <th>Mã CT</th>
+              <th class="num">Số tiền</th>
+              <th>Cách xử lý quỹ *</th>
+              <th>Ngày / Quỹ (nếu ghi bổ sung)</th>
+              <th>Căn cứ đối soát *</th>
+              <th>Xác minh</th>
             </tr>
           </thead>
           <tbody>
-            ${legRows.map((r) => {
-              const primaryBkId = r.bookingId || (r.bookings[0] && r.bookings[0].id) || "";
-              return `
-                <tr>
-                  <td><strong>${r.entityType === "group" ? `Đoàn ${escapeHtml(r.groupCodeDisplay)}` : escapeHtml(r.roomLabel)}</strong></td>
-                  <td>${escapeHtml(r.guestName)}</td>
-                  <td class="num" style="font-weight:800;">${escapeHtml(formatVND(r.legacyMigratedPaid + r.unmigratedLegacyPaid))}</td>
-                  <td class="num">${escapeHtml(formatVND(r.remaining))}</td>
-                  <td><span class="fin-pill amber">Dữ liệu chuyển tiếp – cần đối soát</span></td>
-                  <td>
-                    <button type="button" class="fin-link-btn" data-fin-jump-booking="${escapeHtml(primaryBkId)}">Mở đơn</button>
-                    ${can("finance:cashbook_read") ? ` • <button type="button" class="fin-link-btn" data-fin-goto-cb-legacy="1">Gán quỹ/ngày ở Sổ quỹ</button>` : ""}
-                  </td>
-                </tr>
-              `;
-            }).join("")}
+            ${legTxs.map((tx) => `
+              <tr data-legacy-verify-row="${escapeHtml(tx.id)}">
+                <td>
+                  <span class="fin-voucher-code">${escapeHtml(tx.voucherCode)}</span>
+                  <div style="font-size:10.5px; color:var(--text-muted);">${escapeHtml(tx.note || "")}</div>
+                </td>
+                <td class="num" style="font-weight:800;">${escapeHtml(formatVND(tx.amount))}</td>
+                <td>
+                  <select class="select" data-leg-resolution style="min-width:190px;">
+                    <option value="included_in_opening">Đã nằm trong số dư đầu kỳ (không cộng quỹ)</option>
+                    <option value="record_to_fund">Ghi bổ sung vào quỹ thực tế</option>
+                  </select>
+                </td>
+                <td>
+                  <div style="display:flex; gap:4px; flex-wrap:wrap;">
+                    <input class="input" data-leg-date type="date" value="${escapeHtml(tx.receivedDate || todayVN)}" style="min-width:128px;" disabled />
+                    <select class="select" data-leg-fund style="min-width:130px;" disabled>
+                      ${FINANCE_FUNDS.filter((f) => !f.isLegacyBucket).map((f) => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.shortName)}</option>`).join("")}
+                    </select>
+                  </div>
+                </td>
+                <td>
+                  <input class="input" data-leg-evidence type="text" placeholder="VD: BBKK đầu kỳ 01/11, Sao kê NH..." style="min-width:165px;" />
+                </td>
+                <td>
+                  <button type="button" class="btn btn-sm btn-primary" data-leg-verify-submit="${escapeHtml(tx.id)}">✓ Xác minh</button>
+                </td>
+              </tr>
+            `).join("")}
           </tbody>
         </table>
       </div>
+    ` : "";
+
+    content.innerHTML = `
+      ${headerHtml}
+      ${verifyTxTable}
+      ${legRows.length > 0 ? `
+        <div class="fin-table-wrap">
+          <table class="fin-tx-table">
+            <thead>
+              <tr>
+                <th>Đơn / Đoàn</th>
+                <th>Khách hàng</th>
+                <th class="num">Chuyển tiếp chưa gán quỹ</th>
+                <th class="num">Còn nợ</th>
+                <th>Trạng thái</th>
+                <th>Thao tác</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${legRows.map((r) => {
+                const primaryBkId = r.bookingId || (r.bookings[0] && r.bookings[0].id) || "";
+                return `
+                  <tr>
+                    <td><strong>${r.entityType === "group" ? `Đoàn ${escapeHtml(r.groupCodeDisplay)}` : escapeHtml(r.roomLabel)}</strong></td>
+                    <td>${escapeHtml(r.guestName)}</td>
+                    <td class="num" style="font-weight:800;">${escapeHtml(formatVND(r.unassignedLegacyPaid))}</td>
+                    <td class="num">${escapeHtml(formatVND(r.remaining))}</td>
+                    <td><span class="fin-pill amber">Dữ liệu chuyển tiếp – cần đối soát</span></td>
+                    <td>
+                      <button type="button" class="fin-link-btn" data-fin-jump-booking="${escapeHtml(primaryBkId)}">Mở đơn</button>
+                      ${can("finance:cashbook_read") ? ` • <button type="button" class="fin-link-btn" data-fin-goto-cb-legacy="1">Xác minh ở Sổ quỹ</button>` : ""}
+                    </td>
+                  </tr>
+                `;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+      ` : ""}
     `;
   }
 
@@ -1236,6 +1370,7 @@
     if (opts.fromDate !== undefined && $("cb-filter-from")) $("cb-filter-from").value = opts.fromDate;
     if (opts.toDate !== undefined && $("cb-filter-to")) $("cb-filter-to").value = opts.toDate;
     if (opts.fundId !== undefined && $("cb-filter-fund")) $("cb-filter-fund").value = opts.fundId;
+    if (opts.txType !== undefined && $("cb-filter-type")) $("cb-filter-type").value = opts.txType;
     modal.classList.add("open");
     renderCashbook();
     if (root.PMSPcApi && typeof root.PMSPcApi.syncActiveNav === "function") {
@@ -1272,18 +1407,26 @@
     const filters = getCashbookFilters();
     const report = computeCashbookReport(fState, bookings, filters);
 
-    // Fund Summary Cards
+    // Fund Summary Cards (STRICT: ONLY display "Đã đối chiếu" when latestCheck exists!)
     const fundsGrid = $("cb-funds-grid");
     if (fundsGrid) {
       const fundCards = report.activeFunds.map((f) => {
         const chk = f.latestCheck;
-        let checkHtml = `<div class="fin-fund-check-pill">Chưa có mốc đối chiếu thực tế / sao kê</div>`;
+        const statusPillCls = f.reconciliationStatus === "reconciled_exact"
+          ? "ok"
+          : f.reconciliationStatus === "reconciled_discrepancy"
+            ? "warn"
+            : "amber";
+        let checkHtml = `<div class="fin-fund-check-pill unverified" data-cb-fund-check-status="unreconciled">Chưa đối chiếu — chưa có mốc kiểm đếm tiền mặt hoặc sao kê ngân hàng</div>`;
         if (chk) {
           const liveDiff = f.liveDiscrepancy || 0;
+          const resultText = liveDiff === 0 ? "Khớp 0 đ" : `Chênh lệch ${formatSignedVND(liveDiff)}`;
           checkHtml = `
-            <div class="fin-fund-check-pill ${liveDiff === 0 ? "exact" : "diff"}">
-              Đối chiếu ${escapeHtml(formatDateVN(chk.asOfDate))}: Thực tế <strong>${escapeHtml(formatVND(chk.actualBalance))}</strong> •
-              Chênh lệch: <strong>${escapeHtml(formatSignedVND(liveDiff))}</strong>
+            <div class="fin-fund-check-pill ${liveDiff === 0 ? "exact" : "diff"}" data-cb-fund-check-status="${liveDiff === 0 ? "exact" : "diff"}">
+              <strong>${escapeHtml(f.reconciliationLabel)}</strong> ngày ${escapeHtml(formatDateVN(chk.asOfDate))} (${escapeHtml(formatDateTimeVN(chk.checkedAt))}) •
+              Người đối chiếu: <strong>${escapeHtml(chk.checkedBy || "—")}</strong> •
+              Thực tế: <strong>${escapeHtml(formatVND(chk.actualBalance))}</strong> •
+              Kết quả: <strong>${escapeHtml(resultText)}</strong>
             </div>
           `;
         }
@@ -1291,14 +1434,16 @@
           <div class="fin-fund-card" data-cb-fund-card="${escapeHtml(f.id)}">
             <div class="fin-fund-head">
               <span class="fin-fund-name">${escapeHtml(f.name)}</span>
-              <span class="fin-pill ${f.unreconciledCount > 0 ? "amber" : "ok"}">${f.unreconciledCount > 0 ? `${f.unreconciledCount} chưa đối chiếu` : "Đã đối chiếu"}</span>
+              <span class="fin-pill ${statusPillCls}" id="cb-rec-status-${escapeHtml(f.id)}">${escapeHtml(f.reconciliationLabel)}</span>
             </div>
             <div class="fin-fund-balance" id="cb-bal-${escapeHtml(f.id)}">${escapeHtml(formatVND(f.closingBalance))}</div>
             <div class="fin-fund-meta">
               <span>Đầu kỳ: <strong>${escapeHtml(formatVND(f.openingBalance))}</strong></span>
               <span>Thu khách: <strong style="color:var(--status-paid,#15803d);">+${escapeHtml(formatVND(f.customerIn))}</strong></span>
               <span>Hoàn khách: <strong style="color:#dc2626;">-${escapeHtml(formatVND(f.customerRefund))}</strong></span>
+              <span>Chi trả NCC: <strong style="color:#dc2626;">-${escapeHtml(formatVND(f.supplierOut || 0))}</strong></span>
               <span>Chuyển quỹ: <strong>${escapeHtml(formatSignedVND(f.transferIn - f.transferOut))}</strong></span>
+              <span>Phiếu chưa tick: <strong>${f.unreconciledCount}</strong></span>
               ${f.adjustments !== 0 ? `<span>Điều chỉnh: <strong>${escapeHtml(formatSignedVND(f.adjustments))}</strong></span>` : ""}
             </div>
             ${checkHtml}
@@ -1315,9 +1460,9 @@
           <div class="fin-fund-balance" id="cb-bal-total-hotel">${escapeHtml(formatVND(report.totalHotelCashHeld))}</div>
           <div class="fin-fund-meta">
             <span>Thu khách ròng: <strong id="cb-total-customer-net">${escapeHtml(formatVND(report.totalCustomerNetCollected))}</strong></span>
+            <span>Chi trả NCC: <strong id="cb-total-supplier-paid" style="color:#dc2626;">-${escapeHtml(formatVND(report.totalSupplierPaid || 0))}</strong></span>
             <span>Thu gộp: <strong>${escapeHtml(formatVND(report.totalCustomerGrossIn))}</strong></span>
             <span>Hoàn khách: <strong>${escapeHtml(formatVND(report.totalCustomerRefunded))}</strong></span>
-            <span>Chưa đối chiếu: <strong>${report.totalUnreconciledCount} phiếu</strong></span>
           </div>
           ${report.legacyUnreconciled.length > 0 ? `
             <div class="fin-fund-check-pill diff">
@@ -1365,10 +1510,10 @@
           <thead>
             <tr>
               <th>Mã CT</th>
-              <th>Ngày thực nhận</th>
+              <th>Ngày thực nhận / chi</th>
               <th>Loại giao dịch</th>
               <th>Quỹ / Chuyển quỹ</th>
-              <th>Đơn / Khách liên kết</th>
+              <th>Đơn / Hóa đơn liên kết</th>
               <th class="num">Số tiền</th>
               <th>Người thao tác</th>
               <th>Đối chiếu</th>
@@ -1378,23 +1523,26 @@
             ${report.ledgerLines.map((t) => {
               const isTransfer = t.txType === "fund_transfer";
               const isRefund = t.txType === "customer_refund";
+              const isSupplier = t.txType === "supplier_payment";
               const isAdj = t.txType === "balance_adjustment";
-              const pillCls = isTransfer ? "info" : isRefund ? "warn" : isAdj ? "amber" : "ok";
+              const pillCls = isTransfer ? "info" : (isRefund || isSupplier) ? "warn" : isAdj ? "amber" : "ok";
               const fundCol = isTransfer
                 ? `<strong>${escapeHtml(t.fromFundName)} → ${escapeHtml(t.toFundName)}</strong>`
                 : escapeHtml(t.fundName);
               const amtDisplay = isTransfer
                 ? escapeHtml(formatVND(t.amount))
-                : isRefund
+                : (isRefund || isSupplier)
                   ? escapeHtml(formatSignedVND(-parseVND(t.amount)))
                   : isAdj
                     ? escapeHtml(formatSignedVND(t.amount))
                     : `+${escapeHtml(formatVND(t.amount))}`;
-              const linkedCol = t.bookingId
-                ? `<button type="button" class="fin-link-btn" data-fin-jump-booking="${escapeHtml(t.bookingId)}">${t.groupCodeDisplay ? `Đoàn ${escapeHtml(t.groupCodeDisplay)}` : escapeHtml(t.roomLabel)} • ${escapeHtml(t.guestName)}</button>`
-                : (t.note || t.reason ? escapeHtml(t.reason || t.note) : "—");
+              const linkedCol = isSupplier && t.invoiceId
+                ? `<button type="button" class="fin-link-btn" data-fin-jump-invoice="${escapeHtml(t.invoiceId)}">HĐ ${escapeHtml(t.invoiceVoucherNo || t.invoiceId)} • ${escapeHtml(t.supplierName || "Nhà cung cấp")} ↗</button>`
+                : t.bookingId
+                  ? `<button type="button" class="fin-link-btn" data-fin-jump-booking="${escapeHtml(t.bookingId)}">${t.groupCodeDisplay ? `Đoàn ${escapeHtml(t.groupCodeDisplay)}` : escapeHtml(t.roomLabel)} • ${escapeHtml(t.guestName)}</button>`
+                  : (t.note || t.reason ? escapeHtml(t.reason || t.note) : "—");
               return `
-                <tr>
+                <tr data-cb-voucher="${escapeHtml(t.voucherCode)}">
                   <td>
                     <span class="fin-voucher-code">${escapeHtml(t.voucherCode)}</span>
                     ${t.linkedVoucherCode ? `<div style="font-size:10.5px;color:var(--text-muted);">Gốc: ${escapeHtml(t.linkedVoucherCode)}</div>` : ""}
@@ -1407,9 +1555,9 @@
                   <td>${fundCol}</td>
                   <td>
                     ${linkedCol}
-                    ${t.note && t.bookingId ? `<div style="font-size:11px;color:var(--text-muted);">${escapeHtml(t.note)}</div>` : ""}
+                    ${t.note && (t.bookingId || t.invoiceId) ? `<div style="font-size:11px;color:var(--text-muted);">${escapeHtml(t.note)}</div>` : ""}
                   </td>
-                  <td class="num" style="font-weight:800;">${amtDisplay}</td>
+                  <td class="num" style="font-weight:800; color:${(isRefund || isSupplier) ? "#dc2626" : "inherit"};">${amtDisplay}</td>
                   <td>
                     ${escapeHtml(t.operator || "—")}
                     ${t.approvedBy ? `<div style="font-size:10.5px;color:var(--text-muted);">Duyệt: ${escapeHtml(t.approvedBy)}</div>` : ""}
@@ -1587,52 +1735,88 @@
 
   function renderCashbookLegacyTab(content, report) {
     const items = report.legacyUnreconciled || [];
-    if (items.length === 0) {
-      content.innerHTML = `<div class="fin-empty">✅ Không có khoản chuyển tiếp nào chưa gán ngày/quỹ.</div>`;
+    const resolvedOpening = report.resolvedOpeningLegacy || [];
+    if (items.length === 0 && resolvedOpening.length === 0) {
+      content.innerHTML = `<div class="fin-empty">✅ Không có khoản chuyển tiếp nào chưa xác minh.</div>`;
       return;
     }
     const todayVN = getVietnamTodayISO();
     content.innerHTML = `
       <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">
-        Gán đúng <strong>Ngày thực nhận</strong> và <strong>Quỹ nhận thực tế</strong> cho từng phiếu chuyển tiếp sau khi đối chiếu sổ cũ. Trước khi gán, các khoản này KHÔNG bị cộng ép vào quỹ tiền mặt hay ngân hàng.
+        Khi xác minh từng khoản chuyển tiếp từ đơn cũ, chọn rõ khoản tiền đó <strong>đã nằm trong số dư đầu kỳ</strong> (hệ thống xóa treo &amp; KHÔNG cộng lại vào quỹ) hay <strong>cần ghi bổ sung vào quỹ</strong> (kèm ngày thực nhận, quỹ nhận và căn cứ đối soát).
       </div>
-      <div class="fin-table-wrap">
-        <table class="fin-tx-table">
-          <thead>
-            <tr>
-              <th>Mã CT</th>
-              <th class="num">Số tiền</th>
-              <th>Ghi chú nguồn</th>
-              <th>Ngày thực nhận</th>
-              <th>Quỹ thực nhận</th>
-              <th>Xác nhận</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${items.map((tx) => `
-              <tr data-cb-legacy-row="${escapeHtml(tx.id)}">
-                <td><span class="fin-voucher-code">${escapeHtml(tx.voucherCode)}</span></td>
-                <td class="num" style="font-weight:800;">${escapeHtml(formatVND(tx.amount))}</td>
-                <td>${escapeHtml(tx.note || "—")}</td>
-                <td><input class="input" data-leg-date type="date" value="${escapeHtml(tx.receivedDate || todayVN)}" style="min-width:130px;" /></td>
-                <td>
-                  <select class="select" data-leg-fund style="min-width:150px;">
-                    ${FINANCE_FUNDS.filter((f) => !f.isLegacyBucket).map((f) => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.shortName)}</option>`).join("")}
-                  </select>
-                </td>
-                <td>
-                  <button type="button" class="btn btn-sm btn-primary" data-cb-assign-legacy="${escapeHtml(tx.id)}">✓ Đối soát &amp; Gán quỹ</button>
-                </td>
+      ${items.length > 0 ? `
+        <div class="fin-table-wrap" style="margin-bottom:12px;">
+          <table class="fin-tx-table">
+            <thead>
+              <tr>
+                <th>Mã CT</th>
+                <th class="num">Số tiền</th>
+                <th>Cách xử lý quỹ *</th>
+                <th>Ngày / Quỹ (khi ghi bổ sung)</th>
+                <th>Căn cứ đối soát *</th>
+                <th>Xác minh</th>
               </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              ${items.map((tx) => `
+                <tr data-legacy-verify-row="${escapeHtml(tx.id)}">
+                  <td>
+                    <span class="fin-voucher-code">${escapeHtml(tx.voucherCode)}</span>
+                    <div style="font-size:10.5px; color:var(--text-muted);">${escapeHtml(tx.note || "")}</div>
+                  </td>
+                  <td class="num" style="font-weight:800;">${escapeHtml(formatVND(tx.amount))}</td>
+                  <td>
+                    <select class="select" data-leg-resolution style="min-width:190px;">
+                      <option value="included_in_opening">Đã nằm trong số dư đầu kỳ (không cộng quỹ)</option>
+                      <option value="record_to_fund">Ghi bổ sung vào quỹ thực tế</option>
+                    </select>
+                  </td>
+                  <td>
+                    <div style="display:flex; gap:4px; flex-wrap:wrap;">
+                      <input class="input" data-leg-date type="date" value="${escapeHtml(tx.receivedDate || todayVN)}" style="min-width:128px;" disabled />
+                      <select class="select" data-leg-fund style="min-width:130px;" disabled>
+                        ${FINANCE_FUNDS.filter((f) => !f.isLegacyBucket).map((f) => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.shortName)}</option>`).join("")}
+                      </select>
+                    </div>
+                  </td>
+                  <td>
+                    <input class="input" data-leg-evidence type="text" placeholder="VD: BBKK đầu kỳ 01/11, Sao kê NH..." style="min-width:165px;" />
+                  </td>
+                  <td>
+                    <button type="button" class="btn btn-sm btn-primary" data-leg-verify-submit="${escapeHtml(tx.id)}">✓ Xác minh</button>
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      ` : `<div class="fin-empty" style="margin-bottom:12px;">✅ Không còn khoản chuyển tiếp treo chưa xác minh.</div>`}
+      ${resolvedOpening.length > 0 ? `
+        <div style="font-weight:800; font-size:12.5px; margin-bottom:6px;">📌 Khoản chuyển tiếp đã xác minh nằm trong số dư đầu kỳ (${resolvedOpening.length} phiếu — không cộng trùng quỹ)</div>
+        <div class="fin-table-wrap">
+          <table class="fin-tx-table">
+            <thead><tr><th>Mã CT</th><th class="num">Số tiền</th><th>Căn cứ đối soát</th><th>Người xác minh</th><th>Thời điểm</th></tr></thead>
+            <tbody>
+              ${resolvedOpening.map((tx) => `
+                <tr>
+                  <td><span class="fin-voucher-code">${escapeHtml(tx.voucherCode)}</span></td>
+                  <td class="num" style="font-weight:800;">${escapeHtml(formatVND(tx.amount))}</td>
+                  <td>${escapeHtml(tx.reconcileEvidence || tx.reconcileNote || "—")}</td>
+                  <td>${escapeHtml(tx.reconciledBy || "—")}</td>
+                  <td>${escapeHtml(formatDateTimeVN(tx.reconciledAt))}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      ` : ""}
     `;
   }
 
   function renderCashbookLogsTab(content, fState, report) {
     const checks = (fState.reconciliationChecks || []).slice().reverse();
+    const resolvedOpening = report.resolvedOpeningLegacy || [];
     const syncLogs = (report.syncLogs || []).slice(0, 50);
     const migLogs = (fState.migrationHistory || []).slice(0, 20);
 
@@ -1641,11 +1825,12 @@
       ${checks.length > 0 ? `
         <div class="fin-table-wrap" style="margin-bottom:12px;">
           <table class="fin-tx-table">
-            <thead><tr><th>Ngày kiểm kê</th><th>Quỹ</th><th class="num">Số dư sổ</th><th class="num">Thực tế</th><th class="num">Chênh lệch</th><th>Người kiểm</th><th>Ghi chú</th></tr></thead>
+            <thead><tr><th>Ngày kiểm kê</th><th>Thời điểm</th><th>Quỹ</th><th class="num">Số dư sổ</th><th class="num">Thực tế</th><th class="num">Chênh lệch</th><th>Người kiểm</th><th>Ghi chú</th></tr></thead>
             <tbody>
               ${checks.map((c) => `
                 <tr>
                   <td>${escapeHtml(formatDateVN(c.asOfDate))}</td>
+                  <td>${escapeHtml(formatDateTimeVN(c.checkedAt))}</td>
                   <td>${escapeHtml(getFinanceFundById(c.fundId).shortName)}</td>
                   <td class="num">${escapeHtml(formatVND(c.bookBalanceAtCheck))}</td>
                   <td class="num">${escapeHtml(formatVND(c.actualBalance))}</td>
@@ -1658,6 +1843,26 @@
           </table>
         </div>
       ` : `<div class="fin-empty" style="margin-bottom:12px;">Chưa có biên bản đối chiếu quỹ nào.</div>`}
+
+      ${resolvedOpening.length > 0 ? `
+        <div style="font-weight:800; font-size:12.5px; margin-bottom:6px;">📌 Xác minh khoản chuyển tiếp đã nằm trong số dư đầu kỳ (${resolvedOpening.length})</div>
+        <div class="fin-table-wrap" style="margin-bottom:12px;">
+          <table class="fin-tx-table">
+            <thead><tr><th>Mã CT</th><th class="num">Số tiền</th><th>Căn cứ đối soát</th><th>Người xác minh</th><th>Thời điểm</th></tr></thead>
+            <tbody>
+              ${resolvedOpening.map((tx) => `
+                <tr>
+                  <td><span class="fin-voucher-code">${escapeHtml(tx.voucherCode)}</span></td>
+                  <td class="num" style="font-weight:800;">${escapeHtml(formatVND(tx.amount))}</td>
+                  <td>${escapeHtml(tx.reconcileEvidence || tx.reconcileNote || "—")}</td>
+                  <td>${escapeHtml(tx.reconciledBy || "—")}</td>
+                  <td>${escapeHtml(formatDateTimeVN(tx.reconciledAt))}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      ` : ""}
 
       <div style="font-weight:800; font-size:12.5px; margin-bottom:6px;">🔄 Nhật ký đồng bộ &amp; chuyển đổi dữ liệu (${syncLogs.length + migLogs.length})</div>
       ${(syncLogs.length + migLogs.length) > 0 ? `
@@ -1796,23 +2001,646 @@
   }
 
   /* ============================================================================
-     5. SIDEBAR BADGES & GLOBAL EVENT DELEGATION
+     5. SUPPLIER INVOICES & ACCOUNTS PAYABLE (#payables-modal — Manager / Super Admin)
+     ============================================================================ */
+
+  function openPayables(opts = {}) {
+    if (!can("finance:payables_read")) {
+      showToast("Hóa đơn nhà cung cấp & công nợ phải trả thuộc quyền Quản lý / Tổng quản lý.", "error");
+      return;
+    }
+    const modal = $("payables-modal");
+    if (!modal) return;
+    if (opts.accountingMonth !== undefined && $("ap-filter-month")) {
+      $("ap-filter-month").value = opts.accountingMonth || "";
+    }
+    if (opts.asOfDate !== undefined && $("ap-filter-asof")) {
+      $("ap-filter-asof").value = opts.asOfDate || "";
+    }
+    if (opts.status !== undefined && $("ap-filter-status")) {
+      $("ap-filter-status").value = opts.status || "all";
+    }
+    if (opts.search !== undefined && $("ap-filter-search")) {
+      $("ap-filter-search").value = opts.search || "";
+    }
+    if (opts.focusInvoiceId) {
+      uiState.apFocusInvoiceId = opts.focusInvoiceId;
+      uiState.apExpandedIds.add(opts.focusInvoiceId);
+      // Clear restrictive filters so the focused invoice is guaranteed visible
+      if ($("ap-filter-search")) $("ap-filter-search").value = "";
+      if ($("ap-filter-supplier")) $("ap-filter-supplier").value = "all";
+      if ($("ap-filter-month")) $("ap-filter-month").value = "";
+      if ($("ap-filter-asof")) $("ap-filter-asof").value = "";
+      if ($("ap-filter-status")) $("ap-filter-status").value = "all";
+    }
+    if (opts.newInvoice) {
+      openPayablesForm(null, opts.accountingMonth || "");
+    }
+    modal.classList.add("open");
+    renderPayables();
+    if (root.PMSPcApi && typeof root.PMSPcApi.syncActiveNav === "function") {
+      root.PMSPcApi.syncActiveNav();
+    }
+  }
+
+  function closePayables() {
+    const modal = $("payables-modal");
+    if (modal) modal.classList.remove("open");
+    uiState.apFormOpen = false;
+    uiState.apEditId = null;
+    uiState.apPayInvoiceId = null;
+    uiState.apFocusInvoiceId = null;
+    uiState.apStaleConflict = null;
+    if (root.PMSPcApi && typeof root.PMSPcApi.syncActiveNav === "function") {
+      root.PMSPcApi.syncActiveNav();
+    }
+  }
+
+  function getPayablesFilters() {
+    return {
+      search: ($("ap-filter-search") && $("ap-filter-search").value) || "",
+      supplier: ($("ap-filter-supplier") && $("ap-filter-supplier").value) || "all",
+      accountingMonth: ($("ap-filter-month") && $("ap-filter-month").value) || "",
+      asOfDate: ($("ap-filter-asof") && $("ap-filter-asof").value) || "",
+      status: ($("ap-filter-status") && $("ap-filter-status").value) || "all"
+    };
+  }
+
+  function openPayablesForm(editInvoiceId = null, defaultMonth = "") {
+    if (!can("finance:payables_write")) {
+      showToast("Bạn không có quyền tạo/sửa hóa đơn nhà cung cấp.", "error");
+      return;
+    }
+    uiState.apFormOpen = true;
+    uiState.apEditId = editInvoiceId || null;
+    const fState = getFinanceState();
+    const existing = editInvoiceId ? (fState.supplierInvoices || []).find((x) => x.id === editInvoiceId) : null;
+    uiState.apFormAttachment = existing && existing.attachment ? { ...existing.attachment } : null;
+    renderPayablesFormDrawer(existing, defaultMonth);
+  }
+
+  function closePayablesForm() {
+    uiState.apFormOpen = false;
+    uiState.apEditId = null;
+    uiState.apFormAttachment = null;
+    const drawer = $("ap-form-drawer");
+    if (drawer) {
+      drawer.style.display = "none";
+      drawer.innerHTML = "";
+    }
+  }
+
+  function buildApLineRowHtml(costItems, line = {}) {
+    const selectedId = line.costItemId || (costItems[0] && costItems[0].id) || "";
+    const optionsHtml = costItems.map((it) => `
+      <option value="${escapeHtml(it.id)}" ${it.id === selectedId ? "selected" : ""}>${escapeHtml(it.name)}</option>
+    `).join("");
+    return `
+      <div class="ap-line-row" data-ap-line-row="1">
+        <select class="select" data-ap-line-item aria-label="Khoản mục chi phí">${optionsHtml}</select>
+        <input class="input" data-ap-line-desc type="text" value="${escapeHtml(line.description || "")}" placeholder="Diễn giải (VD: Tiền điện tháng 10)..." />
+        <input class="input" data-ap-line-amt type="text" inputmode="numeric" value="${line.amount ? escapeHtml(formatNumberInput(line.amount)) : ""}" placeholder="Số tiền (VNĐ)" />
+        <button type="button" class="btn btn-sm btn-danger" data-ap-remove-line="1" title="Xóa dòng">✕</button>
+      </div>
+    `;
+  }
+
+  function renderApLegacyLinkSection(monthKey, selectedIds = [], editInvoiceId = null) {
+    const costState = getOperatingCostsState();
+    const fState = getFinanceState();
+    const alreadyLinkedByOther = new Set();
+    for (const inv of (fState.supplierInvoices || [])) {
+      if (editInvoiceId && inv.id === editInvoiceId) continue;
+      for (const eid of (inv.linkedLegacyEntryIds || [])) alreadyLinkedByOther.add(eid);
+    }
+    const candidates = (costState.actualEntries || []).filter((e) =>
+      e.accountingMonth === monthKey && !alreadyLinkedByOther.has(e.id)
+    );
+    if (candidates.length === 0) return "";
+    const costItemMap = new Map((costState.items || []).map((it) => [it.id, it.name]));
+    const selectedSet = new Set(selectedIds || []);
+    return `
+      <div class="ap-legacy-link-box" style="margin-top:8px;">
+        <strong>🔗 Liên kết chứng từ chi tay cũ trong kỳ ${escapeHtml(monthKey)} (tùy chọn — tránh cộng trùng chi phí):</strong>
+        <div style="font-size:11px; color:var(--text-secondary);">Nếu khoản chi này trước đây đã nhập tay ở màn Chi phí, hãy tick chọn bên dưới để hệ thống giữ nguyên lịch sử cũ nhưng KHÔNG cộng trùng số tiền.</div>
+        ${candidates.map((e) => `
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+            <input type="checkbox" data-ap-legacy-chk value="${escapeHtml(e.id)}" ${selectedSet.has(e.id) ? "checked" : ""} />
+            <span><strong>${escapeHtml(costItemMap.get(e.itemId) || e.itemId)}</strong> • ${escapeHtml(formatVND(e.amount))} • Ngày ${escapeHtml(formatDateVN(e.expenseDate))} ${e.note ? `(${escapeHtml(e.note)})` : ""}</span>
+          </label>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  function renderPayablesFormDrawer(existing = null, defaultMonth = "") {
+    const drawer = $("ap-form-drawer");
+    if (!drawer) return;
+    if (!uiState.apFormOpen) {
+      drawer.style.display = "none";
+      drawer.innerHTML = "";
+      return;
+    }
+    const costState = getOperatingCostsState();
+    const costItems = (costState.items || []).filter((it) => it.active !== false);
+    const todayVN = getVietnamTodayISO();
+    const invDate = (existing && existing.invoiceDate) || todayVN;
+    const accMonth = (existing && existing.accountingMonth) || defaultMonth || invDate.slice(0, 7);
+    const dueDate = (existing && existing.dueDate) || "";
+    const lines = existing && Array.isArray(existing.lines) && existing.lines.length > 0
+      ? existing.lines
+      : [{ costItemId: (costItems[0] && costItems[0].id) || "", description: "", amount: 0 }];
+    const initialSum = lines.reduce((s, l) => s + parseVND(l.amount), 0);
+    const att = uiState.apFormAttachment;
+
+    drawer.innerHTML = `
+      <div class="fin-inline-form-title" style="margin-bottom:8px;">
+        <span>${existing ? `✏️ Sửa hóa đơn NCC (${escapeHtml(existing.voucherNo)})` : "🧾 Tạo hóa đơn nhà cung cấp mới"}</span>
+        <button type="button" class="btn btn-sm" id="btn-ap-close-form">Đóng</button>
+      </div>
+      <div id="ap-form-error" class="form-error"></div>
+      <div class="form-grid-3">
+        <div class="field">
+          <label for="ap-f-supplier">Nhà cung cấp *</label>
+          <input id="ap-f-supplier" class="input" type="text" value="${escapeHtml(existing ? existing.supplierName : "")}" placeholder="VD: Điện lực Đồng Văn (EVN)..." />
+        </div>
+        <div class="field">
+          <label for="ap-f-voucher">Số chứng từ / Số hóa đơn *</label>
+          <input id="ap-f-voucher" class="input" type="text" value="${escapeHtml(existing ? existing.voucherNo : "")}" placeholder="VD: HD-DIEN-202610" />
+        </div>
+        <div class="field">
+          <label for="ap-f-invoice-date">Ngày hóa đơn *</label>
+          <input id="ap-f-invoice-date" class="input" type="date" value="${escapeHtml(invDate)}" />
+        </div>
+      </div>
+      <div class="form-grid-3" style="margin-top:8px;">
+        <div class="field">
+          <label for="ap-f-acc-month">Kỳ ghi nhận chi phí (tháng) *</label>
+          <input id="ap-f-acc-month" class="input" type="month" value="${escapeHtml(accMonth)}" />
+        </div>
+        <div class="field">
+          <label for="ap-f-due-date">Hạn thanh toán</label>
+          <input id="ap-f-due-date" class="input" type="date" value="${escapeHtml(dueDate)}" />
+        </div>
+        <div class="field">
+          <label for="ap-f-note">Ghi chú</label>
+          <input id="ap-f-note" class="input" type="text" value="${escapeHtml(existing ? existing.note : "")}" placeholder="VD: Tiền điện kỳ T10, thanh toán 2 đợt..." />
+        </div>
+      </div>
+      <div style="margin-top:10px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px;">
+          <strong style="font-size:12.5px;">Các dòng khoản mục chi phí (tự liên kết màn Chi phí &amp; giá vốn theo kỳ) *</strong>
+          <button type="button" class="btn btn-sm" id="btn-ap-add-line">+ Thêm dòng khoản mục</button>
+        </div>
+        <div id="ap-lines-container">
+          ${lines.map((l) => buildApLineRowHtml(costItems, l)).join("")}
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-top:6px; font-size:12.5px;">
+          <div>
+            <label class="btn btn-sm" for="ap-f-attachment" style="cursor:pointer;">
+              📎 Đính kèm ảnh / PDF chứng từ
+              <input id="ap-f-attachment" type="file" accept="image/*,.pdf,application/pdf" hidden />
+            </label>
+            <span id="ap-f-att-status" style="margin-left:6px; font-size:11.5px; color:var(--text-secondary);">
+              ${att ? `Đã đính kèm: <strong>${escapeHtml(att.name)}</strong> <button type="button" class="fin-link-btn" id="btn-ap-clear-att">Gỡ tệp</button>` : "Chưa đính kèm tệp (tùy chọn)"}
+            </span>
+          </div>
+          <div>Tổng tiền hóa đơn: <strong id="ap-f-total-preview" style="font-size:14px; color:var(--accent-primary);">${escapeHtml(formatVND(initialSum))}</strong></div>
+        </div>
+      </div>
+      <div id="ap-legacy-link-wrap">
+        ${renderApLegacyLinkSection(accMonth, existing ? existing.linkedLegacyEntryIds : [], existing ? existing.id : null)}
+      </div>
+      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:10px;">
+        <button type="button" class="btn btn-sm" id="btn-ap-cancel-form">Hủy</button>
+        <button type="button" class="btn btn-sm btn-primary" id="btn-ap-save-invoice">✓ Lưu hóa đơn nhà cung cấp</button>
+      </div>
+    `;
+    drawer.style.display = "block";
+  }
+
+  function updateApFormTotalPreview() {
+    const container = $("ap-lines-container");
+    const preview = $("ap-f-total-preview");
+    if (!container || !preview) return;
+    let sum = 0;
+    container.querySelectorAll("[data-ap-line-amt]").forEach((inp) => {
+      sum += parseVND(inp.value);
+    });
+    preview.textContent = formatVND(sum);
+  }
+
+  function showApFormError(msg) {
+    const el = $("ap-form-error");
+    if (el) {
+      el.textContent = msg;
+      el.classList.add("open");
+    } else {
+      showToast(msg, "error");
+    }
+  }
+
+  async function submitSupplierInvoiceForm() {
+    const supplierName = ($("ap-f-supplier") && $("ap-f-supplier").value.trim()) || "";
+    const voucherNo = ($("ap-f-voucher") && $("ap-f-voucher").value.trim()) || "";
+    const invoiceDate = ($("ap-f-invoice-date") && $("ap-f-invoice-date").value) || "";
+    const accountingMonth = ($("ap-f-acc-month") && $("ap-f-acc-month").value) || "";
+    const dueDate = ($("ap-f-due-date") && $("ap-f-due-date").value) || "";
+    const note = ($("ap-f-note") && $("ap-f-note").value.trim()) || "";
+
+    if (!supplierName) return showApFormError("Vui lòng nhập tên nhà cung cấp.");
+    if (!voucherNo) return showApFormError("Vui lòng nhập số chứng từ / số hóa đơn.");
+    if (!invoiceDate) return showApFormError("Vui lòng chọn ngày hóa đơn.");
+    if (!accountingMonth) return showApFormError("Vui lòng chọn kỳ ghi nhận chi phí (tháng).");
+
+    const costState = getOperatingCostsState();
+    const costItemMap = new Map((costState.items || []).map((it) => [it.id, it.name]));
+    const lines = [];
+    const container = $("ap-lines-container");
+    if (container) {
+      container.querySelectorAll("[data-ap-line-row]").forEach((row) => {
+        const costItemId = row.querySelector("[data-ap-line-item]")?.value || "";
+        const description = row.querySelector("[data-ap-line-desc]")?.value.trim() || "";
+        const amount = parseVND(row.querySelector("[data-ap-line-amt]")?.value);
+        if (costItemId && amount > 0) {
+          lines.push({
+            costItemId,
+            costItemName: costItemMap.get(costItemId) || costItemId,
+            description,
+            amount
+          });
+        }
+      });
+    }
+    if (lines.length === 0) {
+      return showApFormError("Hóa đơn phải có ít nhất 1 dòng khoản mục với số tiền lớn hơn 0 đ.");
+    }
+
+    const linkedLegacyEntryIds = [];
+    const legacyWrap = $("ap-legacy-link-wrap");
+    if (legacyWrap) {
+      legacyWrap.querySelectorAll("[data-ap-legacy-chk]:checked").forEach((chk) => {
+        if (chk.value) linkedLegacyEntryIds.push(chk.value);
+      });
+    }
+
+    const payload = {
+      id: uiState.apEditId || undefined,
+      supplierName,
+      voucherNo,
+      invoiceDate,
+      accountingMonth,
+      dueDate,
+      lines,
+      attachment: uiState.apFormAttachment || null,
+      linkedLegacyEntryIds,
+      note
+    };
+
+    const res = await store.saveSupplierInvoice(payload);
+    if (res && res.ok) {
+      const savedId = res.invoice && res.invoice.id;
+      closePayablesForm();
+      if (savedId) {
+        uiState.apExpandedIds.add(savedId);
+        uiState.apFocusInvoiceId = savedId;
+      }
+      showToast(`Đã lưu hóa đơn ${voucherNo} (${formatVND(res.invoice ? res.invoice.totalAmount : 0)}).`, "success");
+      notifyHostUI();
+      renderPayables();
+    } else {
+      showApFormError((res && res.error) || "Không thể lưu hóa đơn nhà cung cấp.");
+    }
+  }
+
+  async function submitSupplierPayment(invoiceId, overridePayload = null) {
+    const fState = getFinanceState();
+    const report = computeSupplierPayablesReport(fState, getOperatingCostsState(), {});
+    const inv = report.rows.find((r) => r.id === invoiceId);
+    if (!inv) return;
+
+    let payload = overridePayload;
+    if (!payload) {
+      const formEl = document.querySelector(`[data-ap-pay-form="${CSS.escape(invoiceId)}"]`);
+      if (!formEl) return;
+      const amount = parseVND(formEl.querySelector('[data-ap-pay-field="amount"]')?.value);
+      const paymentDate = formEl.querySelector('[data-ap-pay-field="date"]')?.value || getVietnamTodayISO();
+      const fundId = formEl.querySelector('[data-ap-pay-field="fundId"]')?.value || "bank_main";
+      const note = formEl.querySelector('[data-ap-pay-field="note"]')?.value.trim() || "";
+      if (amount <= 0) {
+        showToast("Số tiền thanh toán phải lớn hơn 0 đ.", "error");
+        return;
+      }
+      if (amount > inv.allTimeRemainingAmount) {
+        showToast(`Số tiền thanh toán (${formatVND(amount)}) vượt quá số còn phải trả (${formatVND(inv.allTimeRemainingAmount)}).`, "error");
+        return;
+      }
+      payload = {
+        amount,
+        receivedDate: paymentDate,
+        paymentDate,
+        fundId,
+        paymentMethod: fundId === "bank_main" ? "bank_transfer" : "cash",
+        note,
+        expectedRemaining: inv.allTimeRemainingAmount,
+        idempotencyKey: makeIdempotencyKey("spay")
+      };
+    }
+
+    const res = await store.paySupplierInvoice(invoiceId, payload);
+    if (res && res.ok) {
+      uiState.apPayInvoiceId = null;
+      uiState.apStaleConflict = null;
+      showToast(
+        res.idempotentReplay
+          ? `Phiếu chi ${res.transaction.voucherCode} đã được ghi nhận trước đó.`
+          : `Đã chi ${formatVND(payload.amount)} • Phiếu ${res.transaction.voucherCode}`,
+        "success"
+      );
+      notifyHostUI();
+      renderPayables();
+      return;
+    }
+
+    if (res && (res.code === "INVOICE_ALREADY_PAID" || res.code === "STALE_INVOICE_BALANCE")) {
+      const freshRemaining = res.currentRemaining !== undefined ? res.currentRemaining : 0;
+      uiState.apStaleConflict = {
+        invoiceId,
+        code: res.code,
+        message: res.error || "Công nợ hóa đơn vừa được cập nhật từ người dùng khác.",
+        currentRemaining: freshRemaining,
+        pendingPayload: freshRemaining > 0 && payload.amount <= freshRemaining
+          ? { ...payload, expectedRemaining: freshRemaining, idempotencyKey: makeIdempotencyKey("spay") }
+          : null
+      };
+      renderPayables();
+      return;
+    }
+
+    if (res && res.unconfirmed) {
+      uiState.apPayInvoiceId = null;
+      showToast(res.error || "Chưa xác nhận phản hồi máy chủ — đang chờ đồng bộ.", "error");
+      syncPendingBars();
+      renderPayables();
+      return;
+    }
+
+    showToast((res && res.error) || "Không thể thanh toán hóa đơn nhà cung cấp.", "error");
+  }
+
+  function renderPayables() {
+    const modal = $("payables-modal");
+    if (!modal || !modal.classList.contains("open")) return;
+
+    syncPendingBars();
+    const fState = getFinanceState();
+    const costState = getOperatingCostsState();
+    const filters = getPayablesFilters();
+    const report = computeSupplierPayablesReport(fState, costState, filters);
+
+    // Populate Supplier dropdown preserving selection
+    const supSel = $("ap-filter-supplier");
+    if (supSel) {
+      const curVal = supSel.value || "all";
+      const allRep = computeSupplierPayablesReport(fState, costState, {});
+      supSel.innerHTML = `<option value="all">Tất cả nhà cung cấp (${allRep.suppliers.length})</option>` +
+        allRep.suppliers.map((s) => `<option value="${escapeHtml(s)}" ${s === curVal ? "selected" : ""}>${escapeHtml(s)}</option>`).join("");
+    }
+
+    // KPI Summary Strip
+    const strip = $("ap-summary-strip");
+    if (strip) {
+      strip.innerHTML = `
+        <div class="fin-kpi-card">
+          <span class="fin-stat-lbl">Tổng hóa đơn (${report.rows.length} HĐ)</span>
+          <span class="fin-stat-val" id="ap-kpi-total-invoiced">${escapeHtml(formatVND(report.totalInvoiced))}</span>
+          <span class="fin-stat-sub">Tính đến ${escapeHtml(formatDateVN(report.asOfDate))}</span>
+        </div>
+        <div class="fin-kpi-card success">
+          <span class="fin-stat-lbl">Đã thanh toán NCC</span>
+          <span class="fin-stat-val ok" id="ap-kpi-total-paid">${escapeHtml(formatVND(report.totalPaid))}</span>
+          <span class="fin-stat-sub">${report.paidCount} HĐ đã trả đủ • ${report.partialCount} trả một phần</span>
+        </div>
+        <div class="fin-kpi-card danger">
+          <span class="fin-stat-lbl">Công nợ còn phải trả</span>
+          <span class="fin-stat-val warn" id="ap-kpi-total-remaining">${escapeHtml(formatVND(report.totalRemaining))}</span>
+          <span class="fin-stat-sub">${report.unpaidCount + report.partialCount} HĐ chưa tất toán</span>
+        </div>
+        <div class="fin-kpi-card ${report.overdueRemaining > 0 ? "danger" : "highlight"}">
+          <span class="fin-stat-lbl">Quá hạn thanh toán</span>
+          <span class="fin-stat-val ${report.overdueRemaining > 0 ? "warn" : ""}" id="ap-kpi-overdue">${escapeHtml(formatVND(report.overdueRemaining))}</span>
+          <span class="fin-stat-sub">${report.overdueCount} hóa đơn quá hạn</span>
+        </div>
+      `;
+    }
+
+    const content = $("ap-content-area");
+    if (!content) return;
+
+    const stale = uiState.apStaleConflict;
+    const staleBanner = stale ? `
+      <div class="fin-stale-banner" id="ap-stale-conflict-banner" style="margin-bottom:10px;">
+        <div><strong>⚠️ Xung đột thanh toán đồng thời!</strong> ${escapeHtml(stale.message)}</div>
+        <div>Số còn phải trả mới nhất trên máy chủ: <strong>${escapeHtml(formatVND(stale.currentRemaining))}</strong></div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          ${stale.pendingPayload ? `<button type="button" class="btn btn-sm btn-primary" id="btn-ap-confirm-stale-retry">✓ Thanh toán lại với số dư mới (${escapeHtml(formatVND(stale.pendingPayload.amount))})</button>` : ""}
+          <button type="button" class="btn btn-sm" id="btn-ap-dismiss-stale">Đã hiểu</button>
+        </div>
+      </div>
+    ` : "";
+
+    if (report.rows.length === 0) {
+      content.innerHTML = `${staleBanner}<div class="fin-empty">Chưa có hóa đơn nhà cung cấp nào khớp bộ lọc. Nhấn <strong>+ Thêm hóa đơn NCC</strong> để ghi nhận hóa đơn mới.</div>`;
+      return;
+    }
+
+    const todayVN = getVietnamTodayISO();
+    const canWrite = can("finance:payables_write");
+    const canPay = can("finance:payables_pay");
+
+    content.innerHTML = staleBanner + report.rows.map((inv) => {
+      const expanded = uiState.apExpandedIds.has(inv.id);
+      const payOpen = uiState.apPayInvoiceId === inv.id;
+      const isFocused = uiState.apFocusInvoiceId === inv.id;
+      const statusPillCls = inv.status === "paid" ? "ok" : inv.status === "overdue" ? "warn" : inv.status === "partial" ? "info" : "amber";
+      return `
+        <div class="ap-invoice-card ${escapeHtml(inv.status)} ${isFocused ? "focused" : ""}" data-ap-invoice-id="${escapeHtml(inv.id)}">
+          <div class="fin-ar-card-head" data-ap-toggle="${escapeHtml(inv.id)}">
+            <div style="min-width:0; flex:1;">
+              <div style="font-weight:800; font-size:13px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                <span>🧾 ${escapeHtml(inv.voucherNo)} — ${escapeHtml(inv.supplierName)}</span>
+                <span class="fin-pill ${statusPillCls}">${escapeHtml(inv.statusLabel)}</span>
+                <span class="fin-pill muted">Kỳ CP: ${escapeHtml(inv.accountingMonth)}</span>
+                ${inv.attachment ? '<span class="fin-pill info">📎 Có chứng từ</span>' : ""}
+              </div>
+              <div style="font-size:11.5px; color:var(--text-secondary); margin-top:3px;">
+                Ngày HĐ: <strong>${escapeHtml(formatDateVN(inv.invoiceDate))}</strong> •
+                Hạn trả: <strong>${inv.dueDate ? escapeHtml(formatDateVN(inv.dueDate)) : "Chưa xác định"}</strong> •
+                Khoản mục: ${escapeHtml((inv.lines || []).map((l) => l.costItemName).join(", "))}
+              </div>
+            </div>
+            <div style="text-align:right; font-variant-numeric:tabular-nums; font-size:12px;">
+              <div>Tổng HĐ: <strong>${escapeHtml(formatVND(inv.totalAmount))}</strong></div>
+              <div>Đã trả: <strong style="color:var(--status-paid,#15803d);">${escapeHtml(formatVND(inv.paidAmount))}</strong> • Còn: <strong style="color:${inv.remainingAmount > 0 ? "#dc2626" : "var(--text-primary)"};" data-ap-card-remaining="${escapeHtml(inv.id)}">${escapeHtml(formatVND(inv.remainingAmount))}</strong></div>
+            </div>
+          </div>
+          ${expanded ? `
+            <div class="fin-ar-card-body">
+              <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+                <div style="font-size:11.5px; color:var(--text-secondary);">
+                  ${inv.note ? `Ghi chú: <em>${escapeHtml(inv.note)}</em> • ` : ""}
+                  Người tạo: <strong>${escapeHtml(inv.createdBy || "—")}</strong>
+                </div>
+                <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                  ${canPay && inv.allTimeRemainingAmount > 0 ? `<button type="button" class="btn btn-sm btn-primary" data-ap-open-pay="${escapeHtml(inv.id)}">💸 Thanh toán hóa đơn</button>` : ""}
+                  <button type="button" class="btn btn-sm" data-fin-jump-costs-month="${escapeHtml(inv.accountingMonth)}">Xem Chi phí ${escapeHtml(inv.accountingMonth)} ↗</button>
+                  ${inv.attachment ? `<button type="button" class="btn btn-sm" data-ap-view-att="${escapeHtml(inv.id)}">📎 Xem chứng từ</button>` : ""}
+                  ${canWrite ? `<button type="button" class="btn btn-sm" data-ap-edit-inv="${escapeHtml(inv.id)}">Sửa</button>` : ""}
+                  ${canWrite && inv.allPaymentsCount === 0 ? `<button type="button" class="btn btn-sm btn-danger" data-ap-delete-inv="${escapeHtml(inv.id)}">Xóa</button>` : ""}
+                </div>
+              </div>
+
+              ${payOpen ? `
+                <div class="fin-inline-form" data-ap-pay-form="${escapeHtml(inv.id)}">
+                  <div class="fin-inline-form-title">
+                    <span>💸 Lập phiếu chi thanh toán HĐ ${escapeHtml(inv.voucherNo)} (còn phải trả: ${escapeHtml(formatVND(inv.allTimeRemainingAmount))})</span>
+                    <button type="button" class="btn btn-sm" data-ap-close-pay="1">Đóng</button>
+                  </div>
+                  <div class="form-grid-3">
+                    <div class="field">
+                      <label>Số tiền thanh toán (VNĐ) *</label>
+                      <input class="input" data-ap-pay-field="amount" type="text" inputmode="numeric" value="${escapeHtml(formatNumberInput(inv.allTimeRemainingAmount))}" />
+                    </div>
+                    <div class="field">
+                      <label>Ngày thanh toán thực tế (VN) *</label>
+                      <input class="input" data-ap-pay-field="date" type="date" value="${escapeHtml(todayVN)}" />
+                    </div>
+                    <div class="field">
+                      <label>Chi từ quỹ *</label>
+                      <select class="select" data-ap-pay-field="fundId">
+                        ${FINANCE_FUNDS.filter((f) => !f.isLegacyBucket).map((f) => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name)}</option>`).join("")}
+                      </select>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label>Ghi chú phiếu chi</label>
+                    <input class="input" data-ap-pay-field="note" type="text" placeholder="VD: Thanh toán đợt 1 tiền điện qua ngân hàng..." />
+                  </div>
+                  <div style="display:flex; justify-content:flex-end; gap:8px;">
+                    <button type="button" class="btn btn-sm" data-ap-close-pay="1">Hủy</button>
+                    <button type="button" class="btn btn-sm btn-primary" data-ap-submit-pay="${escapeHtml(inv.id)}">✓ Xác nhận lập phiếu chi (PC)</button>
+                  </div>
+                </div>
+              ` : ""}
+
+              <div class="fin-table-wrap">
+                <table class="fin-tx-table">
+                  <thead><tr><th>Khoản mục chi phí</th><th>Diễn giải</th><th class="num">Số tiền (VNĐ)</th></tr></thead>
+                  <tbody>
+                    ${(inv.lines || []).map((l) => `
+                      <tr>
+                        <td><strong>${escapeHtml(l.costItemName)}</strong></td>
+                        <td>${escapeHtml(l.description || "—")}</td>
+                        <td class="num" style="font-weight:700;">${escapeHtml(formatVND(l.amount))}</td>
+                      </tr>
+                    `).join("")}
+                  </tbody>
+                </table>
+              </div>
+
+              ${(inv.linkedLegacyEntries || []).length > 0 ? `
+                <div class="costs-legacy-linked">
+                  <strong>🔗 Đã liên kết ${inv.linkedLegacyEntries.length} chứng từ chi tay cũ (tự loại trừ để không cộng trùng ở màn Chi phí):</strong>
+                  ${inv.linkedLegacyEntries.map((e) => `${escapeHtml(formatDateVN(e.expenseDate))} — ${escapeHtml(formatVND(e.amount))} ${e.note ? `(${escapeHtml(e.note)})` : ""}`).join("; ")}
+                </div>
+              ` : ""}
+
+              <div style="font-weight:700; font-size:12px;">Lịch sử thanh toán từ Sổ quỹ (${inv.payments.length} phiếu chi${filters.asOfDate ? ` đến ${formatDateVN(filters.asOfDate)}` : ""})</div>
+              ${inv.payments.length > 0 ? `
+                <div class="fin-table-wrap">
+                  <table class="fin-tx-table">
+                    <thead><tr><th>Mã phiếu chi</th><th>Ngày chi thực tế</th><th>Quỹ chi</th><th class="num">Số tiền</th><th>Người chi</th><th>Ghi chú</th><th>Sổ quỹ</th></tr></thead>
+                    <tbody>
+                      ${inv.payments.map((p) => `
+                        <tr>
+                          <td><span class="fin-voucher-code">${escapeHtml(p.voucherCode)}</span></td>
+                          <td>${escapeHtml(formatDateVN(p.receivedDate))}</td>
+                          <td>${escapeHtml(p.fundName)}</td>
+                          <td class="num" style="font-weight:800; color:#dc2626;">-${escapeHtml(formatVND(p.amount))}</td>
+                          <td>${escapeHtml(p.operator || "—")}</td>
+                          <td>${escapeHtml(p.note || "—")}</td>
+                          <td><button type="button" class="fin-link-btn" data-fin-jump-cashbook-supplier="1">Xem Sổ quỹ ↗</button></td>
+                        </tr>
+                      `).join("")}
+                    </tbody>
+                  </table>
+                </div>
+              ` : `<div style="font-size:11.5px; color:var(--text-muted);">Chưa có phiếu chi thanh toán nào cho hóa đơn này.</div>`}
+            </div>
+          ` : ""}
+        </div>
+      `;
+    }).join("");
+  }
+
+  async function handleExportPayablesCsv() {
+    if (!can("finance:export") || !can("finance:payables_read")) {
+      showToast("Chỉ Quản lý / Tổng quản lý được xuất danh sách Hóa đơn NCC.", "error");
+      return;
+    }
+    const filters = getPayablesFilters();
+    const status = typeof store.getStatus === "function" ? store.getStatus() : {};
+    if (status.mode === "server") {
+      const qs = new URLSearchParams({
+        asOfDate: filters.asOfDate,
+        supplier: filters.supplier,
+        accountingMonth: filters.accountingMonth,
+        status: filters.status,
+        search: filters.search
+      });
+      window.location.href = `/api/finance/export/payables?${qs.toString()}`;
+      showToast("Đang tải file CSV Hóa đơn NCC & Công nợ phải trả...", "success");
+      return;
+    }
+    const report = computeSupplierPayablesReport(getFinanceState(), getOperatingCostsState(), filters);
+    triggerDownloadCsv(`hoa-don-ncc-cong-no-tra-${report.asOfDate}.csv`, generateSupplierPayablesCsvContent(report));
+    showToast("Đã xuất file CSV Hóa đơn NCC & Công nợ phải trả.", "success");
+  }
+
+  /* ============================================================================
+     6. SIDEBAR BADGES & GLOBAL EVENT DELEGATION
      ============================================================================ */
 
   function updateSidebarBadges() {
     const arPill = $("ar-badge-pill");
-    if (!arPill) return;
-    if (!can("finance:ar_read")) {
-      arPill.style.display = "none";
-      return;
+    if (arPill) {
+      if (!can("finance:ar_read")) {
+        arPill.style.display = "none";
+      } else {
+        const report = computeReceivablesReport(getBookings(), getFinanceState(), { asOfDate: getVietnamTodayISO() });
+        if (report.debtCount > 0) {
+          arPill.textContent = String(report.debtCount);
+          arPill.style.display = "";
+        } else {
+          arPill.style.display = "none";
+        }
+      }
     }
-    const report = computeReceivablesReport(getBookings(), getFinanceState(), { asOfDate: getVietnamTodayISO() });
-    const attentionCount = report.debtCount + (report.totalCancelledHeldDeposit > 0 ? 1 : 0);
-    if (attentionCount > 0) {
-      arPill.textContent = String(report.debtCount);
-      arPill.style.display = report.debtCount > 0 ? "" : "none";
-    } else {
-      arPill.style.display = "none";
+
+    const apPill = $("ap-badge-pill");
+    if (apPill) {
+      if (!can("finance:payables_read")) {
+        apPill.style.display = "none";
+      } else {
+        const apReport = computeSupplierPayablesReport(getFinanceState(), getOperatingCostsState(), {});
+        const openCount = apReport.unpaidCount + apReport.partialCount;
+        if (openCount > 0) {
+          apPill.textContent = String(openCount);
+          apPill.style.display = "";
+        } else {
+          apPill.style.display = "none";
+        }
+      }
     }
   }
 
@@ -1827,6 +2655,9 @@
     }
     if ($("cashbook-modal") && $("cashbook-modal").classList.contains("open")) {
       renderCashbook();
+    }
+    if ($("payables-modal") && $("payables-modal").classList.contains("open")) {
+      renderPayables();
     }
     if ($("monthly-receipts-modal") && $("monthly-receipts-modal").classList.contains("open")) {
       renderMonthlyReceipts();
@@ -1844,6 +2675,7 @@
       const qs = new URLSearchParams({
         asOfDate: filters.asOfDate,
         status: filters.status,
+        dueFilter: filters.dueFilter,
         entityType: filters.entityType,
         search: filters.search
       });
@@ -1890,12 +2722,16 @@
       const el = $(id);
       if (el) el.addEventListener("click", closeCashbook);
     });
+    ["btn-close-payables", "btn-close-payables-2"].forEach((id) => {
+      const el = $(id);
+      if (el) el.addEventListener("click", closePayables);
+    });
     ["btn-close-monthly-receipts", "btn-close-monthly-receipts-2"].forEach((id) => {
       const el = $(id);
       if (el) el.addEventListener("click", closeMonthlyReceipts);
     });
 
-    [$("receivables-modal"), $("cashbook-modal"), $("monthly-receipts-modal")].forEach((backdrop) => {
+    [$("receivables-modal"), $("cashbook-modal"), $("payables-modal"), $("monthly-receipts-modal")].forEach((backdrop) => {
       if (!backdrop) return;
       backdrop.addEventListener("click", (e) => {
         if (e.target === backdrop) {
@@ -1943,17 +2779,75 @@
     if ($("btn-cb-open-reconcile")) $("btn-cb-open-reconcile").addEventListener("click", () => { uiState.cbDrawer = uiState.cbDrawer === "reconcile" ? null : "reconcile"; renderCashbook(); });
     if ($("btn-cb-open-adjust")) $("btn-cb-open-adjust").addEventListener("click", () => { uiState.cbDrawer = uiState.cbDrawer === "adjust" ? null : "adjust"; renderCashbook(); });
 
-    // Auto-select default fund when payment method changes in booking collect form
+    // Payables filters & header actions
+    ["ap-filter-search", "ap-filter-supplier", "ap-filter-month", "ap-filter-asof", "ap-filter-status"].forEach((id) => {
+      const el = $(id);
+      if (el) el.addEventListener(id === "ap-filter-search" ? "input" : "change", renderPayables);
+    });
+    if ($("btn-ap-new-invoice")) {
+      $("btn-ap-new-invoice").addEventListener("click", () => {
+        if (uiState.apFormOpen && !uiState.apEditId) closePayablesForm();
+        else openPayablesForm(null, ($("ap-filter-month") && $("ap-filter-month").value) || "");
+      });
+    }
+    if ($("btn-ap-export-csv")) $("btn-ap-export-csv").addEventListener("click", handleExportPayablesCsv);
+
+    // Delegated input & change handlers
+    document.addEventListener("input", (e) => {
+      if (e.target && e.target.matches("[data-ap-line-amt]")) {
+        updateApFormTotalPreview();
+      }
+    });
+
     document.addEventListener("change", (e) => {
       if (e.target && e.target.id === "fin-pay-method") {
         const fundSel = $("fin-pay-fund");
         if (fundSel) fundSel.value = getPaymentMethodMeta(e.target.value).defaultFundId;
       }
+      if (e.target && e.target.matches("[data-leg-resolution]")) {
+        const row = e.target.closest("[data-legacy-verify-row]");
+        if (row) {
+          const isOpening = e.target.value === "included_in_opening";
+          const dateInp = row.querySelector("[data-leg-date]");
+          const fundSel = row.querySelector("[data-leg-fund]");
+          if (dateInp) dateInp.disabled = isOpening;
+          if (fundSel) fundSel.disabled = isOpening;
+        }
+      }
+      if (e.target && e.target.id === "ap-f-acc-month") {
+        const wrap = $("ap-legacy-link-wrap");
+        if (wrap) {
+          wrap.innerHTML = renderApLegacyLinkSection(e.target.value, [], uiState.apEditId);
+        }
+      }
+      if (e.target && e.target.id === "ap-f-attachment") {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        if (file.size > 4 * 1024 * 1024) {
+          showToast("Tệp chứng từ vượt quá 4MB — vui lòng chọn tệp nhỏ hơn.", "error");
+          e.target.value = "";
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+          uiState.apFormAttachment = {
+            name: file.name,
+            type: file.type || "application/octet-stream",
+            size: file.size,
+            dataUrl: String(reader.result || "")
+          };
+          const st = $("ap-f-att-status");
+          if (st) {
+            st.innerHTML = `Đã đính kèm: <strong>${escapeHtml(file.name)}</strong> <button type="button" class="fin-link-btn" id="btn-ap-clear-att">Gỡ tệp</button>`;
+          }
+        };
+        reader.readAsDataURL(file);
+      }
     });
 
     // Global delegated clicks for dynamic Finance UI buttons
     document.addEventListener("click", async (e) => {
-      const btn = e.target.closest("button, [data-ar-toggle]");
+      const btn = e.target.closest("button, [data-ar-toggle], [data-ap-toggle]");
       if (!btn) return;
 
       // Retry / dismiss pending unconfirmed intents
@@ -1970,22 +2864,98 @@
         return;
       }
 
-      // Jump to booking detail
+      // Cross-module jumps
       if (btn.dataset.finJumpBooking) {
         jumpToBooking(btn.dataset.finJumpBooking);
         return;
       }
-
+      if (btn.dataset.finJumpInvoice) {
+        closeCashbook();
+        openPayables({ focusInvoiceId: btn.dataset.finJumpInvoice });
+        return;
+      }
+      if (btn.dataset.finJumpCashbookSupplier) {
+        closePayables();
+        openCashbook({ tab: "ledger", txType: "supplier_payment", fundId: "all", fromDate: "", toDate: "" });
+        return;
+      }
+      if (btn.dataset.finJumpCostsMonth) {
+        const mk = btn.dataset.finJumpCostsMonth;
+        closePayables();
+        if (root.PMSPcApi && typeof root.PMSPcApi.openOperatingCosts === "function") {
+          root.PMSPcApi.openOperatingCosts(mk);
+        }
+        return;
+      }
       if (btn.dataset.finOpenArSearch !== undefined) {
         const bookingModal = $("booking-modal");
         if (bookingModal) bookingModal.classList.remove("open");
         openReceivables({ search: btn.dataset.finOpenArSearch });
         return;
       }
-
       if (btn.dataset.finGotoCbLegacy) {
         closeReceivables();
         openCashbook({ tab: "legacy" });
+        return;
+      }
+
+      // Clickable AR Due-Date Bucket filter cards
+      if (btn.dataset.arDueFilter !== undefined) {
+        const nextDue = btn.dataset.arDueFilter;
+        uiState.arDueFilter = (nextDue !== "all" && uiState.arDueFilter === nextDue) ? "all" : nextDue;
+        uiState.arTab = "list";
+        renderReceivables();
+        return;
+      }
+
+      // Unified Legacy Verification (works from BOTH Receivables Legacy Tab and Cashbook Legacy Tab!)
+      if (btn.dataset.legVerifySubmit) {
+        const txId = btn.dataset.legVerifySubmit;
+        const tr = btn.closest("[data-legacy-verify-row]");
+        if (!tr) return;
+        const resolution = tr.querySelector("[data-leg-resolution]")?.value || "included_in_opening";
+        const evidence = tr.querySelector("[data-leg-evidence]")?.value.trim() || "";
+        if (!evidence) {
+          showToast("Bắt buộc phải nhập căn cứ đối soát trước khi xác minh.", "error");
+          return;
+        }
+        let payload;
+        if (resolution === "included_in_opening") {
+          payload = {
+            reconciled: true,
+            legacyResolution: "included_in_opening",
+            reconcileEvidence: evidence,
+            reconcileNote: `Đã xác minh nằm trong số dư đầu kỳ (${evidence})`
+          };
+        } else {
+          const receivedDate = tr.querySelector("[data-leg-date]")?.value;
+          const fundId = tr.querySelector("[data-leg-fund]")?.value;
+          if (!receivedDate || !fundId) {
+            showToast("Vui lòng chọn đầy đủ ngày thực nhận và quỹ nhận để ghi bổ sung.", "error");
+            return;
+          }
+          payload = {
+            reconciled: true,
+            legacyResolution: "record_to_fund",
+            receivedDate,
+            fundId,
+            reconcileEvidence: evidence,
+            reconcileNote: `Ghi bổ sung vào quỹ (${evidence})`
+          };
+        }
+        const res = await store.reconcileFinanceTransaction(txId, payload);
+        if (res && res.ok) {
+          showToast(
+            resolution === "included_in_opening"
+              ? "Đã xác minh khoản cũ nằm trong số dư đầu kỳ (KHÔNG cộng trùng quỹ)."
+              : "Đã xác minh & ghi bổ sung khoản cũ vào quỹ thực tế.",
+            "success"
+          );
+          notifyHostUI();
+          refreshOpenModals();
+        } else {
+          showToast((res && res.error) || "Không thể xác minh chứng từ chuyển tiếp.", "error");
+        }
         return;
       }
 
@@ -2239,28 +3209,123 @@
         }
         return;
       }
-      if (btn.dataset.cbAssignLegacy) {
-        const txId = btn.dataset.cbAssignLegacy;
-        const tr = btn.closest("[data-cb-legacy-row]");
-        if (!tr) return;
-        const receivedDate = tr.querySelector("[data-leg-date]").value;
-        const fundId = tr.querySelector("[data-leg-fund]").value;
-        if (!receivedDate || !fundId) {
-          showToast("Vui lòng chọn đầy đủ ngày thực nhận và quỹ nhận.", "error");
-          return;
+
+      // Payables (Supplier Invoices) dynamic actions
+      if (btn.id === "btn-ap-close-form" || btn.id === "btn-ap-cancel-form") {
+        closePayablesForm();
+        return;
+      }
+      if (btn.id === "btn-ap-add-line") {
+        const container = $("ap-lines-container");
+        if (container) {
+          const costItems = (getOperatingCostsState().items || []).filter((it) => it.active !== false);
+          container.insertAdjacentHTML("beforeend", buildApLineRowHtml(costItems, {}));
         }
-        const res = await store.reconcileFinanceTransaction(txId, {
-          reconciled: true,
-          receivedDate,
-          fundId,
-          reconcileNote: "Đã đối soát & gán ngày/quỹ từ dữ liệu chuyển tiếp"
-        });
-        if (res && res.ok) {
-          showToast("Đã đối soát & gán quỹ cho chứng từ chuyển tiếp.", "success");
-          notifyHostUI();
-          renderCashbook();
+        return;
+      }
+      if (btn.dataset.apRemoveLine) {
+        const container = $("ap-lines-container");
+        const row = btn.closest("[data-ap-line-row]");
+        if (container && row && container.querySelectorAll("[data-ap-line-row]").length > 1) {
+          row.remove();
+          updateApFormTotalPreview();
         } else {
-          showToast((res && res.error) || "Không thể gán quỹ chuyển tiếp.", "error");
+          showToast("Hóa đơn cần giữ lại ít nhất 1 dòng khoản mục.", "error");
+        }
+        return;
+      }
+      if (btn.id === "btn-ap-clear-att") {
+        uiState.apFormAttachment = null;
+        const inp = $("ap-f-attachment");
+        if (inp) inp.value = "";
+        const st = $("ap-f-att-status");
+        if (st) st.textContent = "Chưa đính kèm tệp (tùy chọn)";
+        return;
+      }
+      if (btn.id === "btn-ap-save-invoice") {
+        await submitSupplierInvoiceForm();
+        return;
+      }
+      if (btn.dataset.apToggle) {
+        const id = btn.dataset.apToggle;
+        if (uiState.apExpandedIds.has(id)) uiState.apExpandedIds.delete(id);
+        else uiState.apExpandedIds.add(id);
+        renderPayables();
+        return;
+      }
+      if (btn.dataset.apOpenPay) {
+        const id = btn.dataset.apOpenPay;
+        uiState.apExpandedIds.add(id);
+        uiState.apPayInvoiceId = uiState.apPayInvoiceId === id ? null : id;
+        renderPayables();
+        return;
+      }
+      if (btn.dataset.apClosePay) {
+        uiState.apPayInvoiceId = null;
+        renderPayables();
+        return;
+      }
+      if (btn.dataset.apSubmitPay) {
+        await submitSupplierPayment(btn.dataset.apSubmitPay);
+        return;
+      }
+      if (btn.id === "btn-ap-confirm-stale-retry" && uiState.apStaleConflict && uiState.apStaleConflict.pendingPayload) {
+        await submitSupplierPayment(uiState.apStaleConflict.invoiceId, uiState.apStaleConflict.pendingPayload);
+        return;
+      }
+      if (btn.id === "btn-ap-dismiss-stale") {
+        uiState.apStaleConflict = null;
+        renderPayables();
+        return;
+      }
+      if (btn.dataset.apEditInv) {
+        openPayablesForm(btn.dataset.apEditInv);
+        return;
+      }
+      if (btn.dataset.apDeleteInv) {
+        const id = btn.dataset.apDeleteInv;
+        if (!window.confirm("Bạn chắc chắn muốn xóa hóa đơn nhà cung cấp này?")) return;
+        const res = await store.deleteSupplierInvoice(id);
+        if (res && res.ok) {
+          showToast("Đã xóa hóa đơn nhà cung cấp.", "success");
+          notifyHostUI();
+          renderPayables();
+        } else {
+          showToast((res && res.error) || "Không thể xóa hóa đơn này.", "error");
+        }
+        return;
+      }
+      if (btn.dataset.apViewAtt) {
+        const id = btn.dataset.apViewAtt;
+        const inv = (getFinanceState().supplierInvoices || []).find((x) => x.id === id);
+        if (!inv || !inv.attachment || !inv.attachment.dataUrl) return;
+        if ((inv.attachment.type || "").startsWith("image/")) {
+          const lb = $("photo-lightbox-modal");
+          const img = $("photo-lightbox-img");
+          const cap = $("photo-lightbox-caption");
+          if (lb && img) {
+            img.src = inv.attachment.dataUrl;
+            if (cap) cap.textContent = `${inv.voucherNo} — ${inv.attachment.name}`;
+            lb.classList.add("open");
+            return;
+          }
+        }
+        try {
+          const resp = await fetch(inv.attachment.dataUrl);
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          const opened = window.open(url, "_blank", "noopener");
+          if (!opened) {
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = inv.attachment.name || "chung-tu.pdf";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+          }
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } catch {
+          showToast("Không thể mở tệp chứng từ đính kèm.", "error");
         }
       }
     });
@@ -2292,6 +3357,8 @@
     closeReceivables,
     openCashbook,
     closeCashbook,
+    openPayables,
+    closePayables,
     openMonthlyReceipts,
     closeMonthlyReceipts,
     renderBookingFinancePanel,

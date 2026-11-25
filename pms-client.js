@@ -1426,6 +1426,7 @@
         return { ok: true, idempotentReplay: true, alreadyCommitted: true, transaction: check.transaction };
       }
       if (item.kind === "transfer") return transferBetweenFunds(item.payload);
+      if (item.kind === "supplier_payment") return paySupplierInvoice(item.invoiceId, item.payload);
       return recordFinanceTransaction(item.payload);
     }
 
@@ -1476,18 +1477,24 @@
     async function reconcileFinanceTransaction(txId, payload) {
       if (mode !== "server") {
         return applyLocalFinanceFallbackMutation((fState) => {
-          const nextList = fState.transactions.map((t) => (t.id === txId
-            ? {
-                ...t,
-                reconciled: payload.reconciled !== undefined ? Boolean(payload.reconciled) : true,
-                fundId: payload.fundId || t.fundId,
-                receivedDate: payload.receivedDate || t.receivedDate,
-                legacyStatus: (t.isLegacyMigrated && payload.fundId && payload.receivedDate) ? "reconciled" : t.legacyStatus,
-                reconciledAt: new Date().toISOString(),
-                reconciledBy: "Quản lý",
-                reconcileNote: Core.sanitizeText(payload.reconcileNote || t.reconcileNote, 300)
-              }
-            : t));
+          const evidence = Core.sanitizeText(payload.reconcileEvidence !== undefined ? payload.reconcileEvidence : payload.reconcileNote, 300);
+          const nextList = fState.transactions.map((t) => {
+            if (t.id !== txId) return t;
+            const isOpening = t.isLegacyMigrated && payload.legacyResolution === "included_in_opening";
+            const isToFund = t.isLegacyMigrated && (payload.legacyResolution === "record_to_fund" || (payload.fundId && payload.receivedDate && !isOpening));
+            return {
+              ...t,
+              reconciled: payload.reconciled !== undefined ? Boolean(payload.reconciled) : true,
+              fundId: isOpening ? "unassigned_legacy" : (isToFund ? payload.fundId : t.fundId),
+              receivedDate: isToFund ? payload.receivedDate : t.receivedDate,
+              legacyStatus: isOpening ? "reconciled_in_opening" : (isToFund ? "reconciled" : t.legacyStatus),
+              legacyResolution: isOpening ? "included_in_opening" : (isToFund ? "record_to_fund" : (t.legacyResolution || "")),
+              reconciledAt: new Date().toISOString(),
+              reconciledBy: "Quản lý",
+              reconcileNote: Core.sanitizeText(payload.reconcileNote || t.reconcileNote, 300),
+              reconcileEvidence: evidence || t.reconcileEvidence || ""
+            };
+          });
           return { ok: true, nextFinanceState: { ...fState, transactions: nextList } };
         });
       }
@@ -1569,6 +1576,140 @@
       return postFinanceSimple("/api/finance/migrate-legacy", "POST", { dryRun: Boolean(opts.dryRun) });
     }
 
+    async function saveSupplierInvoice(payload = {}) {
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState) => {
+          const list = Array.isArray(fState.supplierInvoices) ? fState.supplierInvoices : [];
+          const existing = payload.id ? list.find((i) => i.id === payload.id) : null;
+          const inv = Core.sanitizeSupplierInvoice({
+            ...(existing || {}),
+            ...payload,
+            id: existing ? existing.id : (payload.id || `sinv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`),
+            updatedAt: new Date().toISOString()
+          }, list.length);
+          if (!inv || !inv.lines.length) return { ok: false, error: "Thông tin hóa đơn nhà cung cấp không hợp lệ." };
+          const nextList = existing ? list.map((i) => (i.id === inv.id ? inv : i)) : [inv, ...list];
+          return { ok: true, invoice: inv, nextFinanceState: { ...fState, supplierInvoices: nextList } };
+        });
+      }
+      if (payload && payload.id) {
+        return postFinanceSimple(`/api/finance/supplier-invoices/${encodeURIComponent(payload.id)}`, "PUT", payload);
+      }
+      return postFinanceSimple("/api/finance/supplier-invoices", "POST", payload);
+    }
+
+    async function deleteSupplierInvoice(invoiceId) {
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState) => {
+          const hasPays = (fState.transactions || []).some((t) => t.txType === "supplier_payment" && t.invoiceId === invoiceId);
+          if (hasPays) return { ok: false, error: "Hóa đơn đã có phiếu chi — không thể xóa." };
+          return {
+            ok: true,
+            deletedId: invoiceId,
+            nextFinanceState: { ...fState, supplierInvoices: (fState.supplierInvoices || []).filter((i) => i.id !== invoiceId) }
+          };
+        });
+      }
+      return postFinanceSimple(`/api/finance/supplier-invoices/${encodeURIComponent(invoiceId)}`, "DELETE", {});
+    }
+
+    async function paySupplierInvoice(invoiceId, payload = {}) {
+      const idempotencyKey = Core.sanitizeText(payload.idempotencyKey, 120)
+        || `ftx_spay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      const reqPayload = { ...payload, idempotencyKey };
+
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState) => {
+          const dup = fState.transactions.find((t) => t.idempotencyKey === idempotencyKey);
+          if (dup) return { ok: true, idempotentReplay: true, transaction: dup, nextFinanceState: fState };
+          const inv = (fState.supplierInvoices || []).find((i) => i.id === invoiceId);
+          if (!inv) return { ok: false, error: "Không tìm thấy hóa đơn nhà cung cấp." };
+          const paidSoFar = fState.transactions.filter((t) => t.txType === "supplier_payment" && t.invoiceId === invoiceId).reduce((s, t) => s + Core.parseVND(t.amount), 0);
+          const rem = Math.max(0, Core.roundVND(inv.totalAmount - paidSoFar));
+          const amt = Core.parseVND(reqPayload.amount);
+          if (rem <= 0) return { ok: false, code: "INVOICE_ALREADY_PAID", currentRemaining: 0, error: "Hóa đơn đã thanh toán hết." };
+          if (amt <= 0 || amt > rem) return { ok: false, code: "EXCEEDS_REMAINING", currentRemaining: rem, error: "Số tiền chi không hợp lệ." };
+          const auxSeq = (fState.voucherSeq || fState.transactions.length) + 1;
+          const ts = Core.normalizeFinanceTimestamp(reqPayload.receivedAt || reqPayload.receivedDate);
+          const tx = Core.sanitizeFinanceTransaction({
+            ...reqPayload,
+            txType: "supplier_payment",
+            entityType: "supplier_invoice",
+            invoiceId: inv.id,
+            invoiceVoucherNo: inv.voucherNo,
+            supplierName: inv.supplierName,
+            id: `ftx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+            voucherCode: `PC-${ts.receivedDate.slice(0, 7).replace("-", "")}-${String(auxSeq).padStart(4, "0")}`,
+            receivedDate: ts.receivedDate,
+            receivedAt: ts.receivedAt,
+            recordedAt: new Date().toISOString()
+          }, auxSeq);
+          return {
+            ok: true,
+            idempotentReplay: false,
+            transaction: tx,
+            invoice: inv,
+            nextFinanceState: { ...fState, ledgerVersion: (fState.ledgerVersion || 0) + 1, voucherSeq: auxSeq, transactions: [...fState.transactions, tx] }
+          };
+        });
+      }
+
+      upsertPendingFinanceIntent({
+        idempotencyKey,
+        kind: "supplier_payment",
+        invoiceId,
+        payload: reqPayload,
+        status: "unconfirmed",
+        label: `Chi NCC ${Core.formatVND(reqPayload.amount)} (${Core.getFinanceFundById(reqPayload.fundId).shortName})`,
+        createdAt: new Date().toISOString()
+      });
+
+      try {
+        const res = await fetchJson(`/api/finance/supplier-invoices/${encodeURIComponent(invoiceId)}/payments`, {
+          method: "POST",
+          body: reqPayload,
+          headers: { "X-Idempotency-Key": idempotencyKey },
+          timeoutMs: 12000
+        });
+        if (res.status === 401) {
+          handleAuthExpired(res.data && res.data.error);
+          return { ok: false, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
+        }
+        if (!res.data) {
+          return {
+            ok: false,
+            offline: true,
+            unconfirmed: true,
+            idempotencyKey,
+            code: "UNCONFIRMED_RESPONSE",
+            error: "Chưa xác nhận phản hồi phiếu chi từ máy chủ — đang ở trạng thái Chờ đồng bộ. Bấm Kiểm tra lại để tránh chi trùng."
+          };
+        }
+        if (res.data.ok) {
+          removePendingFinanceIntent(idempotencyKey);
+          if (res.data.financeState) stateCache.financeState = Core.sanitizeFinanceState(res.data.financeState);
+          if (res.data.storeVersion) storeVersion = res.data.storeVersion;
+          lastSyncedAt = new Date().toISOString();
+          emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+          return res.data;
+        }
+        removePendingFinanceIntent(idempotencyKey);
+        if (res.status === 409) {
+          await pullLatestFromServer({ type: "conflict_refresh" });
+        }
+        return res.data;
+      } catch {
+        return {
+          ok: false,
+          offline: true,
+          unconfirmed: true,
+          idempotencyKey,
+          code: "NETWORK_UNCONFIRMED",
+          error: "Chưa xác nhận (mất kết nối khi gửi phiếu chi). Không bấm chi lại ngay — hãy bấm Kiểm tra & đồng bộ lại khi có mạng."
+        };
+      }
+    }
+
     async function appendFinanceSyncLog(entry) {
       if (mode !== "server") return { ok: true };
       try {
@@ -1638,6 +1779,9 @@
       cancelBookingWithDeposit,
       updateBookingCharges,
       migrateLegacyPayments,
+      saveSupplierInvoice,
+      deleteSupplierInvoice,
+      paySupplierInvoice,
       appendFinanceSyncLog,
       getHousekeepingTasks: () => stateCache.housekeepingTasks,
       getMaintenanceIssues: () => stateCache.maintenanceIssues,

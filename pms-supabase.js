@@ -2208,7 +2208,24 @@
       }),
       reconcileFinanceTransaction: (txId, payload = {}) => cloudFinanceOp((fState) => {
         if (!can("finance:reconcile")) return { ok: false, code: "FORBIDDEN", error: "Đối chiếu chỉ dành cho Quản lý." };
-        const nextTx = fState.transactions.map((t) => (t.id === txId ? { ...t, reconciled: payload.reconciled !== undefined ? Boolean(payload.reconciled) : true, fundId: payload.fundId || t.fundId, receivedDate: payload.receivedDate || t.receivedDate, legacyStatus: (t.isLegacyMigrated && payload.fundId && payload.receivedDate) ? "reconciled" : t.legacyStatus, reconciledBy: (session && session.staffName) || "Quản lý", reconciledAt: new Date().toISOString() } : t));
+        const evidence = Core.sanitizeText(payload.reconcileEvidence !== undefined ? payload.reconcileEvidence : payload.reconcileNote, 300);
+        const nextTx = fState.transactions.map((t) => {
+          if (t.id !== txId) return t;
+          const isOpening = t.isLegacyMigrated && payload.legacyResolution === "included_in_opening";
+          const isToFund = t.isLegacyMigrated && (payload.legacyResolution === "record_to_fund" || (payload.fundId && payload.receivedDate && !isOpening));
+          return {
+            ...t,
+            reconciled: payload.reconciled !== undefined ? Boolean(payload.reconciled) : true,
+            fundId: isOpening ? "unassigned_legacy" : (isToFund ? payload.fundId : t.fundId),
+            receivedDate: isToFund ? payload.receivedDate : t.receivedDate,
+            legacyStatus: isOpening ? "reconciled_in_opening" : (isToFund ? "reconciled" : t.legacyStatus),
+            legacyResolution: isOpening ? "included_in_opening" : (isToFund ? "record_to_fund" : (t.legacyResolution || "")),
+            reconciledBy: (session && session.staffName) || "Quản lý",
+            reconciledAt: new Date().toISOString(),
+            reconcileNote: Core.sanitizeText(payload.reconcileNote || t.reconcileNote, 300),
+            reconcileEvidence: evidence || t.reconcileEvidence || ""
+          };
+        });
         return { ok: true, nextFinanceState: { ...fState, transactions: nextTx } };
       }),
       saveFundReconciliationCheck: (payload = {}) => cloudFinanceOp((fState, bookings) => {
@@ -2235,6 +2252,41 @@
         if (!can("admin:backup")) return { ok: false, code: "FORBIDDEN", error: "Chuyển đổi dữ liệu chỉ dành cho Quản lý." };
         const plan = Core.buildLegacyMigrationPlan(bookings, fState, (session && session.staffName) || "Quản lý");
         return { ok: true, dryRun: Boolean(opts.dryRun), ...plan, nextFinanceState: plan.nextFinanceState };
+      }),
+      saveSupplierInvoice: (payload = {}) => cloudFinanceOp((fState) => {
+        if (!can("finance:payables_write")) return { ok: false, code: "FORBIDDEN", error: "Quản lý hóa đơn NCC chỉ dành cho Quản lý." };
+        const list = Array.isArray(fState.supplierInvoices) ? fState.supplierInvoices : [];
+        const existing = payload.id ? list.find((i) => i.id === payload.id) : null;
+        const inv = Core.sanitizeSupplierInvoice({ ...(existing || {}), ...payload, id: existing ? existing.id : (payload.id || `sinv_${Date.now().toString(36)}`), createdBy: existing ? existing.createdBy : ((session && session.staffName) || "Quản lý"), updatedAt: new Date().toISOString() }, list.length);
+        if (!inv || !inv.lines.length) return { ok: false, error: "Thông tin hóa đơn không hợp lệ." };
+        const nextList = existing ? list.map((i) => (i.id === inv.id ? inv : i)) : [inv, ...list];
+        return { ok: true, invoice: inv, nextFinanceState: { ...fState, supplierInvoices: nextList } };
+      }),
+      deleteSupplierInvoice: (invoiceId) => cloudFinanceOp((fState) => {
+        if (!can("finance:payables_write")) return { ok: false, code: "FORBIDDEN", error: "Chỉ Quản lý được xóa hóa đơn NCC." };
+        const hasPays = (fState.transactions || []).some((t) => t.txType === "supplier_payment" && t.invoiceId === invoiceId);
+        if (hasPays) return { ok: false, code: "INVOICE_HAS_PAYMENTS", error: "Hóa đơn đã có phiếu chi — không thể xóa." };
+        return { ok: true, deletedId: invoiceId, nextFinanceState: { ...fState, supplierInvoices: (fState.supplierInvoices || []).filter((i) => i.id !== invoiceId) } };
+      }),
+      paySupplierInvoice: (invoiceId, payload = {}) => cloudFinanceOp((fState) => {
+        if (!can("finance:payables_pay")) return { ok: false, code: "FORBIDDEN", error: "Thanh toán hóa đơn NCC chỉ dành cho Quản lý." };
+        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120) || `ftx_spay_${Date.now().toString(36)}`;
+        const dup = fState.transactions.find((t) => t.idempotencyKey === idemKey);
+        if (dup) return { ok: true, idempotentReplay: true, transaction: dup, nextFinanceState: fState };
+        const inv = (fState.supplierInvoices || []).find((i) => i.id === invoiceId);
+        if (!inv) return { ok: false, error: "Không tìm thấy hóa đơn nhà cung cấp." };
+        const paidSoFar = fState.transactions.filter((t) => t.txType === "supplier_payment" && t.invoiceId === invoiceId).reduce((s, t) => s + Core.parseVND(t.amount), 0);
+        const rem = Math.max(0, Core.roundVND(inv.totalAmount - paidSoFar));
+        const amt = Core.parseVND(payload.amount);
+        if (rem <= 0) return { ok: false, code: "INVOICE_ALREADY_PAID", currentRemaining: 0, error: "Hóa đơn đã thanh toán hết." };
+        if (payload.expectedRemaining !== undefined && Core.parseVND(payload.expectedRemaining) !== rem) {
+          return { ok: false, code: "STALE_INVOICE_BALANCE", currentRemaining: rem, error: "Số dư hóa đơn vừa thay đổi." };
+        }
+        if (amt <= 0 || amt > rem) return { ok: false, code: "EXCEEDS_REMAINING", currentRemaining: rem, error: "Số tiền chi vượt quá số còn phải trả." };
+        const auxSeq = (fState.voucherSeq || fState.transactions.length) + 1;
+        const ts = Core.normalizeFinanceTimestamp(payload.receivedAt || payload.receivedDate);
+        const tx = Core.sanitizeFinanceTransaction({ ...payload, txType: "supplier_payment", entityType: "supplier_invoice", invoiceId: inv.id, invoiceVoucherNo: inv.voucherNo, supplierName: inv.supplierName, id: `ftx_${Date.now().toString(36)}`, voucherCode: `PC-${ts.receivedDate.slice(0, 7).replace("-", "")}-${String(auxSeq).padStart(4, "0")}`, receivedDate: ts.receivedDate, receivedAt: ts.receivedAt, operator: (session && session.staffName) || "Quản lý", approvedBy: (session && session.staffName) || "Quản lý", idempotencyKey: idemKey, recordedAt: new Date().toISOString() }, auxSeq);
+        return { ok: true, idempotentReplay: false, transaction: tx, invoice: inv, nextFinanceState: { ...fState, voucherSeq: auxSeq, transactions: [...fState.transactions, tx] } };
       }),
       appendFinanceSyncLog: async () => ({ ok: true }),
       getHousekeepingTasks: () => stateCache.housekeepingTasks,

@@ -69,6 +69,11 @@
             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
             <span class="nav-label">Sổ quỹ &amp; đối soát</span>
           </button>
+          <button id="btn-open-payables" class="nav-item" type="button" data-nav-key="payables" title="Hóa đơn nhà cung cấp, công nợ phải trả &amp; liên kết chi phí vận hành">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg></span>
+            <span class="nav-label">Hóa đơn NCC &amp; công nợ trả</span>
+            <span id="ap-badge-pill" class="nav-badge nav-badge-warn" style="display:none;">0</span>
+          </button>
           <button id="btn-open-costs" class="nav-item" type="button" data-nav-key="operating_costs" title="Chi phí vận hành &amp; giá vốn theo tháng">
             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3"/><path d="M16 12h5v4h-5a2 2 0 0 1 0-4z"/></svg></span>
             <span class="nav-label">Chi phí &amp; giá vốn</span>
@@ -435,6 +440,17 @@
                 <span>VAT 8%: <strong id="pc-vat-amount-display">0 đ</strong></span>
                 <span>Tổng sau VAT: <strong id="pc-vat-total-display">0 đ</strong></span>
               </div>
+            </div>
+          </div>
+
+          <div class="form-grid">
+            <div class="field">
+              <label for="field-deposit-due-date">Hạn cọc (nếu có)</label>
+              <input id="field-deposit-due-date" class="input" type="date" />
+            </div>
+            <div class="field">
+              <label for="field-payment-due-date">Hạn thanh toán (nếu có)</label>
+              <input id="field-payment-due-date" class="input" type="date" />
             </div>
           </div>
 
@@ -1467,6 +1483,7 @@
           </label>
         </div>
         <div id="ar-summary-strip" class="fin-kpi-grid"></div>
+        <div id="ar-due-buckets-strip" class="fin-due-buckets-grid" aria-label="Phân nhóm công nợ theo hạn thanh toán"></div>
         <div id="ar-migration-report" class="fin-migration-box" style="display:none;"></div>
         <div id="ar-content-area" class="fin-list-area"></div>
       </div>
@@ -1517,6 +1534,7 @@
             <option value="all">Mọi loại giao dịch</option>
             <option value="customer_payment">Thu tiền khách</option>
             <option value="customer_refund">Hoàn tiền khách</option>
+            <option value="supplier_payment">Chi trả nhà cung cấp</option>
             <option value="fund_transfer">Chuyển quỹ nội bộ</option>
             <option value="balance_adjustment">Điều chỉnh số dư quỹ</option>
           </select>
@@ -1552,6 +1570,54 @@
       <div class="modal-footer">
         <span style="font-size:12px; color:var(--text-muted);">Không gồm chuyển quỹ nội bộ, số dư đầu kỳ hoặc dữ liệu chuyển tiếp chưa gán ngày.</span>
         <button id="btn-close-monthly-receipts-2" class="btn btn-primary" type="button">Đóng</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase 2 Finance Modal 4: Hóa đơn nhà cung cấp & Công nợ phải trả (Quản lý / Tổng quản lý) -->
+  <div id="payables-modal" class="modal-backdrop fin-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="ap-modal-title">
+    <div class="modal-card modal-xl fin-modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="ap-modal-title" class="modal-title">Hóa đơn nhà cung cấp &amp; Công nợ phải trả</h2>
+          <div id="ap-modal-subtitle" class="modal-subtitle">Ghi nhận hóa đơn chi phí theo kỳ kế toán, theo dõi hạn trả, thanh toán từng phần từ Sổ quỹ và liên kết trực tiếp Chi phí vận hành</div>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <button id="btn-ap-new-invoice" class="btn btn-sm btn-primary" type="button">+ Thêm hóa đơn NCC</button>
+          <button id="btn-ap-export-csv" class="btn btn-sm" type="button" title="Xuất bảng hóa đơn nhà cung cấp &amp; công nợ phải trả ra Excel (CSV)">⬇ Xuất Excel (CSV)</button>
+          <button id="btn-close-payables" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+        </div>
+      </div>
+      <div class="modal-body fin-modal-body">
+        <div id="ap-pending-intents-bar" class="fin-pending-bar" style="display:none;"></div>
+        <div id="ap-summary-strip" class="fin-kpi-grid"></div>
+        <div id="ap-form-drawer" class="fin-action-drawer" style="display:none;"></div>
+        <div class="fin-filters-bar">
+          <input id="ap-filter-search" class="input" type="search" placeholder="Tìm nhà cung cấp, số chứng từ, khoản mục, ghi chú..." />
+          <select id="ap-filter-supplier" class="select" aria-label="Lọc theo nhà cung cấp">
+            <option value="all">Tất cả nhà cung cấp</option>
+          </select>
+          <label class="fin-date-filter-wrap">
+            <span>Kỳ chi phí:</span>
+            <input id="ap-filter-month" class="input" type="month" aria-label="Lọc kỳ ghi nhận chi phí" />
+          </label>
+          <label class="fin-date-filter-wrap">
+            <span>Tính nợ đến ngày:</span>
+            <input id="ap-filter-asof" class="input" type="date" aria-label="Tính công nợ phải trả đến ngày" />
+          </label>
+          <select id="ap-filter-status" class="select" aria-label="Lọc trạng thái hóa đơn">
+            <option value="all">Mọi trạng thái</option>
+            <option value="unpaid">Chưa thanh toán</option>
+            <option value="partial">Thanh toán một phần</option>
+            <option value="overdue">Quá hạn thanh toán</option>
+            <option value="paid">Đã thanh toán đủ</option>
+          </select>
+        </div>
+        <div id="ap-content-area" class="fin-list-area"></div>
+      </div>
+      <div class="modal-footer">
+        <span id="ap-footer-note" style="font-size:12px; color:var(--text-muted);">Chi phí ghi nhận theo kỳ của hóa đơn; mỗi lần thanh toán chỉ trừ Sổ quỹ &amp; công nợ phải trả (không ghi trùng chi phí).</span>
+        <button id="btn-close-payables-2" class="btn btn-primary" type="button">Đóng</button>
       </div>
     </div>
   </div>

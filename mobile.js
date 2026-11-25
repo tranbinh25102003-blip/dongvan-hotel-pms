@@ -963,6 +963,11 @@
       if (window.PMSFinanceApp) window.PMSFinanceApp.openCashbook();
       return;
     }
+    if (key === "payables") {
+      if (!mCan("finance:payables_read")) return showMobileToast("Hóa đơn NCC & công nợ trả chỉ dành cho Quản lý.");
+      if (window.PMSFinanceApp) window.PMSFinanceApp.openPayables();
+      return;
+    }
     if (key === "operating_costs") {
       if (!mCan("costs:read")) return showMobileToast("Chi phí & Giá vốn chỉ dành cho Quản lý.");
       if (window.PMSOperatingCostsModal) {

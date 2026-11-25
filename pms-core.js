@@ -843,6 +843,12 @@
         ? existingRecord.createdAt.slice(0, 10)
         : getTodayISO();
     const bookingDate = isValidISODate(obj.bookingDate) ? obj.bookingDate : fallbackBookingDate;
+    const depositDueDate = obj.depositDueDate !== undefined
+      ? (normalizeFinanceDateISO(obj.depositDueDate) || "")
+      : (existingRecord && normalizeFinanceDateISO(existingRecord.depositDueDate)) || "";
+    const paymentDueDate = obj.paymentDueDate !== undefined
+      ? (normalizeFinanceDateISO(obj.paymentDueDate) || "")
+      : (existingRecord && normalizeFinanceDateISO(existingRecord.paymentDueDate)) || "";
 
     const existingChargeHistory = Array.isArray(obj.chargeHistory)
       ? obj.chargeHistory
@@ -879,6 +885,8 @@
       bookingDate,
       checkin,
       checkout,
+      depositDueDate,
+      paymentDueDate,
       channelKey,
       sourceName,
       tourName,
@@ -2428,22 +2436,84 @@
     return { monthKey, proratedRoomRevenue, proratedDormRevenue };
   }
 
-  function computeMonthlyOperatingCosts(costState, bookings, monthKey) {
+  function computeMonthlyOperatingCosts(costState, bookings, monthKey, financeState = null) {
     const clean = sanitizeOperatingCostsState(costState);
     const targetMonth = isValidMonthKey(monthKey) ? monthKey : getCurrentMonthKey();
     const stay = computeMonthlyStayMetrics(bookings, targetMonth);
     const rev = computeMonthlyProratedRevenue(bookings, targetMonth);
 
+    // Collect supplier invoices & map linked legacy actualEntries to prevent double-counting
+    const invoices = financeState && Array.isArray(financeState.supplierInvoices)
+      ? financeState.supplierInvoices
+      : [];
+    const linkedLegacyMap = new Map(); // legacyEntryId -> { invoiceId, voucherNo, supplierName }
+    const invoiceLinesByItem = new Map();
+
+    for (const inv of invoices) {
+      if (!inv || !inv.id) continue;
+      for (const legId of (inv.linkedLegacyEntryIds || [])) {
+        if (legId) {
+          linkedLegacyMap.set(legId, {
+            invoiceId: inv.id,
+            voucherNo: inv.voucherNo || inv.invoiceCode || inv.id,
+            supplierName: inv.supplierName || ""
+          });
+        }
+      }
+      if (inv.accountingMonth !== targetMonth) continue;
+      for (const line of (inv.lines || [])) {
+        if (!line || !line.costItemId) continue;
+        const amt = parseVND(line.amount);
+        if (amt <= 0) continue;
+        let arr = invoiceLinesByItem.get(line.costItemId);
+        if (!arr) {
+          arr = [];
+          invoiceLinesByItem.set(line.costItemId, arr);
+        }
+        arr.push({
+          id: `invline_${inv.id}_${line.id}`,
+          sourceType: "supplier_invoice",
+          invoiceId: inv.id,
+          voucherNo: inv.voucherNo || inv.invoiceCode || "",
+          supplierName: inv.supplierName || "",
+          itemId: line.costItemId,
+          expenseDate: inv.invoiceDate || `${targetMonth}-01`,
+          accountingMonth: inv.accountingMonth,
+          amount: amt,
+          note: `${inv.supplierName || "NCC"} • HĐ ${inv.voucherNo || inv.invoiceCode || inv.id}${line.description ? ` — ${line.description}` : ""}`,
+          createdBy: inv.createdBy || "",
+          createdAt: inv.createdAt || ""
+        });
+      }
+    }
+
     const monthFinalizedMap = clean.monthlyFinalized[targetMonth] || {};
     const entriesByItem = new Map();
+    const linkedLegacyByItem = new Map();
     for (const ent of clean.actualEntries) {
       if (ent.accountingMonth !== targetMonth) continue;
+      const linkedInv = linkedLegacyMap.get(ent.id);
+      if (linkedInv) {
+        let lArr = linkedLegacyByItem.get(ent.itemId);
+        if (!lArr) {
+          lArr = [];
+          linkedLegacyByItem.set(ent.itemId, lArr);
+        }
+        lArr.push({
+          ...ent,
+          sourceType: "legacy_linked",
+          linkedInvoiceId: linkedInv.invoiceId,
+          linkedInvoiceVoucherNo: linkedInv.voucherNo,
+          linkedSupplierName: linkedInv.supplierName
+        });
+        continue;
+      }
       let arr = entriesByItem.get(ent.itemId);
       if (!arr) {
         arr = [];
         entriesByItem.set(ent.itemId, arr);
       }
-      arr.push(ent);
+      arr.push({ ...ent, sourceType: "manual_voucher" });
     }
 
     const rows = [];
@@ -2452,13 +2522,20 @@
     let totalEstimatedPortion = 0;
     let totalEnteredActual = 0;
     let finalizedCount = 0;
+    let finalizedZeroCount = 0;
+    let estimatedCount = 0;
     let partialActualCount = 0;
+    let missingBasisCount = 0;
+    const missingBasisItems = [];
 
     for (const item of clean.items) {
-      const entries = (entriesByItem.get(item.id) || []).slice().sort((a, b) => String(b.expenseDate).localeCompare(String(a.expenseDate)));
+      const manualEntries = entriesByItem.get(item.id) || [];
+      const invEntries = invoiceLinesByItem.get(item.id) || [];
+      const linkedLegacyEntries = linkedLegacyByItem.get(item.id) || [];
+      const entries = [...invEntries, ...manualEntries].sort((a, b) => String(b.expenseDate).localeCompare(String(a.expenseDate)));
       const finalizedMeta = monthFinalizedMap[item.id] || null;
       const isFinalized = Boolean(finalizedMeta && finalizedMeta.finalized);
-      if (!item.active && entries.length === 0 && !isFinalized) continue;
+      if (!item.active && entries.length === 0 && linkedLegacyEntries.length === 0 && !isFinalized) continue;
 
       const modeMeta = COST_CALC_MODES[item.calcMode] || COST_CALC_MODES.monthly;
       const rateInfo = getEffectiveCostRate(item, targetMonth);
@@ -2475,14 +2552,39 @@
 
       const estimatedAmount = rateInfo.hasRate ? Math.round(quantity * rateInfo.rate) : 0;
       const actualAmount = entries.reduce((sum, e) => sum + parseVND(e.amount), 0);
+      const supplierInvoiceAmount = invEntries.reduce((sum, e) => sum + parseVND(e.amount), 0);
+      const manualActualAmount = manualEntries.reduce((sum, e) => sum + parseVND(e.amount), 0);
       const hasActualEntries = entries.length > 0;
       const isPartialActual = !isFinalized && hasActualEntries;
       const usedAmount = isFinalized ? actualAmount : estimatedAmount;
       const usedSource = isFinalized ? "actual" : "estimated";
 
+      // Clear 4-way distinction: missing_basis | estimated | finalized_zero | finalized_actual
+      let costBasisStatus = "estimated";
+      let costBasisLabel = "Có ước tính";
+      if (isFinalized) {
+        if (actualAmount === 0) {
+          costBasisStatus = "finalized_zero";
+          costBasisLabel = "Đã chốt thực tế = 0 đ";
+          finalizedZeroCount += 1;
+        } else {
+          costBasisStatus = "finalized_actual";
+          costBasisLabel = "Đã chốt thực tế";
+        }
+      } else if (!rateInfo.hasRate) {
+        costBasisStatus = "missing_basis";
+        costBasisLabel = hasActualEntries ? "Chưa nhập định mức (chưa chốt thực tế)" : "Chưa nhập định mức";
+        missingBasisCount += 1;
+        missingBasisItems.push({ itemId: item.id, name: item.name, hasActualEntries, actualAmount });
+      } else {
+        costBasisStatus = "estimated";
+        costBasisLabel = "Có ước tính";
+        estimatedCount += 1;
+      }
+
       const formulaText = rateInfo.hasRate
         ? `${quantityLabel} × ${formatVND(rateInfo.rate)} = ${formatVND(estimatedAmount)}`
-        : "Chưa cấu hình định mức — nhập trực tiếp chứng từ thực tế rồi chốt";
+        : "Chưa cấu hình định mức — nhập chứng từ/hóa đơn NCC hoặc chốt thực tế (= 0 đ nếu tháng này không phát sinh)";
 
       totalMonthlyCost += usedAmount;
       totalEnteredActual += actualAmount;
@@ -2508,11 +2610,17 @@
         estimatedAmount,
         formulaText,
         actualAmount,
+        supplierInvoiceAmount,
+        manualActualAmount,
         entries,
+        linkedLegacyEntries,
         entriesCount: entries.length,
+        invoiceLinesCount: invEntries.length,
         isFinalized,
         finalizedMeta,
         isPartialActual,
+        costBasisStatus,
+        costBasisLabel,
         usedAmount,
         usedSource,
         variance: actualAmount - estimatedAmount
@@ -2528,6 +2636,12 @@
       ? Math.round((totalMonthlyCost / proratedRoomRevenue) * 1000) / 10
       : null;
 
+    const missingGuestBasis = stay.missingGuestBookings.length > 0 && rows.some((r) => r.calcMode === "guest_night" && !r.isFinalized && r.hasRate);
+    const profitBasisSufficient = missingBasisCount === 0 && !missingGuestBasis;
+    const profitStatusLabel = profitBasisSufficient
+      ? "Đủ căn cứ tính lãi"
+      : "Chưa đủ dữ liệu tính lãi";
+
     return {
       monthKey: targetMonth,
       monthLabelVN: formatMonthVN(targetMonth),
@@ -2538,7 +2652,14 @@
       totalEstimatedPortion,
       totalEnteredActual,
       finalizedCount,
+      finalizedZeroCount,
+      estimatedCount,
       partialActualCount,
+      missingBasisCount,
+      missingBasisItems,
+      missingGuestBasis,
+      profitBasisSufficient,
+      profitStatusLabel,
       soldRoomNights: stay.soldRoomNights,
       guestNights: stay.guestNights,
       costPerRoomNight,
@@ -2559,6 +2680,8 @@
     pushRow(["Tổng chi phí tháng (VNĐ)", report.totalMonthlyCost || 0]);
     pushRow(["Phần đã chốt theo thực tế (VNĐ)", report.totalActualPortion || 0]);
     pushRow(["Phần còn dùng ước tính (VNĐ)", report.totalEstimatedPortion || 0]);
+    pushRow(["Số khoản mục thiếu định mức / chưa chốt", report.missingBasisCount || 0]);
+    pushRow(["Trạng thái căn cứ tính lãi", report.profitStatusLabel || ""]);
     pushRow(["Số đêm phòng đã bán", report.soldRoomNights || 0]);
     pushRow(["Số khách-đêm", report.guestNights || 0]);
     pushRow(["Chi phí bình quân / đêm phòng (VNĐ)", report.costPerRoomNight !== null && report.costPerRoomNight !== undefined ? report.costPerRoomNight : "Chưa có đêm phòng"]);
@@ -2579,9 +2702,9 @@
       "Chênh lệch TT - ƯT (VNĐ)"
     ]);
     for (const r of (report.rows || [])) {
-      const statusTxt = r.isFinalized
-        ? "Đã chốt thực tế"
-        : (r.isPartialActual ? "Mới nhập 1 phần (đang dùng ước tính)" : "Ước tính");
+      const statusTxt = r.costBasisLabel || (r.isFinalized
+        ? (r.actualAmount === 0 ? "Đã chốt thực tế = 0 đ" : "Đã chốt thực tế")
+        : (r.isPartialActual ? "Mới nhập 1 phần (đang dùng ước tính)" : "Ước tính"));
       pushRow([
         r.name,
         r.calcModeLabel,
@@ -2596,8 +2719,8 @@
     }
     pushRow([]);
 
-    pushRow(["CHI TIẾT CHỨNG TỪ THỰC TẾ TRONG THÁNG"]);
-    pushRow(["Ngày phát sinh", "Tháng ghi nhận", "Khoản mục", "Số tiền (VNĐ)", "Ghi chú", "Người nhập"]);
+    pushRow(["CHI TIẾT CHỨNG TỪ & HÓA ĐƠN NHÀ CUNG CẤP TRONG THÁNG"]);
+    pushRow(["Nguồn", "Ngày phát sinh / HĐ", "Tháng ghi nhận", "Khoản mục", "Số tiền (VNĐ)", "Ghi chú / Số HĐ", "Người nhập"]);
     const allVouchers = [];
     for (const r of (report.rows || [])) {
       for (const e of (r.entries || [])) {
@@ -2607,6 +2730,7 @@
     allVouchers.sort((a, b) => String(b.expenseDate || "").localeCompare(String(a.expenseDate || "")));
     for (const v of allVouchers) {
       pushRow([
+        v.sourceType === "supplier_invoice" ? "Hóa đơn NCC" : "Chứng từ chi",
         v.expenseDate,
         v.accountingMonth,
         v.itemName,
@@ -2642,6 +2766,7 @@
       "finance:collect", "finance:ar_read", "finance:shift_read",
       "finance:cashbook_read", "finance:approve_refund", "finance:approve_adjustment",
       "finance:transfer", "finance:reconcile", "finance:opening_balance", "finance:export",
+      "finance:payables_read", "finance:payables_write", "finance:payables_pay",
       "accounts:manage", "accounts:create", "accounts:lock", "accounts:delete",
       "reports:daily", "reports:management",
       "admin:backup", "admin:restore", "admin:reset"
@@ -2655,6 +2780,7 @@
       "finance:collect", "finance:ar_read", "finance:shift_read",
       "finance:cashbook_read", "finance:approve_refund", "finance:approve_adjustment",
       "finance:transfer", "finance:reconcile", "finance:opening_balance", "finance:export",
+      "finance:payables_read", "finance:payables_write", "finance:payables_pay",
       "reports:daily", "reports:management",
       "admin:backup", "admin:restore", "admin:reset"
     ])),
@@ -2704,6 +2830,7 @@
     sparkles: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z"/></svg>',
     wallet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3"/><path d="M16 12h5v4h-5a2 2 0 0 1 0-4z"/></svg>',
     receipt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1-2-1z"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="12" y2="16"/></svg>',
+    file_text: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
     book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
     tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>',
     bag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>',
@@ -2736,8 +2863,9 @@
       key: "finance",
       label: "Tài chính",
       items: Object.freeze([
-        Object.freeze({ key: "receivables", label: "Thu tiền & công nợ", id: "btn-open-receivables", icon: "receipt", permission: "finance:ar_read", implemented: true }),
+        Object.freeze({ key: "receivables", label: "Thu tiền & công nợ", id: "btn-open-receivables", badgeId: "ar-badge-pill", icon: "receipt", permission: "finance:ar_read", implemented: true }),
         Object.freeze({ key: "cashbook", label: "Sổ quỹ & đối soát", id: "btn-open-cashbook", icon: "book", permission: "finance:cashbook_read", implemented: true }),
+        Object.freeze({ key: "payables", label: "Hóa đơn NCC & công nợ trả", id: "btn-open-payables", badgeId: "ap-badge-pill", icon: "file_text", permission: "finance:payables_read", implemented: true }),
         Object.freeze({ key: "operating_costs", label: "Chi phí & giá vốn", id: "btn-open-costs", icon: "wallet", permission: "costs:read", implemented: true })
       ])
     }),
@@ -4053,10 +4181,18 @@
   const FINANCE_TX_TYPES = Object.freeze({
     customer_payment: Object.freeze({ key: "customer_payment", label: "Thu tiền khách", shortLabel: "Thu khách", prefix: "PT" }),
     customer_refund: Object.freeze({ key: "customer_refund", label: "Hoàn tiền khách", shortLabel: "Hoàn khách", prefix: "PH" }),
+    supplier_payment: Object.freeze({ key: "supplier_payment", label: "Chi trả nhà cung cấp", shortLabel: "Chi NCC", prefix: "PC" }),
     fund_transfer: Object.freeze({ key: "fund_transfer", label: "Chuyển quỹ nội bộ", shortLabel: "Chuyển quỹ", prefix: "CK" }),
     opening_balance: Object.freeze({ key: "opening_balance", label: "Số dư đầu kỳ", shortLabel: "Đầu kỳ", prefix: "DK" }),
     balance_adjustment: Object.freeze({ key: "balance_adjustment", label: "Điều chỉnh số dư quỹ", shortLabel: "Điều chỉnh quỹ", prefix: "DC" }),
     legacy_payment: Object.freeze({ key: "legacy_payment", label: "Dữ liệu chuyển tiếp – cần đối soát", shortLabel: "Chuyển tiếp", prefix: "CT" })
+  });
+
+  const SUPPLIER_INVOICE_STATUSES = Object.freeze({
+    unpaid: Object.freeze({ key: "unpaid", label: "Chưa trả" }),
+    partial: Object.freeze({ key: "partial", label: "Trả một phần" }),
+    paid: Object.freeze({ key: "paid", label: "Đã trả" }),
+    overdue: Object.freeze({ key: "overdue", label: "Quá hạn" })
   });
 
   const REFUND_CATEGORIES = Object.freeze({
@@ -4076,15 +4212,94 @@
 
   function createDefaultFinanceState() {
     return {
-      version: 1,
+      version: 2,
       ledgerVersion: 0,
       voucherSeq: 0,
       transactions: [],
+      supplierInvoices: [],
       openingBalances: [],
       reconciliationChecks: [],
       syncLogs: [],
       migrationHistory: [],
       updatedAt: new Date().toISOString()
+    };
+  }
+
+  function sanitizeSupplierInvoiceAttachment(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const obj = stripDangerousKeys(raw);
+    const name = sanitizeText(obj.name, 120);
+    const rawUrl = String(obj.url || obj.dataUrl || "").trim();
+    const isSafe = rawUrl.startsWith("/api/photos/") || rawUrl.startsWith("data:image/") || rawUrl.startsWith("data:application/pdf");
+    if (!isSafe || rawUrl.length > 3 * 1024 * 1024) return null;
+    return {
+      id: sanitizeText(obj.id, 80) || `att_${Date.now().toString(36)}`,
+      name: name || "chung-tu",
+      mimeType: sanitizeText(obj.mimeType, 60) || "image/jpeg",
+      size: Math.max(0, Math.trunc(Number(obj.size) || 0)),
+      url: rawUrl
+    };
+  }
+
+  function sanitizeSupplierInvoiceLine(raw, idx = 0) {
+    const obj = stripDangerousKeys(raw);
+    if (!obj || typeof obj !== "object") return null;
+    const amount = parseVND(obj.amount);
+    if (amount <= 0) return null;
+    const costItemId = sanitizeText(obj.costItemId, 64) || "ci_other";
+    const costItemName = sanitizeText(obj.costItemName, 100);
+    const description = sanitizeText(obj.description, 240);
+    return {
+      id: sanitizeText(obj.id, 64) || `sline_${Date.now().toString(36)}_${idx}`,
+      costItemId,
+      costItemName,
+      description,
+      amount
+    };
+  }
+
+  function sanitizeSupplierInvoice(raw, idx = 0) {
+    const obj = stripDangerousKeys(raw);
+    if (!obj || typeof obj !== "object") return null;
+    const supplierName = sanitizeText(obj.supplierName, 120);
+    if (!supplierName) return null;
+    const lines = Array.isArray(obj.lines)
+      ? obj.lines.map((l, i) => sanitizeSupplierInvoiceLine(l, i)).filter(Boolean)
+      : [];
+    const totalFromLines = lines.reduce((s, l) => s + parseVND(l.amount), 0);
+    const totalAmount = lines.length > 0 ? roundVND(totalFromLines) : parseVND(obj.totalAmount);
+    if (totalAmount <= 0) return null;
+
+    const invoiceDate = normalizeFinanceDateISO(obj.invoiceDate) || getVietnamTodayISO();
+    const accountingMonth = isValidMonthKey(obj.accountingMonth)
+      ? obj.accountingMonth
+      : invoiceDate.slice(0, 7);
+    const dueDate = obj.dueDate !== undefined && String(obj.dueDate || "").trim()
+      ? (normalizeFinanceDateISO(obj.dueDate) || "")
+      : "";
+    const id = sanitizeText(obj.id, 80) || `sinv_${Date.now().toString(36)}_${idx}`;
+    const voucherNo = sanitizeText(obj.voucherNo, 80) || `HD-${accountingMonth.replace("-", "")}-${String(idx + 1).padStart(3, "0")}`;
+    const linkedLegacyEntryIds = Array.isArray(obj.linkedLegacyEntryIds)
+      ? [...new Set(obj.linkedLegacyEntryIds.map((x) => sanitizeText(x, 80)).filter(Boolean))]
+      : [];
+    const nowISO = new Date().toISOString();
+
+    return {
+      id,
+      voucherNo,
+      supplierName,
+      invoiceDate,
+      accountingMonth,
+      dueDate,
+      lines,
+      totalAmount,
+      attachment: sanitizeSupplierInvoiceAttachment(obj.attachment),
+      linkedLegacyEntryIds,
+      note: sanitizeText(obj.note, 500),
+      createdBy: sanitizeText(obj.createdBy, 60) || "Quản lý",
+      createdAt: sanitizeText(obj.createdAt, 40) || nowISO,
+      updatedAt: sanitizeText(obj.updatedAt, 40) || nowISO,
+      revision: Math.max(1, Math.trunc(Number(obj.revision) || 1))
     };
   }
 
@@ -4116,13 +4331,22 @@
     const toFundId = txType === "fund_transfer" && FINANCE_FUNDS.some((f) => f.id === obj.toFundId)
       ? obj.toFundId
       : "";
-    const entityType = obj.entityType === "group" ? "group" : (obj.entityType === "booking" ? "booking" : "fund");
+    const entityType = obj.entityType === "group"
+      ? "group"
+      : (obj.entityType === "booking" ? "booking" : (obj.entityType === "supplier_invoice" || txType === "supplier_payment" ? "supplier_invoice" : "fund"));
     const methodKey = PAYMENT_METHODS.some((m) => m.key === obj.paymentMethod) ? obj.paymentMethod : (fundId === "bank_main" ? "bank_transfer" : "cash");
     const refundCategory = txType === "customer_refund"
       ? (REFUND_CATEGORIES[obj.refundCategory] ? obj.refundCategory : "other")
       : "";
+    const rawLegacyStatus = String(obj.legacyStatus || "").trim();
     const legacyStatus = isLegacyMigrated
-      ? (obj.legacyStatus === "reconciled" ? "reconciled" : "needs_reconciliation")
+      ? (rawLegacyStatus === "reconciled_in_opening" ? "reconciled_in_opening" : (rawLegacyStatus === "reconciled" ? "reconciled" : "needs_reconciliation"))
+      : "";
+    const rawLegRes = String(obj.legacyResolution || "").trim();
+    const legacyResolution = isLegacyMigrated
+      ? (rawLegRes === "included_in_opening" || legacyStatus === "reconciled_in_opening"
+          ? "included_in_opening"
+          : (rawLegRes === "record_to_fund" || legacyStatus === "reconciled" ? "record_to_fund" : ""))
       : "";
 
     return {
@@ -4133,6 +4357,9 @@
       bookingId: sanitizeText(obj.bookingId, 80),
       groupCode: normalizeGroupCode(obj.groupCode),
       groupCodeDisplay: sanitizeText(obj.groupCodeDisplay || obj.groupCode, 60),
+      invoiceId: sanitizeText(obj.invoiceId, 80),
+      invoiceVoucherNo: sanitizeText(obj.invoiceVoucherNo, 80),
+      supplierName: sanitizeText(obj.supplierName, 120),
       amount,
       receivedDate,
       receivedAt,
@@ -4153,8 +4380,10 @@
       reconciledAt: sanitizeText(obj.reconciledAt, 40),
       reconciledBy: sanitizeText(obj.reconciledBy, 60),
       reconcileNote: sanitizeText(obj.reconcileNote, 300),
+      reconcileEvidence: sanitizeText(obj.reconcileEvidence, 300),
       isLegacyMigrated,
       legacyStatus,
+      legacyResolution,
       voucherRef: sanitizeText(obj.voucherRef, 80)
     };
   }
@@ -4165,6 +4394,9 @@
     if (!obj || typeof obj !== "object") return base;
     const transactions = Array.isArray(obj.transactions)
       ? obj.transactions.map((t, i) => sanitizeFinanceTransaction(t, i)).filter(Boolean)
+      : [];
+    const supplierInvoices = Array.isArray(obj.supplierInvoices)
+      ? obj.supplierInvoices.map((inv, i) => sanitizeSupplierInvoice(inv, i)).filter(Boolean)
       : [];
     const openingBalances = Array.isArray(obj.openingBalances)
       ? obj.openingBalances.map((ob, i) => {
@@ -4216,10 +4448,11 @@
     const migrationHistory = Array.isArray(obj.migrationHistory) ? obj.migrationHistory.slice(0, 20) : [];
 
     return {
-      version: 1,
+      version: 2,
       ledgerVersion: Math.max(0, Math.trunc(Number(obj.ledgerVersion) || 0)),
       voucherSeq: Math.max(transactions.length, Math.trunc(Number(obj.voucherSeq) || 0)),
       transactions,
+      supplierInvoices,
       openingBalances,
       reconciliationChecks,
       syncLogs,
@@ -4415,16 +4648,29 @@
 
     let grossPaid = 0;
     let totalRefunded = 0;
+    let confirmedFundGrossPaid = 0;
+    let openingIncludedLegacyPaid = 0;
+    let unassignedLegacyMigratedPaid = 0;
     let legacyMigratedPaid = 0;
     let legacyNeedsReconcileCount = 0;
 
     for (const tx of matchedTx) {
       if (tx.txType === "customer_payment") {
-        grossPaid += parseVND(tx.amount);
+        const a = parseVND(tx.amount);
+        grossPaid += a;
+        confirmedFundGrossPaid += a;
       } else if (tx.txType === "legacy_payment") {
-        grossPaid += parseVND(tx.amount);
-        legacyMigratedPaid += parseVND(tx.amount);
-        if (tx.legacyStatus !== "reconciled") legacyNeedsReconcileCount += 1;
+        const a = parseVND(tx.amount);
+        grossPaid += a;
+        legacyMigratedPaid += a;
+        if (tx.legacyStatus === "reconciled") {
+          confirmedFundGrossPaid += a;
+        } else if (tx.legacyStatus === "reconciled_in_opening") {
+          openingIncludedLegacyPaid += a;
+        } else {
+          unassignedLegacyMigratedPaid += a;
+          legacyNeedsReconcileCount += 1;
+        }
       } else if (tx.txType === "customer_refund") {
         totalRefunded += parseVND(tx.amount);
       }
@@ -4439,9 +4685,42 @@
 
     const effectiveOnDate = effectiveRoomCount > 0 || matchedTx.length > 0;
     const netPaid = roundVND(grossPaid - totalRefunded);
+    const confirmedFundNetPaid = roundVND(confirmedFundGrossPaid - totalRefunded);
+    const unassignedLegacyPaid = roundVND(unassignedLegacyMigratedPaid + unmigratedLegacyPaid);
     const remaining = Math.max(0, roundVND(totalPayable - netPaid));
     const overpaid = Math.max(0, roundVND(netPaid - totalPayable));
     const cancelledHeldDeposit = allCancelled && effectiveRoomCount > 0 && overpaid > 0 ? overpaid : 0;
+
+    // Determine effective due date from booking depositDueDate / paymentDueDate (never fabricate if legacy missing!)
+    const depositDueCandidates = entity.bookings.map((b) => normalizeFinanceDateISO(b.depositDueDate)).filter(Boolean).sort();
+    const paymentDueCandidates = entity.bookings.map((b) => normalizeFinanceDateISO(b.paymentDueDate)).filter(Boolean).sort();
+    const depositDueDate = depositDueCandidates[0] || "";
+    const paymentDueDate = paymentDueCandidates[0] || "";
+    const effectiveDueDate = (netPaid === 0 && depositDueDate)
+      ? depositDueDate
+      : (paymentDueDate || depositDueDate || "");
+    const dueBasisType = (netPaid === 0 && depositDueDate)
+      ? "deposit_due"
+      : (paymentDueDate ? "payment_due" : (depositDueDate ? "deposit_due" : "none"));
+    const refDate = effectiveAsOf || getVietnamTodayISO();
+
+    let dueBucket = "settled";
+    let dueBucketLabel = "Đã hoàn tất";
+    if (remaining > 0) {
+      if (!effectiveDueDate) {
+        dueBucket = "no_due_date";
+        dueBucketLabel = "Chưa xác định hạn";
+      } else if (effectiveDueDate < refDate) {
+        dueBucket = "overdue";
+        dueBucketLabel = "Quá hạn";
+      } else if (effectiveDueDate === refDate) {
+        dueBucket = "due";
+        dueBucketLabel = "Đến hạn";
+      } else {
+        dueBucket = "not_due";
+        dueBucketLabel = "Chưa đến hạn";
+      }
+    }
 
     let arStatus = "unpaid";
     if (allCancelled && effectiveRoomCount > 0) {
@@ -4467,10 +4746,19 @@
       grossPaid: roundVND(grossPaid),
       totalRefunded: roundVND(totalRefunded),
       netPaid,
+      confirmedFundNetPaid,
+      openingIncludedLegacyPaid: roundVND(openingIncludedLegacyPaid),
+      unassignedLegacyPaid,
       remaining,
       overpaid,
       cancelledHeldDeposit,
       retainedDepositAmount: roundVND(retainedDepositAmount),
+      depositDueDate,
+      paymentDueDate,
+      effectiveDueDate,
+      dueBasisType,
+      dueBucket,
+      dueBucketLabel,
       allCancelled: allCancelled && effectiveRoomCount > 0,
       hasCancelled,
       arStatus,
@@ -4502,6 +4790,7 @@
     const asOfDate = normalizeFinanceDateISO(filters.asOfDate) || null;
     const search = String(filters.search || "").trim().toLowerCase();
     const statusFilter = String(filters.status || "all");
+    const dueFilter = String(filters.dueFilter || "all"); // all | debt | overdue | due | not_due | no_due_date
     const entityTypeFilter = String(filters.entityType || "all"); // all | group | booking
     const tourFilter = String(filters.tour || "").trim().toLowerCase();
 
@@ -4510,7 +4799,8 @@
       .map((ent) => computeEntityFinancials(ent, financeState, asOfDate))
       .filter((row) => row.effectiveOnDate);
 
-    const filtered = allComputed.filter((row) => {
+    // Compute due-date & paid-source breakdown BEFORE dueFilter so KPI bucket cards always show accurate clickable numbers
+    const baseFiltered = allComputed.filter((row) => {
       if (entityTypeFilter !== "all" && row.entityType !== entityTypeFilter) return false;
       if (statusFilter === "debt" && row.remaining <= 0) return false;
       if (statusFilter === "overpaid" && row.overpaid <= 0) return false;
@@ -4534,9 +4824,42 @@
       return true;
     });
 
+    const dueBuckets = baseFiltered.reduce((acc, r) => {
+      if (r.remaining > 0) {
+        acc.allDebtAmount += r.remaining;
+        acc.allDebtCount += 1;
+        if (r.dueBucket === "overdue") { acc.overdueAmount += r.remaining; acc.overdueCount += 1; }
+        else if (r.dueBucket === "due") { acc.dueAmount += r.remaining; acc.dueCount += 1; }
+        else if (r.dueBucket === "not_due") { acc.notDueAmount += r.remaining; acc.notDueCount += 1; }
+        else { acc.noDueDateAmount += r.remaining; acc.noDueDateCount += 1; }
+      }
+      return acc;
+    }, {
+      allDebtAmount: 0, allDebtCount: 0,
+      overdueAmount: 0, overdueCount: 0,
+      dueAmount: 0, dueCount: 0,
+      notDueAmount: 0, notDueCount: 0,
+      noDueDateAmount: 0, noDueDateCount: 0
+    });
+
+    const filtered = baseFiltered.filter((row) => {
+      if (dueFilter === "debt") return row.remaining > 0;
+      if (dueFilter === "overdue") return row.remaining > 0 && row.dueBucket === "overdue";
+      if (dueFilter === "due") return row.remaining > 0 && row.dueBucket === "due";
+      if (dueFilter === "not_due") return row.remaining > 0 && row.dueBucket === "not_due";
+      if (dueFilter === "no_due_date") return row.remaining > 0 && row.dueBucket === "no_due_date";
+      return true;
+    });
+
     filtered.sort((a, b) => {
-      // Prioritize unpaid/cancelled-deposit/overpaid first, then newest checkin
-      const prio = (r) => (r.cancelledHeldDeposit > 0 ? 0 : r.remaining > 0 ? 1 : r.overpaid > 0 ? 2 : 3);
+      // Prioritize overdue -> due -> cancelled-deposit -> remaining -> overpaid -> paid
+      const prio = (r) => (
+        r.dueBucket === "overdue" ? 0 :
+        r.dueBucket === "due" ? 1 :
+        r.cancelledHeldDeposit > 0 ? 2 :
+        r.remaining > 0 ? 3 :
+        r.overpaid > 0 ? 4 : 5
+      );
       return prio(a) - prio(b) || b.remaining - a.remaining || a.minCheckin.localeCompare(b.minCheckin);
     });
 
@@ -4545,6 +4868,9 @@
       acc.totalGrossPaid += r.grossPaid;
       acc.totalRefunded += r.totalRefunded;
       acc.totalNetPaid += r.netPaid;
+      acc.totalConfirmedFundNetPaid += r.confirmedFundNetPaid;
+      acc.totalOpeningIncludedLegacyPaid += r.openingIncludedLegacyPaid;
+      acc.totalUnassignedLegacyPaid += r.unassignedLegacyPaid;
       acc.totalRemaining += r.remaining;
       acc.totalOverpaid += r.overpaid;
       acc.totalCancelledHeldDeposit += r.cancelledHeldDeposit;
@@ -4552,7 +4878,7 @@
       if (r.overpaid > 0) acc.overpaidCount += 1;
       if (r.hasLegacyNeedsReconcile) {
         acc.legacyCount += 1;
-        acc.legacyTotal += r.legacyMigratedPaid + r.unmigratedLegacyPaid;
+        acc.legacyTotal += r.unassignedLegacyPaid;
       }
       return acc;
     }, {
@@ -4560,6 +4886,9 @@
       totalGrossPaid: 0,
       totalRefunded: 0,
       totalNetPaid: 0,
+      totalConfirmedFundNetPaid: 0,
+      totalOpeningIncludedLegacyPaid: 0,
+      totalUnassignedLegacyPaid: 0,
       totalRemaining: 0,
       totalOverpaid: 0,
       totalCancelledHeldDeposit: 0,
@@ -4570,13 +4899,17 @@
     });
 
     const fState = financeState && Array.isArray(financeState.transactions) ? financeState : createDefaultFinanceState();
-    const legacyTransactions = fState.transactions.filter((tx) => tx && tx.txType === "legacy_payment" && tx.legacyStatus !== "reconciled");
+    const legacyTransactions = fState.transactions.filter(
+      (tx) => tx && tx.txType === "legacy_payment" && tx.legacyStatus === "needs_reconciliation"
+    );
 
     return {
       asOfDate: asOfDate || getVietnamTodayISO(),
+      dueFilter,
       rows: filtered,
       allRowsCount: allComputed.length,
       ...totals,
+      ...dueBuckets,
       legacyTransactions
     };
   }
@@ -4591,6 +4924,7 @@
 
     const { bookingToEntity } = buildFinanceEntities(bookings || []);
     const bookingMap = new Map((bookings || []).map((b) => [b.id, b]));
+    const invoiceMap = new Map((fState.supplierInvoices || []).map((inv) => [inv.id, inv]));
 
     // Build per-fund balances up to toDate (or all-time if toDate omitted)
     const fundMap = {};
@@ -4602,6 +4936,7 @@
         openingVoucherRef: "",
         customerIn: 0,
         customerRefund: 0,
+        supplierOut: 0,
         transferIn: 0,
         transferOut: 0,
         adjustments: 0,
@@ -4609,7 +4944,9 @@
         reconciledCount: 0,
         unreconciledCount: 0,
         unreconciledNetAmount: 0,
-        latestCheck: null
+        latestCheck: null,
+        reconciliationStatus: "unreconciled",
+        reconciliationLabel: "Chưa đối chiếu"
       };
     }
 
@@ -4635,8 +4972,6 @@
       }
     }
 
-    // Build ledger entries (a fund_transfer produces 1 summary row with both fromFundId & toFundId clearly visible,
-    // and applies -amount to fromFundId and +amount to toFundId simultaneously)
     const allTxSorted = [...fState.transactions].sort((a, b) => {
       const da = a.receivedDate || "0000-00-00";
       const db = b.receivedDate || "0000-00-00";
@@ -4646,18 +4981,27 @@
     let totalCustomerNetCollected = 0;
     let totalCustomerGrossIn = 0;
     let totalCustomerRefunded = 0;
+    let totalSupplierPaid = 0;
     const legacyUnreconciled = [];
+    const resolvedOpeningLegacy = [];
     const ledgerLines = [];
 
     for (const tx of allTxSorted) {
       if (!tx) continue;
-      if (tx.txType === "legacy_payment" && tx.legacyStatus !== "reconciled") {
-        legacyUnreconciled.push(tx);
-        const legBucket = fundMap.unassigned_legacy;
-        legBucket.customerIn += parseVND(tx.amount);
-        legBucket.closingBalance += parseVND(tx.amount);
-        legBucket.unreconciledCount += 1;
-        continue;
+      if (tx.txType === "legacy_payment") {
+        if (tx.legacyStatus === "reconciled_in_opening") {
+          // Resolved as already included inside opening balance: NEVER add to fund balance again!
+          resolvedOpeningLegacy.push(tx);
+          continue;
+        }
+        if (tx.legacyStatus !== "reconciled") {
+          legacyUnreconciled.push(tx);
+          const legBucket = fundMap.unassigned_legacy;
+          legBucket.customerIn += parseVND(tx.amount);
+          legBucket.closingBalance += parseVND(tx.amount);
+          legBucket.unreconciledCount += 1;
+          continue;
+        }
       }
 
       const txDate = tx.receivedDate;
@@ -4688,6 +5032,16 @@
         }
         totalCustomerRefunded += amt;
         totalCustomerNetCollected -= amt;
+      } else if (tx.txType === "supplier_payment") {
+        const b = fundMap[tx.fundId];
+        if (b && !b.isLegacyBucket) {
+          if (!b.openingAsOfDate || !txDate || txDate >= b.openingAsOfDate) {
+            b.supplierOut += amt;
+            if (tx.reconciled) b.reconciledCount += 1;
+            else { b.unreconciledCount += 1; b.unreconciledNetAmount -= amt; }
+          }
+        }
+        totalSupplierPaid += amt;
       } else if (tx.txType === "fund_transfer") {
         const src = fundMap[tx.fromFundId];
         const dst = fundMap[tx.toFundId];
@@ -4724,9 +5078,10 @@
 
       const bk = tx.bookingId ? bookingMap.get(tx.bookingId) : null;
       const ent = tx.bookingId ? bookingToEntity.get(tx.bookingId) : null;
+      const inv = tx.invoiceId ? invoiceMap.get(tx.invoiceId) : null;
       const signedImpactForFund = tx.txType === "fund_transfer"
         ? (fundFilter === tx.fromFundId ? -amt : fundFilter === tx.toFundId ? amt : 0)
-        : (tx.txType === "customer_refund" ? -amt : amt);
+        : (tx.txType === "customer_refund" || tx.txType === "supplier_payment" ? -amt : amt);
 
       ledgerLines.push({
         ...tx,
@@ -4737,6 +5092,8 @@
         paymentMethodLabel: getPaymentMethodMeta(tx.paymentMethod).label,
         guestName: (ent && ent.guestName) || (bk && bk.guestName) || "",
         roomLabel: (ent && ent.roomLabel) || (bk ? (bk.roomId === "DORM" ? "Dorm" : `P.${bk.roomId}`) : ""),
+        supplierName: tx.supplierName || (inv && inv.supplierName) || "",
+        invoiceVoucherNo: tx.invoiceVoucherNo || (inv && inv.voucherNo) || "",
         signedImpactForFund
       });
     }
@@ -4744,8 +5101,19 @@
     const funds = FINANCE_FUNDS.map((f) => {
       const b = fundMap[f.id];
       if (!b.isLegacyBucket) {
-        b.closingBalance = roundVND(b.openingBalance + b.customerIn - b.customerRefund + b.transferIn - b.transferOut + b.adjustments);
+        b.closingBalance = roundVND(b.openingBalance + b.customerIn - b.customerRefund - b.supplierOut + b.transferIn - b.transferOut + b.adjustments);
         b.liveDiscrepancy = b.latestCheck ? roundVND(b.latestCheck.actualBalance - b.closingBalance) : null;
+        // STRICT RECONCILIATION RULE: NEVER claim "Đã đối chiếu" unless a real count/statement check exists!
+        if (!b.latestCheck) {
+          b.reconciliationStatus = "unreconciled";
+          b.reconciliationLabel = "Chưa đối chiếu";
+        } else if (b.liveDiscrepancy === 0) {
+          b.reconciliationStatus = "reconciled_exact";
+          b.reconciliationLabel = "Đã đối chiếu";
+        } else {
+          b.reconciliationStatus = "reconciled_discrepancy";
+          b.reconciliationLabel = "Đã đối chiếu (Lệch)";
+        }
       }
       return b;
     });
@@ -4763,9 +5131,11 @@
       totalCustomerGrossIn: roundVND(totalCustomerGrossIn),
       totalCustomerRefunded: roundVND(totalCustomerRefunded),
       totalCustomerNetCollected: roundVND(totalCustomerNetCollected),
+      totalSupplierPaid: roundVND(totalSupplierPaid),
       totalUnreconciledCount,
       ledgerLines,
       legacyUnreconciled,
+      resolvedOpeningLegacy,
       syncLogs: fState.syncLogs || []
     };
   }
@@ -4949,11 +5319,190 @@
     };
   }
 
+  function computeSupplierPayablesReport(financeState, operatingCostsState = null, filters = {}) {
+    const fState = financeState && typeof financeState === "object" ? financeState : createDefaultFinanceState();
+    const invoices = Array.isArray(fState.supplierInvoices) ? fState.supplierInvoices : [];
+    const transactions = Array.isArray(fState.transactions) ? fState.transactions : [];
+    const costState = operatingCostsState ? sanitizeOperatingCostsState(operatingCostsState) : createDefaultOperatingCostsState();
+    const costItemMap = new Map((costState.items || []).map((it) => [it.id, it.name]));
+    const legacyEntryMap = new Map((costState.actualEntries || []).map((e) => [e.id, e]));
+
+    const asOfDate = normalizeFinanceDateISO(filters.asOfDate) || null;
+    const refDate = asOfDate || getVietnamTodayISO();
+    const search = String(filters.search || "").trim().toLowerCase();
+    const supplierFilter = String(filters.supplier || "all").trim();
+    const monthFilter = String(filters.accountingMonth || "").trim();
+    const statusFilter = String(filters.status || "all").trim();
+
+    // Group supplier_payment transactions by invoiceId
+    const paymentsByInvoice = new Map();
+    for (const tx of transactions) {
+      if (!tx || tx.txType !== "supplier_payment" || !tx.invoiceId) continue;
+      let arr = paymentsByInvoice.get(tx.invoiceId);
+      if (!arr) {
+        arr = [];
+        paymentsByInvoice.set(tx.invoiceId, arr);
+      }
+      arr.push(tx);
+    }
+
+    const supplierSet = new Set();
+    const computedAll = [];
+
+    for (const inv of invoices) {
+      if (!inv || !inv.id) continue;
+      supplierSet.add(inv.supplierName);
+      // Historical as-of date filter: invoice exists if invoiceDate <= asOfDate (when asOfDate provided)
+      if (asOfDate && inv.invoiceDate && inv.invoiceDate > asOfDate) continue;
+
+      const allPays = (paymentsByInvoice.get(inv.id) || []).slice().sort((a, b) =>
+        (a.receivedDate || "").localeCompare(b.receivedDate || "") || (a.recordedAt || "").localeCompare(b.recordedAt || "")
+      );
+      const effectivePays = asOfDate
+        ? allPays.filter((p) => p.receivedDate && p.receivedDate <= asOfDate)
+        : allPays;
+
+      const paidAmount = roundVND(effectivePays.reduce((s, p) => s + parseVND(p.amount), 0));
+      const allTimePaidAmount = roundVND(allPays.reduce((s, p) => s + parseVND(p.amount), 0));
+      const totalAmount = parseVND(inv.totalAmount);
+      const remainingAmount = Math.max(0, roundVND(totalAmount - paidAmount));
+      const allTimeRemainingAmount = Math.max(0, roundVND(totalAmount - allTimePaidAmount));
+      const isOverdue = remainingAmount > 0 && Boolean(inv.dueDate && inv.dueDate < refDate);
+      const isDueToday = remainingAmount > 0 && Boolean(inv.dueDate && inv.dueDate === refDate);
+
+      let status = "unpaid";
+      let statusLabel = "Chưa trả";
+      if (remainingAmount === 0 && totalAmount > 0) {
+        status = "paid";
+        statusLabel = "Đã trả";
+      } else if (isOverdue) {
+        status = "overdue";
+        statusLabel = "Quá hạn";
+      } else if (paidAmount > 0) {
+        status = "partial";
+        statusLabel = "Trả một phần";
+      }
+
+      const enrichedLines = (inv.lines || []).map((l) => ({
+        ...l,
+        costItemName: l.costItemName || costItemMap.get(l.costItemId) || l.costItemId
+      }));
+
+      const linkedLegacyEntries = (inv.linkedLegacyEntryIds || [])
+        .map((eid) => legacyEntryMap.get(eid))
+        .filter(Boolean);
+
+      computedAll.push({
+        ...inv,
+        lines: enrichedLines,
+        totalAmount,
+        paidAmount,
+        remainingAmount,
+        allTimePaidAmount,
+        allTimeRemainingAmount,
+        isOverdue,
+        isDueToday,
+        status,
+        statusLabel,
+        payments: effectivePays.map((p) => ({
+          ...p,
+          fundName: getFinanceFundById(p.fundId).shortName,
+          paymentMethodLabel: getPaymentMethodMeta(p.paymentMethod).label
+        })),
+        allPaymentsCount: allPays.length,
+        linkedLegacyEntries
+      });
+    }
+
+    const filtered = computedAll.filter((inv) => {
+      if (supplierFilter && supplierFilter !== "all" && inv.supplierName !== supplierFilter) return false;
+      if (monthFilter && inv.accountingMonth !== monthFilter) return false;
+      if (statusFilter === "unpaid" && !(inv.remainingAmount > 0 && inv.paidAmount === 0)) return false;
+      if (statusFilter === "partial" && !(inv.remainingAmount > 0 && inv.paidAmount > 0)) return false;
+      if (statusFilter === "paid" && inv.remainingAmount > 0) return false;
+      if (statusFilter === "overdue" && !inv.isOverdue) return false;
+      if (search) {
+        const hay = [
+          inv.supplierName,
+          inv.voucherNo,
+          inv.accountingMonth,
+          inv.note,
+          ...inv.lines.map((l) => `${l.costItemName} ${l.description}`)
+        ].join(" ").toLowerCase();
+        if (!hay.includes(search)) return false;
+      }
+      return true;
+    });
+
+    filtered.sort((a, b) => {
+      const prio = (x) => (x.isOverdue ? 0 : x.remainingAmount > 0 ? 1 : 2);
+      return prio(a) - prio(b) || String(a.dueDate || "9999-99-99").localeCompare(String(b.dueDate || "9999-99-99")) || String(b.invoiceDate).localeCompare(String(a.invoiceDate));
+    });
+
+    const totals = filtered.reduce((acc, inv) => {
+      acc.totalInvoiced += inv.totalAmount;
+      acc.totalPaid += inv.paidAmount;
+      acc.totalRemaining += inv.remainingAmount;
+      if (inv.remainingAmount === 0) acc.paidCount += 1;
+      else if (inv.paidAmount > 0) acc.partialCount += 1;
+      else acc.unpaidCount += 1;
+      if (inv.isOverdue) {
+        acc.overdueCount += 1;
+        acc.overdueRemaining += inv.remainingAmount;
+      }
+      return acc;
+    }, {
+      totalInvoiced: 0,
+      totalPaid: 0,
+      totalRemaining: 0,
+      overdueRemaining: 0,
+      unpaidCount: 0,
+      partialCount: 0,
+      paidCount: 0,
+      overdueCount: 0
+    });
+
+    return {
+      asOfDate: asOfDate || getVietnamTodayISO(),
+      rows: filtered,
+      allCount: computedAll.length,
+      suppliers: [...supplierSet].sort((a, b) => a.localeCompare(b, "vi")),
+      ...totals
+    };
+  }
+
+  function generateSupplierPayablesCsvContent(report) {
+    const headers = [
+      "Số chứng từ / HĐ", "Nhà cung cấp", "Ngày hóa đơn", "Kỳ ghi nhận chi phí", "Hạn thanh toán",
+      "Các khoản mục", "Tổng tiền (VNĐ)", "Đã trả (VNĐ)", "Còn phải trả (VNĐ)",
+      "Trạng thái", "Số phiếu chi", "Tính đến ngày", "Ghi chú"
+    ];
+    const rows = (report && report.rows ? report.rows : []).map((inv) => [
+      inv.voucherNo,
+      inv.supplierName,
+      inv.invoiceDate,
+      inv.accountingMonth,
+      inv.dueDate || "Chưa xác định hạn",
+      (inv.lines || []).map((l) => `${l.costItemName}: ${l.amount}`).join("; "),
+      inv.totalAmount,
+      inv.paidAmount,
+      inv.remainingAmount,
+      inv.statusLabel,
+      (inv.payments || []).map((p) => p.voucherCode).join("; "),
+      report.asOfDate || "",
+      inv.note || ""
+    ]);
+    return "\uFEFF" + [headers, ...rows].map((row) => row.map(sanitizeCsvCell).join(",")).join("\r\n");
+  }
+
   function generateReceivablesCsvContent(report) {
     const headers = [
       "Loại", "Mã đoàn / Đơn", "Phòng", "Khách hàng", "Công ty tour / Nguồn",
-      "Nhận phòng", "Trả phòng", "Tiền phòng (VNĐ)", "Dịch vụ (VNĐ)", "Điều chỉnh (VNĐ)",
-      "Tổng phải thu (VNĐ)", "Đã thu ròng (VNĐ)", "Còn phải thu (VNĐ)", "Trả thừa / Cọc giữ (VNĐ)",
+      "Nhận phòng", "Trả phòng", "Hạn thanh toán / cọc", "Phân loại hạn",
+      "Tiền phòng (VNĐ)", "Dịch vụ (VNĐ)", "Điều chỉnh (VNĐ)",
+      "Tổng phải thu (VNĐ)", "Đã thu ròng (VNĐ)", "Đã xác định quỹ (VNĐ)",
+      "Chuyển tiếp trong đầu kỳ (VNĐ)", "Chuyển tiếp chưa gán quỹ (VNĐ)",
+      "Còn phải thu (VNĐ)", "Trả thừa / Cọc giữ (VNĐ)",
       "Trạng thái", "Tính đến ngày"
     ];
     const statusLabel = {
@@ -4972,11 +5521,16 @@
       r.tourName || r.sourceName,
       r.minCheckin,
       r.maxCheckout,
+      r.effectiveDueDate || "Chưa xác định hạn",
+      r.dueBucketLabel || "",
       r.roomAmount,
       r.servicesTotal,
       r.adjustmentsTotal,
       r.totalPayable,
       r.netPaid,
+      r.confirmedFundNetPaid || 0,
+      r.openingIncludedLegacyPaid || 0,
+      r.unassignedLegacyPaid || 0,
       r.remaining,
       r.overpaid,
       statusLabel[r.arStatus] || r.arStatus,
@@ -4987,26 +5541,34 @@
 
   function generateCashbookCsvContent(report) {
     const headers = [
-      "Mã chứng từ", "Ngày thực nhận", "Giờ ghi sổ", "Loại giao dịch", "Quỹ / Tài khoản",
-      "Từ quỹ -> Đến quỹ", "Phương thức", "Số tiền (VNĐ)", "Khách / Đơn liên kết",
+      "Mã chứng từ", "Ngày thực nhận / chi", "Giờ ghi sổ", "Loại giao dịch", "Quỹ / Tài khoản",
+      "Từ quỹ -> Đến quỹ", "Phương thức", "Số tiền (VNĐ)", "Đơn / Nhà cung cấp liên kết",
       "Chứng từ gốc", "Người thao tác", "Người duyệt", "Đối chiếu", "Ghi chú"
     ];
-    const rows = (report && report.ledgerLines ? report.ledgerLines : []).map((t) => [
-      t.voucherCode,
-      t.receivedDate || "Chưa xác định (chuyển tiếp)",
-      t.recordedAt || "",
-      t.txTypeLabel || t.txType,
-      t.txType === "fund_transfer" ? `${t.fromFundName} -> ${t.toFundName}` : t.fundName,
-      t.txType === "fund_transfer" ? `${t.fromFundId} -> ${t.toFundId}` : t.fundId,
-      t.paymentMethodLabel || t.paymentMethod,
-      t.txType === "customer_refund" ? -parseVND(t.amount) : t.amount,
-      t.groupCodeDisplay ? `Đoàn ${t.groupCodeDisplay} (${t.guestName})` : `${t.roomLabel} ${t.guestName}`.trim(),
-      t.linkedVoucherCode || "",
-      t.operator || "",
-      t.approvedBy || "",
-      t.reconciled ? "Đã đối chiếu" : "Chưa đối chiếu",
-      t.reason ? `${t.reason}${t.note ? ` — ${t.note}` : ""}` : (t.note || "")
-    ]);
+    const rows = (report && report.ledgerLines ? report.ledgerLines : []).map((t) => {
+      const signedAmt = (t.txType === "customer_refund" || t.txType === "supplier_payment")
+        ? -parseVND(t.amount)
+        : t.amount;
+      const linkedLabel = t.txType === "supplier_payment"
+        ? `HĐ ${t.invoiceVoucherNo || t.invoiceId} — ${t.supplierName || "NCC"}`
+        : (t.groupCodeDisplay ? `Đoàn ${t.groupCodeDisplay} (${t.guestName})` : `${t.roomLabel} ${t.guestName}`.trim());
+      return [
+        t.voucherCode,
+        t.receivedDate || "Chưa xác định (chuyển tiếp)",
+        t.recordedAt || "",
+        t.txTypeLabel || t.txType,
+        t.txType === "fund_transfer" ? `${t.fromFundName} -> ${t.toFundName}` : t.fundName,
+        t.txType === "fund_transfer" ? `${t.fromFundId} -> ${t.toFundId}` : t.fundId,
+        t.paymentMethodLabel || t.paymentMethod,
+        signedAmt,
+        linkedLabel,
+        t.linkedVoucherCode || t.invoiceVoucherNo || "",
+        t.operator || "",
+        t.approvedBy || "",
+        t.reconciled ? "Đã đối chiếu" : "Chưa đối chiếu",
+        t.reason ? `${t.reason}${t.note ? ` — ${t.note}` : ""}` : (t.note || "")
+      ];
+    });
     return "\uFEFF" + [headers, ...rows].map((row) => row.map(sanitizeCsvCell).join(",")).join("\r\n");
   }
 
@@ -5136,10 +5698,14 @@
     FINANCE_FUNDS,
     PAYMENT_METHODS,
     FINANCE_TX_TYPES,
+    SUPPLIER_INVOICE_STATUSES,
     REFUND_CATEGORIES,
     getFinanceFundById,
     getPaymentMethodMeta,
     createDefaultFinanceState,
+    sanitizeSupplierInvoiceAttachment,
+    sanitizeSupplierInvoiceLine,
+    sanitizeSupplierInvoice,
     sanitizeFinanceTransaction,
     sanitizeFinanceState,
     getBookingChargesBreakdown,
@@ -5148,10 +5714,12 @@
     computeBookingFinancialSummary,
     computeReceivablesReport,
     computeCashbookReport,
+    computeSupplierPayablesReport,
     computeCalendarFinanceKPIs,
     buildLegacyMigrationPlan,
     generateReceivablesCsvContent,
     generateCashbookCsvContent,
+    generateSupplierPayablesCsvContent,
     generateCsvContent,
     diffBookingChanges,
     generateAuditCsvContent,

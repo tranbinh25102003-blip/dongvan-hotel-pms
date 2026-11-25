@@ -1174,6 +1174,8 @@
       includeVat,
       preVatAmount: includeVat ? parseVND($("field-pre-vat-amount").value) : parseVND($("field-total-amount").value),
       paidAmount: parseVND($("field-paid-amount").value),
+      depositDueDate: ($("field-deposit-due-date") && $("field-deposit-due-date").value) || "",
+      paymentDueDate: ($("field-payment-due-date") && $("field-payment-due-date").value) || "",
       paymentStatus: state.activePayStatus,
       mergeBed: $("field-merge-bed").checked,
       extraBed: parseInt($("field-extra-bed").value, 10) || 0,
@@ -1456,7 +1458,8 @@
   function exportOperatingCostsCSV() {
     const costData = getCurrentOperatingCosts();
     const bookings = typeof store.getBookings === "function" ? store.getBookings() : state.bookings;
-    const report = computeMonthlyOperatingCosts(costData, bookings, costsState.monthKey);
+    const fState = typeof store.getFinanceState === "function" ? store.getFinanceState() : null;
+    const report = computeMonthlyOperatingCosts(costData, bookings, costsState.monthKey, fState);
     const csv = generateOperatingCostsCsvContent(report);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -1471,36 +1474,47 @@
   function renderOperatingCostsModal() {
     const costData = getCurrentOperatingCosts();
     const bookings = typeof store.getBookings === "function" ? store.getBookings() : state.bookings;
-    const report = computeMonthlyOperatingCosts(costData, bookings, costsState.monthKey);
+    const fState = typeof store.getFinanceState === "function" ? store.getFinanceState() : null;
+    const report = computeMonthlyOperatingCosts(costData, bookings, costsState.monthKey, fState);
 
     $("costs-month-picker").value = report.monthKey;
     const staffName = getActorStaffName();
-    $("costs-modal-sub").textContent = `Tháng ${report.monthLabelVN} • Người thao tác: ${staffName} • Tự động lấy số liệu từ sổ lưu trú`;
+    $("costs-modal-sub").textContent = `Tháng ${report.monthLabelVN} • Người thao tác: ${staffName} • Đồng bộ từ lưu trú & Hóa đơn nhà cung cấp`;
 
     // 5 Monthly KPI Cards
     $("costs-kpi-total").textContent = formatVND(report.totalMonthlyCost);
-    $("costs-kpi-total-sub").textContent = `${report.rows.length} khoản mục đang theo dõi`;
+    $("costs-kpi-total-sub").textContent = report.missingBasisCount > 0
+      ? `${report.rows.length} khoản mục • ${report.missingBasisCount} khoản chưa có định mức`
+      : `${report.rows.length} khoản mục đang theo dõi`;
     $("costs-kpi-actual").textContent = formatVND(report.totalActualPortion);
     $("costs-kpi-actual-sub").textContent = report.totalEnteredActual > report.totalActualPortion
-      ? `${report.finalizedCount} khoản đã chốt • Tổng đã nhập: ${formatVND(report.totalEnteredActual)}`
-      : `${report.finalizedCount} khoản mục đã chốt`;
+      ? `${report.finalizedCount} khoản đã chốt${report.finalizedZeroCount > 0 ? ` (${report.finalizedZeroCount} chốt 0 đ)` : ""} • Tổng chứng từ: ${formatVND(report.totalEnteredActual)}`
+      : `${report.finalizedCount} khoản mục đã chốt${report.finalizedZeroCount > 0 ? ` (${report.finalizedZeroCount} chốt 0 đ)` : ""}`;
     $("costs-kpi-estimated").textContent = formatVND(report.totalEstimatedPortion);
-    $("costs-kpi-estimated-sub").textContent = `${report.rows.length - report.finalizedCount} khoản còn dùng ước tính`;
+    $("costs-kpi-estimated-sub").textContent = `${report.estimatedCount} ước tính • ${report.missingBasisCount} chưa có ĐM`;
     $("costs-kpi-nights").textContent = `${report.soldRoomNights} đêm phòng`;
     $("costs-kpi-guests").textContent = `${report.guestNights} khách-đêm`;
     $("costs-kpi-avg").textContent = report.costPerRoomNight !== null ? formatVND(report.costPerRoomNight) : "Chưa có đêm phòng";
 
-    // Compact Prorated Room Revenue & Margin Strip
+    // Compact Prorated Room Revenue & Margin Strip + Strict Profit Readiness Check
     const profitNum = Math.round(Number(report.estimatedGrossProfit) || 0);
     const profitCls = profitNum >= 0 ? "pos" : "neg";
     const profitText = profitNum < 0
       ? `-${formatVND(Math.abs(profitNum))}`
       : (profitNum > 0 ? `+${formatVND(profitNum)}` : formatVND(0));
     const ratioText = report.costToRevenuePercent !== null ? `${report.costToRevenuePercent}%` : "Chưa có doanh thu";
+    const missingItemsHint = (report.missingBasisItems || []).map((m) => m.name).join(", ");
+    const pnlReadinessBanner = !report.profitBasisSufficient
+      ? `<div class="costs-pnl-warn" id="costs-profit-status-banner" data-profit-sufficient="0">
+           <span>⚠️ <strong>${escapeHtml(report.profitStatusLabel)}</strong> — còn <strong>${report.missingBasisCount}</strong> khoản mục thiếu định mức/chưa chốt thực tế${missingItemsHint ? ` (${escapeHtml(missingItemsHint)})` : ""}${report.missingGuestBasis ? " và có đơn thiếu số khách ở" : ""}.</span>
+           <span style="font-size:11px; font-weight:600;">Hãy nhập định mức, tạo hóa đơn NCC hoặc bấm "Chốt theo thực tế" (= 0 đ nếu không phát sinh).</span>
+         </div>`
+      : `<span class="costs-status-badge actual" id="costs-profit-status-banner" data-profit-sufficient="1">✓ ${escapeHtml(report.profitStatusLabel)}</span>`;
     $("costs-pnl-strip").innerHTML = `
       <span class="costs-pnl-item">Doanh thu phòng (phân bổ T${escapeHtml(report.monthLabelVN)}): <span class="costs-pnl-val">${formatVND(report.proratedRoomRevenue)}</span></span>
-      <span class="costs-pnl-item">Lãi gộp ước tính: <span class="costs-pnl-val ${profitCls}">${profitText}</span></span>
+      <span class="costs-pnl-item">${report.profitBasisSufficient ? "Lãi gộp tạm tính:" : "Chênh lệch tạm (chưa đủ dữ liệu):"} <span class="costs-pnl-val ${profitCls}">${profitText}</span></span>
       <span class="costs-pnl-item">Tỷ lệ Chi phí / Doanh thu: <span class="costs-pnl-val">${escapeHtml(ratioText)}</span></span>
+      ${pnlReadinessBanner}
     `;
 
     // Missing guest count warning banner with clickable booking chips
@@ -1518,23 +1532,28 @@
       missBanner.classList.remove("show");
     }
 
-    // Main Table Rows (Expandable)
+    // Main Table Rows (Expandable with 4-way costBasisStatus)
     const tbodyParts = [];
     for (const r of report.rows) {
       const expanded = costsState.expandedItems.has(r.itemId);
-      const estDisplay = r.hasRate ? formatVND(r.estimatedAmount) : `<span style="color:var(--text-muted);">Chưa có ĐM</span>`;
+      const estDisplay = r.hasRate ? formatVND(r.estimatedAmount) : `<span style="color:#b91c1c; font-weight:600;">Chưa nhập ĐM</span>`;
       const actDisplay = (r.entriesCount > 0 || r.isFinalized)
-        ? `${formatVND(r.actualAmount)}${r.entriesCount > 0 ? `<div style="font-size:10.5px; color:var(--text-muted);">${r.entriesCount} chứng từ</div>` : ""}`
+        ? `${formatVND(r.actualAmount)}${r.entriesCount > 0 ? `<div style="font-size:10.5px; color:var(--text-muted);">${r.entriesCount} chứng từ${r.invoiceLinesCount > 0 ? ` (${r.invoiceLinesCount} HĐ NCC)` : ""}</div>` : ""}`
         : `<span style="color:var(--text-muted);">—</span>`;
-      const usedBadge = r.isFinalized
-        ? `<span class="costs-status-badge actual">✓ Thực tế</span>`
-        : `<span class="costs-status-badge estimated">Ước tính</span>`;
+      let usedBadge = `<span class="costs-status-badge estimated">Có ước tính</span>`;
+      if (r.costBasisStatus === "finalized_zero") {
+        usedBadge = `<span class="costs-status-badge zero">✓ Thực tế = 0 đ</span>`;
+      } else if (r.costBasisStatus === "finalized_actual") {
+        usedBadge = `<span class="costs-status-badge actual">✓ Đã chốt thực tế</span>`;
+      } else if (r.costBasisStatus === "missing_basis") {
+        usedBadge = `<span class="costs-status-badge missing">Chưa nhập định mức</span>`;
+      }
       const partialPill = r.isPartialActual
-        ? `<span class="costs-status-badge partial" title="Đã nhập một phần chứng từ nhưng chưa chốt — đang tạm dùng số ước tính">Mới nhập 1 phần</span>`
+        ? `<span class="costs-status-badge partial" title="Đã có chứng từ / hóa đơn NCC nhưng chưa chốt thực tế">Mới nhập 1 phần • Chưa chốt</span>`
         : "";
 
       tbodyParts.push(`
-        <tr class="costs-row-main" data-cost-expand="${escapeHtml(r.itemId)}">
+        <tr class="costs-row-main" data-cost-expand="${escapeHtml(r.itemId)}" data-cost-basis-status="${escapeHtml(r.costBasisStatus)}">
           <td>
             <div class="costs-item-title">
               <span>${expanded ? "▾" : "▸"}</span>
@@ -1546,7 +1565,7 @@
           <td class="num">${estDisplay}</td>
           <td class="num">${actDisplay}</td>
           <td class="num">
-            <div style="font-weight:800;">${formatVND(r.usedAmount)}</div>
+            <div style="font-weight:800;">${r.costBasisStatus === "missing_basis" ? "—" : formatVND(r.usedAmount)}</div>
             <div>${usedBadge}</div>
           </td>
           <td style="text-align:center;">
@@ -1559,21 +1578,48 @@
       if (expanded) {
         const rateInfoTxt = r.hasRate
           ? `${formatVND(r.rate)} (${escapeHtml(r.unitLabel)} • áp dụng từ ${formatMonthVN(r.rateEffectiveMonth)})`
-          : "Chưa đặt đơn giá (chỉ nhập thực tế)";
+          : "Chưa nhập định mức (hãy nhập định mức, gắn hóa đơn NCC hoặc chốt thực tế = 0 đ)";
         const vouchersHtml = r.entries.length > 0
-          ? r.entries.map((v) => `
-              <div class="costs-voucher-item">
-                <div>
-                  <strong>${formatVND(v.amount)}</strong>
-                  <span style="color:var(--text-muted); margin-left:6px;">Ngày PS: ${formatDateVN(v.expenseDate)} • Ghi nhận T${formatMonthVN(v.accountingMonth)}</span>
-                  ${v.note ? `<div style="color:var(--text-secondary); margin-top:2px;">📝 ${escapeHtml(v.note)}</div>` : ""}
-                </div>
-                <div class="costs-voucher-actions">
-                  <button type="button" class="btn btn-sm" data-cost-edit-voucher="${escapeHtml(v.id)}">✏️ Sửa</button>
-                  <button type="button" class="btn btn-sm btn-danger" data-cost-del-voucher="${escapeHtml(v.id)}">Xóa</button>
-                </div>
-              </div>`).join("")
-          : `<div style="font-size:11.5px; color:var(--text-muted);">Chưa có chứng từ thực tế nào cho khoản mục này trong tháng ${report.monthLabelVN}.</div>`;
+          ? r.entries.map((v) => {
+              if (v.sourceType === "supplier_invoice") {
+                return `
+                  <div class="costs-voucher-item">
+                    <div>
+                      <span class="fin-pill info" style="margin-right:4px;">Hóa đơn NCC</span>
+                      <strong>${formatVND(v.amount)}</strong>
+                      <span style="color:var(--text-muted); margin-left:6px;">HĐ ${escapeHtml(v.voucherNo || "")} • ${escapeHtml(v.supplierName || "")} • Ngày HĐ: ${formatDateVN(v.expenseDate)}</span>
+                      ${v.note ? `<div style="color:var(--text-secondary); margin-top:2px;">📝 ${escapeHtml(v.note)}</div>` : ""}
+                    </div>
+                    <div class="costs-voucher-actions">
+                      <button type="button" class="btn btn-sm" data-cost-jump-invoice="${escapeHtml(v.invoiceId)}">Mở HĐ ${escapeHtml(v.voucherNo || "")} ↗</button>
+                    </div>
+                  </div>`;
+              }
+              return `
+                <div class="costs-voucher-item">
+                  <div>
+                    <strong>${formatVND(v.amount)}</strong>
+                    <span style="color:var(--text-muted); margin-left:6px;">Ngày PS: ${formatDateVN(v.expenseDate)} • Ghi nhận T${formatMonthVN(v.accountingMonth)}</span>
+                    ${v.note ? `<div style="color:var(--text-secondary); margin-top:2px;">📝 ${escapeHtml(v.note)}</div>` : ""}
+                  </div>
+                  <div class="costs-voucher-actions">
+                    <button type="button" class="btn btn-sm" data-cost-edit-voucher="${escapeHtml(v.id)}">✏️ Sửa</button>
+                    <button type="button" class="btn btn-sm btn-danger" data-cost-del-voucher="${escapeHtml(v.id)}">Xóa</button>
+                  </div>
+                </div>`;
+            }).join("")
+          : `<div style="font-size:11.5px; color:var(--text-muted);">Chưa có chứng từ thực tế hoặc hóa đơn NCC nào cho khoản mục này trong tháng ${report.monthLabelVN}.</div>`;
+
+        const linkedLegacyHtml = (r.linkedLegacyEntries || []).length > 0
+          ? `<div style="margin-top:6px; display:flex; flex-direction:column; gap:4px;">
+               ${r.linkedLegacyEntries.map((lv) => `
+                 <div class="costs-legacy-linked">
+                   🔗 <strong>Lịch sử chi tay cũ đã liên kết HĐ ${escapeHtml(lv.linkedInvoiceVoucherNo || "")} (KHÔNG cộng trùng):</strong>
+                   ${formatVND(lv.amount)} • Ngày ${formatDateVN(lv.expenseDate)} ${lv.note ? `• ${escapeHtml(lv.note)}` : ""}
+                 </div>
+               `).join("")}
+             </div>`
+          : "";
 
         tbodyParts.push(`
           <tr class="costs-detail-row">
@@ -1584,16 +1630,17 @@
                   <span><strong>Đơn giá áp dụng:</strong> ${rateInfoTxt}</span>
                   <span><strong>Cách tính ước tính:</strong> ${escapeHtml(r.formulaText)}</span>
                 </div>
-                ${r.isPartialActual ? `<div style="color:#c2410c; font-weight:600;">⚠️ Đối chiếu: Đã nhập ${r.entriesCount} chứng từ thực tế (${formatVND(r.actualAmount)}) so với ước tính (${formatVND(r.estimatedAmount)}). Khi đủ chứng từ, bấm "Chốt theo thực tế".</div>` : ""}
+                ${r.isPartialActual ? `<div style="color:#c2410c; font-weight:600;">⚠️ Đối chiếu: Đã có ${r.entriesCount} chứng từ/HĐ NCC thực tế (${formatVND(r.actualAmount)}) so với ước tính (${r.hasRate ? formatVND(r.estimatedAmount) : "Chưa nhập ĐM"}). Khi đủ chứng từ, bấm "Chốt theo thực tế".</div>` : ""}
                 ${r.isFinalized && r.finalizedMeta ? `<div style="color:var(--status-paid); font-weight:600;">✓ Đã chốt dùng số thực tế (${formatVND(r.actualAmount)})${r.finalizedMeta.finalizedBy ? ` bởi ${escapeHtml(r.finalizedMeta.finalizedBy)}` : ""}.</div>` : ""}
                 <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; margin-top:2px;">
-                  <strong>Chứng từ thực tế tháng ${report.monthLabelVN} (${r.entries.length}):</strong>
+                  <strong>Chứng từ &amp; Hóa đơn NCC tháng ${report.monthLabelVN} (${r.entries.length}):</strong>
                   <div style="display:flex; gap:6px; flex-wrap:wrap;">
-                    <button type="button" class="btn btn-sm" data-cost-add-voucher="${escapeHtml(r.itemId)}">+ Thêm chứng từ</button>
+                    <button type="button" class="btn btn-sm" data-cost-add-voucher="${escapeHtml(r.itemId)}">+ Thêm chi tay</button>
                     <button type="button" class="btn btn-sm" data-cost-edit-item="${escapeHtml(r.itemId)}">✏️ Sửa định mức</button>
                   </div>
                 </div>
                 <div class="costs-voucher-list">${vouchersHtml}</div>
+                ${linkedLegacyHtml}
               </div>
             </td>
           </tr>`);
@@ -1612,21 +1659,31 @@
       .filter((e) => e.accountingMonth === report.monthKey)
       .sort((a, b) => String(b.expenseDate).localeCompare(String(a.expenseDate)));
     const itemNameMap = new Map(costData.items.map((it) => [it.id, it.name]));
-    $("costs-vouchers-heading").textContent = `Chứng từ thực tế ghi nhận cho tháng ${report.monthLabelVN} (${monthVouchers.length} chứng từ • Tổng ${formatVND(report.totalEnteredActual)})`;
+    const linkedLegacyIdsSet = new Set();
+    if (fState && Array.isArray(fState.supplierInvoices)) {
+      for (const inv of fState.supplierInvoices) {
+        for (const eid of (inv.linkedLegacyEntryIds || [])) linkedLegacyIdsSet.add(eid);
+      }
+    }
+    $("costs-vouchers-heading").textContent = `Chứng từ thực tế ghi nhận cho tháng ${report.monthLabelVN} (${monthVouchers.length} chứng từ tay • Tổng hiệu lực gồm HĐ NCC: ${formatVND(report.totalEnteredActual)})`;
     $("costs-month-vouchers-list").innerHTML = monthVouchers.length > 0
-      ? monthVouchers.map((v) => `
-          <div class="costs-voucher-item">
-            <div>
-              <strong>${escapeHtml(itemNameMap.get(v.itemId) || v.itemId)}</strong> — <strong style="color:var(--accent-primary);">${formatVND(v.amount)}</strong>
-              <span style="color:var(--text-muted); margin-left:6px;">Ngày PS: ${formatDateVN(v.expenseDate)} • Tháng ghi nhận: ${formatMonthVN(v.accountingMonth)}</span>
-              ${v.note ? `<div style="color:var(--text-secondary); margin-top:2px;">📝 ${escapeHtml(v.note)}</div>` : ""}
-            </div>
-            <div class="costs-voucher-actions">
-              <button type="button" class="btn btn-sm" data-cost-edit-voucher="${escapeHtml(v.id)}">✏️ Sửa</button>
-              <button type="button" class="btn btn-sm btn-danger" data-cost-del-voucher="${escapeHtml(v.id)}">Xóa</button>
-            </div>
-          </div>`).join("")
-      : `<div style="font-size:12px; color:var(--text-muted); padding:10px; border:1px dashed var(--border-strong); border-radius:var(--radius-sm);">Chưa có chứng từ nào được ghi nhận cho tháng ${report.monthLabelVN}.</div>`;
+      ? monthVouchers.map((v) => {
+          const isLinked = linkedLegacyIdsSet.has(v.id);
+          return `
+            <div class="costs-voucher-item ${isLinked ? "costs-legacy-linked" : ""}">
+              <div>
+                <strong>${escapeHtml(itemNameMap.get(v.itemId) || v.itemId)}</strong> — <strong style="color:var(--accent-primary);">${formatVND(v.amount)}</strong>
+                ${isLinked ? '<span class="fin-pill muted" style="margin-left:4px;">Đã liên kết HĐ NCC (không cộng trùng)</span>' : ""}
+                <span style="color:var(--text-muted); margin-left:6px;">Ngày PS: ${formatDateVN(v.expenseDate)} • Tháng ghi nhận: ${formatMonthVN(v.accountingMonth)}</span>
+                ${v.note ? `<div style="color:var(--text-secondary); margin-top:2px;">📝 ${escapeHtml(v.note)}</div>` : ""}
+              </div>
+              <div class="costs-voucher-actions">
+                <button type="button" class="btn btn-sm" data-cost-edit-voucher="${escapeHtml(v.id)}">✏️ Sửa</button>
+                <button type="button" class="btn btn-sm btn-danger" data-cost-del-voucher="${escapeHtml(v.id)}">Xóa</button>
+              </div>
+            </div>`;
+        }).join("")
+      : `<div style="font-size:12px; color:var(--text-muted); padding:10px; border:1px dashed var(--border-strong); border-radius:var(--radius-sm);">Chưa có chứng từ chi tay nào cho tháng ${report.monthLabelVN} (hóa đơn NCC được đồng bộ tự động ở tab Bảng chi phí tháng).</div>`;
 
     // Sync Items & Rates Config Tab list
     $("costs-items-list").innerHTML = costData.items.map((it) => {
@@ -2058,6 +2115,8 @@
         ? formatNumberInput(existing.preVatAmount || extractPreVatFromTotal(existing.totalAmount).preVatAmount)
         : "";
       $("field-paid-amount").value = formatNumberInput(existing.paidAmount);
+      if ($("field-deposit-due-date")) $("field-deposit-due-date").value = existing.depositDueDate || "";
+      if ($("field-payment-due-date")) $("field-payment-due-date").value = existing.paymentDueDate || "";
       setPaymentStatusTab(getPaymentStatus(existing), false);
       $("field-merge-bed").checked = !!existing.mergeBed;
       $("field-extra-bed").value = String(existing.extraBed || 0);
@@ -2095,6 +2154,8 @@
         ? (prefill ? formatNumberInput(prefill.preVatAmount || extractPreVatFromTotal(prefill.totalAmount).preVatAmount) : (draft.preVatAmount || ""))
         : "";
       $("field-paid-amount").value = prefill ? formatNumberInput(prefill.paidAmount) : ((draft && draft.paidAmount) || "");
+      if ($("field-deposit-due-date")) $("field-deposit-due-date").value = (draft && draft.depositDueDate) || "";
+      if ($("field-payment-due-date")) $("field-payment-due-date").value = (draft && draft.paymentDueDate) || "";
       setPaymentStatusTab(prefill ? getPaymentStatus(prefill) : "deposit", false);
       $("field-merge-bed").checked = Boolean(draft && draft.mergeBed);
       $("field-extra-bed").value = String((draft && draft.extraBed) || "0");
@@ -2172,6 +2233,8 @@
         includeVat: $("field-include-vat").checked,
         preVatAmount: $("field-include-vat").checked ? $("field-pre-vat-amount").value : $("field-total-amount").value,
         paidAmount: $("field-paid-amount").value,
+        depositDueDate: ($("field-deposit-due-date") && $("field-deposit-due-date").value) || "",
+        paymentDueDate: ($("field-payment-due-date") && $("field-payment-due-date").value) || "",
         paymentStatus: state.activePayStatus,
         mergeBed: $("field-merge-bed").checked,
         extraBed: $("field-extra-bed").value,
@@ -3083,6 +3146,7 @@
     ["backup-restore-modal", "backup_restore"],
     ["accounts-modal", "accounts"],
     ["history-modal", "history"],
+    ["payables-modal", "payables"],
     ["cashbook-modal", "cashbook"],
     ["receivables-modal", "receivables"],
     ["costs-modal", "operating_costs"],
@@ -3215,6 +3279,7 @@
 
   window.PMSPcApi = {
     openBooking: (bookingId) => openBookingModal({ bookingId }),
+    openOperatingCosts: (monthKey) => openOperatingCostsModal(monthKey),
     syncFromStore: () => {
       state.bookings = store.getBookings() || state.bookings;
       renderAll();
@@ -3241,10 +3306,12 @@
     const canHkCreate = userCan("housekeeping:create");
     const canArRead = userCan("finance:ar_read");
     const canCashbookRead = userCan("finance:cashbook_read");
+    const canPayablesRead = userCan("finance:payables_read");
 
     if ($("btn-open-costs")) $("btn-open-costs").style.display = canCosts ? "" : "none";
     if ($("btn-open-receivables")) $("btn-open-receivables").style.display = canArRead ? "" : "none";
     if ($("btn-open-cashbook")) $("btn-open-cashbook").style.display = canCashbookRead ? "" : "none";
+    if ($("btn-open-payables")) $("btn-open-payables").style.display = canPayablesRead ? "" : "none";
     if ($("btn-open-accounts")) $("btn-open-accounts").style.display = canAccounts ? "" : "none";
     if ($("btn-backup-json")) $("btn-backup-json").style.display = canBackup ? "" : "none";
     if ($("lbl-restore-json")) $("lbl-restore-json").style.display = canBackup ? "" : "none";
@@ -3259,11 +3326,12 @@
     if (!canArRead && $("receivables-modal")) $("receivables-modal").classList.remove("open");
     if (!canArRead && $("monthly-receipts-modal")) $("monthly-receipts-modal").classList.remove("open");
     if (!canCashbookRead && $("cashbook-modal")) $("cashbook-modal").classList.remove("open");
+    if (!canPayablesRead && $("payables-modal")) $("payables-modal").classList.remove("open");
 
     if (role === "housekeeping") {
       // Strictly lock out calendar, booking modals, PDF, costs, finance, and accounts even if ?view=pc was passed
       delete document.body.dataset.viewMode;
-      ["booking-modal", "dorm-modal", "day-report-modal", "group-report-modal", "history-modal", "backup-restore-modal", "confirm-pdf-modal", "costs-modal", "accounts-modal", "receivables-modal", "cashbook-modal", "monthly-receipts-modal"].forEach((id) => {
+      ["booking-modal", "dorm-modal", "day-report-modal", "group-report-modal", "history-modal", "backup-restore-modal", "confirm-pdf-modal", "costs-modal", "accounts-modal", "receivables-modal", "cashbook-modal", "payables-modal", "monthly-receipts-modal"].forEach((id) => {
         if ($(id)) $(id).classList.remove("open");
       });
       if ($("btn-hk-close")) $("btn-hk-close").style.display = "none";
@@ -3906,7 +3974,8 @@
         $("accounts-modal").classList.contains("open") ||
         $("backup-restore-modal").classList.contains("open") ||
         $("receivables-modal").classList.contains("open") ||
-        $("cashbook-modal").classList.contains("open")
+        $("cashbook-modal").classList.contains("open") ||
+        ($("payables-modal") && $("payables-modal").classList.contains("open"))
       );
     }
 
@@ -4129,6 +4198,11 @@
     $("btn-open-cashbook").addEventListener("click", () => {
       if (window.PMSFinanceApp) window.PMSFinanceApp.openCashbook();
     });
+    if ($("btn-open-payables")) {
+      $("btn-open-payables").addEventListener("click", () => {
+        if (window.PMSFinanceApp) window.PMSFinanceApp.openPayables();
+      });
+    }
     $("btn-open-costs").addEventListener("click", () => openOperatingCostsModal());
     $("btn-open-accounts").addEventListener("click", openAccountsModal);
     $("btn-open-history").addEventListener("click", openHistoryModal);
@@ -5056,6 +5130,16 @@
         return;
       }
 
+      const jumpInvBtn = e.target.closest("[data-cost-jump-invoice]");
+      if (jumpInvBtn) {
+        e.stopPropagation();
+        closeModal("costs-modal");
+        if (window.PMSFinanceApp) {
+          window.PMSFinanceApp.openPayables({ focusInvoiceId: jumpInvBtn.dataset.costJumpInvoice });
+        }
+        return;
+      }
+
       const editVBtn = e.target.closest("[data-cost-edit-voucher]");
       if (editVBtn) {
         e.stopPropagation();
@@ -5242,6 +5326,7 @@
         else if ($("hk-workspace").classList.contains("open") && getUserRole() !== "housekeeping") $("hk-workspace").classList.remove("open");
         else if ($("confirm-pdf-modal").classList.contains("open")) closeModal("confirm-pdf-modal");
         else if ($("monthly-receipts-modal").classList.contains("open")) closeModal("monthly-receipts-modal");
+        else if ($("payables-modal") && $("payables-modal").classList.contains("open")) closeModal("payables-modal");
         else if ($("cashbook-modal").classList.contains("open")) closeModal("cashbook-modal");
         else if ($("receivables-modal").classList.contains("open")) closeModal("receivables-modal");
         else if ($("costs-modal").classList.contains("open")) closeModal("costs-modal");

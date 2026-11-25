@@ -4625,8 +4625,200 @@ body[data-user-role="housekeeping"] #hk-workspace .hk-ws-shell {
   }
 }
 
+/* ==========================================================================
+   Phase 2 Finance: Clickable AR Due Buckets, Cost Basis Status & Payables
+   ========================================================================== */
 
+.fin-due-buckets-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
 
+.fin-due-card {
+  appearance: none;
+  text-align: left;
+  background: var(--bg-surface);
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  transition: border-color 0.14s ease, box-shadow 0.14s ease, background 0.14s ease;
+}
 
+.fin-due-card:hover {
+  border-color: var(--accent-primary);
+  background: var(--bg-subtle);
+}
 
+.fin-due-card.active {
+  border-color: var(--accent-primary);
+  background: rgba(31, 78, 67, 0.08);
+  box-shadow: 0 0 0 2px rgba(31, 78, 67, 0.16);
+}
+
+.fin-due-card.overdue {
+  border-left: 3.5px solid #dc2626;
+}
+
+.fin-due-card.due {
+  border-left: 3.5px solid #d97706;
+}
+
+.fin-due-card.no_due_date {
+  border-left: 3.5px solid #64748b;
+}
+
+.fin-due-card.all_debt {
+  border-left: 3.5px solid var(--accent-primary);
+}
+
+.fin-due-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.fin-due-val {
+  font-size: 15px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.fin-due-val.warn { color: #dc2626; }
+.fin-due-val.amber { color: #b45309; }
+[data-theme="dark"] .fin-due-val.warn { color: #fca5a5; }
+[data-theme="dark"] .fin-due-val.amber { color: #fcd34d; }
+
+.fin-due-sub {
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.fin-paid-source-line {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
+.fin-fund-check-pill.unverified {
+  border-color: #d97706;
+  background: rgba(245, 158, 11, 0.09);
+  color: #92400e;
+}
+[data-theme="dark"] .fin-fund-check-pill.unverified {
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.16);
+}
+
+/* Operating Costs: 4-state Cost Basis Badges & Profit Readiness */
+.costs-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.costs-status-badge.missing {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.costs-status-badge.estimated {
+  background: #fef3c7;
+  color: #92400e;
+}
+.costs-status-badge.zero {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+.costs-status-badge.actual {
+  background: #dcfce7;
+  color: #15803d;
+}
+[data-theme="dark"] .costs-status-badge.missing { background: rgba(220, 38, 38, 0.24); color: #fca5a5; }
+[data-theme="dark"] .costs-status-badge.estimated { background: rgba(245, 158, 11, 0.24); color: #fde68a; }
+[data-theme="dark"] .costs-status-badge.zero { background: rgba(14, 165, 233, 0.24); color: #7dd3fc; }
+[data-theme="dark"] .costs-status-badge.actual { background: rgba(22, 163, 74, 0.24); color: #86efac; }
+
+.costs-pnl-warn {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(220, 38, 38, 0.08);
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  color: #b91c1c;
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+[data-theme="dark"] .costs-pnl-warn {
+  background: rgba(220, 38, 38, 0.18);
+  color: #fca5a5;
+}
+
+.costs-legacy-linked {
+  opacity: 0.72;
+  background: rgba(100, 116, 139, 0.07);
+  border-left: 3px solid #64748b;
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 11.5px;
+}
+
+/* Supplier Invoices & Payables Cards & Form Lines */
+.ap-invoice-card {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.ap-invoice-card.unpaid { border-left: 4px solid #d97706; }
+.ap-invoice-card.partial { border-left: 4px solid #2563eb; }
+.ap-invoice-card.overdue { border-left: 4px solid #dc2626; }
+.ap-invoice-card.paid { border-left: 4px solid #16a34a; }
+.ap-invoice-card.focused {
+  box-shadow: 0 0 0 2px rgba(31, 78, 67, 0.28);
+  border-color: var(--accent-primary);
+}
+
+.ap-line-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.3fr) minmax(140px, 1.4fr) minmax(110px, 0.9fr) auto;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.ap-legacy-link-box {
+  background: var(--bg-surface);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  .fin-due-buckets-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ap-line-row {
+    grid-template-columns: 1fr;
+  }
+}
 
