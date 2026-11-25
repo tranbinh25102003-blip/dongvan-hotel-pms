@@ -22,6 +22,7 @@
   const QUARANTINE_KEY = "ks_manual_corrupt_quarantine_v1";
   const LOCK_KEY = "ks_manual_pms_lock_v1";
   const OPERATING_COSTS_KEY = "ks_pms_operating_costs_v1";
+  const FINANCE_KEY = "ks_pms_finance_v1";
   const HOUSEKEEPING_KEY = "ks_pms_housekeeping_v1";
   const ISSUES_KEY = "ks_pms_issues_v1";
   const ACCOUNTS_KEY = "ks_pms_accounts_v1";
@@ -202,6 +203,114 @@
     return `${v}đ`;
   }
 
+  const HOTEL_TIMEZONE = "Asia/Ho_Chi_Minh";
+  const HOTEL_TZ_OFFSET_MINUTES = 7 * 60; // Vietnam ICT = UTC+7 (no DST)
+
+  function toVietnamParts(input) {
+    let dt;
+    if (input instanceof Date) {
+      dt = input;
+    } else if (typeof input === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.trim())) {
+      const [y, m, d] = input.trim().split("-").map(Number);
+      return {
+        year: y, month: m, day: d, hours: 12, minutes: 0, seconds: 0,
+        dateISO: `${y}-${pad2(m)}-${pad2(d)}`,
+        monthKey: `${y}-${pad2(m)}`,
+        isoWithOffset: `${y}-${pad2(m)}-${pad2(d)}T12:00:00+07:00`
+      };
+    } else if (typeof input === "string" && input.trim()) {
+      const s = input.trim();
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(s)) {
+        dt = new Date(s.length === 16 ? `${s}:00+07:00` : `${s}+07:00`);
+      } else {
+        dt = new Date(s);
+      }
+    } else {
+      dt = new Date();
+    }
+    if (!(dt instanceof Date) || Number.isNaN(dt.getTime())) dt = new Date();
+    const vnMs = dt.getTime() + HOTEL_TZ_OFFSET_MINUTES * 60000;
+    const v = new Date(vnMs);
+    const y = v.getUTCFullYear();
+    const m = v.getUTCMonth() + 1;
+    const d = v.getUTCDate();
+    const hh = v.getUTCHours();
+    const mm = v.getUTCMinutes();
+    const ss = v.getUTCSeconds();
+    const dateISO = `${y}-${pad2(m)}-${pad2(d)}`;
+    return {
+      year: y, month: m, day: d, hours: hh, minutes: mm, seconds: ss,
+      dateISO,
+      monthKey: `${y}-${pad2(m)}`,
+      isoWithOffset: `${dateISO}T${pad2(hh)}:${pad2(mm)}:${pad2(ss)}+07:00`
+    };
+  }
+
+  function getVietnamTodayISO(nowDate) {
+    return toVietnamParts(nowDate instanceof Date ? nowDate : new Date()).dateISO;
+  }
+
+  function getVietnamNowISO(nowDate) {
+    return toVietnamParts(nowDate instanceof Date ? nowDate : new Date()).isoWithOffset;
+  }
+
+  function normalizeFinanceDateISO(raw) {
+    if (raw === null || raw === undefined) return null;
+    const s = String(raw).trim();
+    if (!s) return null;
+    if (isValidISODate(s)) return s;
+    const dt = new Date(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(s) ? (s.length === 16 ? `${s}:00+07:00` : `${s}+07:00`) : s);
+    if (Number.isNaN(dt.getTime())) return null;
+    const parts = toVietnamParts(dt);
+    return isValidISODate(parts.dateISO) ? parts.dateISO : null;
+  }
+
+  function normalizeFinanceTimestamp(raw, fallbackNow) {
+    const s = String(raw || "").trim();
+    if (!s) {
+      const p = toVietnamParts(fallbackNow instanceof Date ? fallbackNow : new Date());
+      return { receivedAt: p.isoWithOffset, receivedDate: p.dateISO };
+    }
+    if (isValidISODate(s)) {
+      return { receivedAt: `${s}T12:00:00+07:00`, receivedDate: s };
+    }
+    const normalized = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(s)
+      ? (s.length === 16 ? `${s}:00+07:00` : `${s}+07:00`)
+      : s;
+    const dt = new Date(normalized);
+    if (Number.isNaN(dt.getTime())) {
+      const p = toVietnamParts(fallbackNow instanceof Date ? fallbackNow : new Date());
+      return { receivedAt: p.isoWithOffset, receivedDate: p.dateISO };
+    }
+    const p = toVietnamParts(dt);
+    return { receivedAt: p.isoWithOffset, receivedDate: p.dateISO };
+  }
+
+  function roundVND(v) {
+    const num = Number(v);
+    if (!Number.isFinite(num)) return 0;
+    const r = Math.round(num);
+    return Math.max(-MAX_AMOUNT_VND, Math.min(MAX_AMOUNT_VND, r));
+  }
+
+  function parseSignedVND(v) {
+    if (typeof v === "number") return roundVND(v);
+    const str = String(v || "").trim();
+    if (!str) return 0;
+    const neg = str.startsWith("-");
+    const cleaned = str.replace(/[^\d]/g, "");
+    if (!cleaned) return 0;
+    const parsed = parseInt(cleaned, 10);
+    if (!Number.isFinite(parsed)) return 0;
+    return roundVND(neg ? -parsed : parsed);
+  }
+
+  function formatSignedVND(n) {
+    const v = roundVND(n);
+    if (v < 0) return `-${Math.abs(v).toLocaleString("vi-VN")} đ`;
+    return `${v.toLocaleString("vi-VN")} đ`;
+  }
+
   function formatNumberInput(n) {
     const v = parseVND(n);
     return v > 0 ? v.toLocaleString("vi-VN") : "";
@@ -380,6 +489,7 @@
   /* -------------------- Conflict Detection & Consistency Audit -------------------- */
 
   function bookingCoversDate(bk, iso) {
+    if (!bk || isBookingCancelled(bk)) return false;
     return isValidISODate(bk.checkin) && isValidISODate(bk.checkout) && bk.checkin <= iso && iso < bk.checkout;
   }
 
@@ -391,6 +501,7 @@
     const map = {};
     const conflicts = [];
     for (const bk of bookings) {
+      if (!bk || isBookingCancelled(bk)) continue;
       if (bk.roomId !== "DORM" || !bookingCoversDate(bk, dateISO)) continue;
       const slots = Array.isArray(bk.slots) ? bk.slots : [];
       for (const s of slots) {
@@ -409,6 +520,7 @@
     const occupied = {};
     if (diffNights(checkin, checkout) <= 0) return occupied;
     for (const bk of bookings) {
+      if (!bk || isBookingCancelled(bk)) continue;
       if (bk.roomId !== "DORM" || bk.id === excludeId) continue;
       if (datesOverlap(bk.checkin, bk.checkout, checkin, checkout)) {
         for (const s of (bk.slots || [])) {
@@ -425,8 +537,10 @@
     const nights = diffNights(candidate.checkin, candidate.checkout);
     if (!Number.isFinite(nights) || nights <= 0) return "Ngày trả phòng phải sau ngày nhận phòng ít nhất 1 đêm.";
     if (nights > MAX_NIGHTS) return `Thời gian lưu trú vượt quá giới hạn ${MAX_NIGHTS} đêm.`;
+    if (isBookingCancelled(candidate)) return null;
 
     for (const b of bookings) {
+      if (!b || isBookingCancelled(b)) continue;
       if (b.id === excludeId || b.roomId !== candidate.roomId) continue;
       if (datesOverlap(candidate.checkin, candidate.checkout, b.checkin, b.checkout)) {
         const overlapStart = candidate.checkin > b.checkin ? candidate.checkin : b.checkin;
@@ -583,22 +697,103 @@
       else sourceName = ch ? ch.label : "Khác";
     }
 
-    const totalAmount = parseVND(obj.totalAmount);
+    const rawServices = obj.services !== undefined ? obj.services : (existingRecord && existingRecord.services);
+    const services = Array.isArray(rawServices)
+      ? rawServices.map((sv, idx) => {
+          const sObj = stripDangerousKeys(sv) || {};
+          const qty = Math.max(1, Math.min(999, Math.round(Number(sObj.qty) || 1)));
+          const unitPrice = parseVND(sObj.unitPrice !== undefined ? sObj.unitPrice : sObj.amount);
+          const amount = sObj.amount !== undefined && sObj.unitPrice === undefined
+            ? parseVND(sObj.amount)
+            : roundVND(qty * unitPrice);
+          return {
+            id: sanitizeText(sObj.id, 64) || `sv_${Date.now().toString(36)}_${idx}`,
+            name: sanitizeText(sObj.name, 120) || "Dịch vụ phát sinh",
+            qty,
+            unitPrice: unitPrice || amount,
+            amount: Math.max(0, amount),
+            dateISO: normalizeFinanceDateISO(sObj.dateISO) || checkin,
+            note: sanitizeText(sObj.note, 300),
+            addedBy: sanitizeText(sObj.addedBy, 60),
+            addedAt: sanitizeText(sObj.addedAt, 40) || new Date().toISOString()
+          };
+        })
+      : [];
+
+    const rawAdjustments = obj.adjustments !== undefined ? obj.adjustments : (existingRecord && existingRecord.adjustments);
+    const adjustments = Array.isArray(rawAdjustments)
+      ? rawAdjustments.map((adj, idx) => {
+          const aObj = stripDangerousKeys(adj) || {};
+          return {
+            id: sanitizeText(aObj.id, 64) || `adj_${Date.now().toString(36)}_${idx}`,
+            amount: parseSignedVND(aObj.amount),
+            reason: sanitizeText(aObj.reason, 300) || "Điều chỉnh giá trị đơn",
+            kind: sanitizeText(aObj.kind, 40) || "other",
+            effectiveDate: normalizeFinanceDateISO(aObj.effectiveDate) || getVietnamTodayISO(),
+            approvedBy: sanitizeText(aObj.approvedBy, 60),
+            createdAt: sanitizeText(aObj.createdAt, 40) || new Date().toISOString()
+          };
+        }).filter((a) => a.amount !== 0)
+      : [];
+
+    const servicesTotal = services.reduce((s, it) => s + parseVND(it.amount), 0);
+    const adjustmentsTotal = adjustments.reduce((s, it) => s + parseSignedVND(it.amount), 0);
+    const statusRaw = String(obj.status !== undefined ? obj.status : (existingRecord && existingRecord.status) || "active").trim().toLowerCase();
+    const status = (statusRaw === "cancelled" || statusRaw === "canceled") ? "cancelled" : "active";
+    const cancelledAt = status === "cancelled"
+      ? (sanitizeText(obj.cancelledAt !== undefined ? obj.cancelledAt : (existingRecord && existingRecord.cancelledAt) || "", 40) || getVietnamNowISO())
+      : "";
+    const cancelledBy = status === "cancelled"
+      ? sanitizeText(obj.cancelledBy !== undefined ? obj.cancelledBy : (existingRecord && existingRecord.cancelledBy) || "", 60)
+      : "";
+    const cancelReason = status === "cancelled"
+      ? sanitizeText(obj.cancelReason !== undefined ? obj.cancelReason : (existingRecord && existingRecord.cancelReason) || "", 300)
+      : "";
+    const depDispRaw = String(obj.depositDisposition !== undefined ? obj.depositDisposition : (existingRecord && existingRecord.depositDisposition) || (status === "cancelled" ? "pending" : "none")).trim().toLowerCase();
+    const depositDisposition = ["none", "pending", "refunded", "retained"].includes(depDispRaw) ? depDispRaw : (status === "cancelled" ? "pending" : "none");
+    const retainedDepositAmount = status === "cancelled" && depositDisposition === "retained"
+      ? parseVND(obj.retainedDepositAmount !== undefined ? obj.retainedDepositAmount : (existingRecord && existingRecord.retainedDepositAmount) || 0)
+      : 0;
+
+    let roomAmount;
+    let totalAmount;
+    if (obj.roomAmount !== undefined && obj.roomAmount !== null && String(obj.roomAmount).trim() !== "") {
+      roomAmount = parseVND(obj.roomAmount);
+      totalAmount = status === "cancelled"
+        ? retainedDepositAmount
+        : Math.max(0, roundVND(roomAmount + servicesTotal + adjustmentsTotal));
+    } else if (services.length > 0 || adjustments.length > 0) {
+      const explicitTotal = obj.totalAmount !== undefined ? parseVND(obj.totalAmount) : null;
+      const prevRoom = existingRecord && existingRecord.roomAmount !== undefined
+        ? parseVND(existingRecord.roomAmount)
+        : (explicitTotal !== null ? Math.max(0, explicitTotal - servicesTotal - adjustmentsTotal) : 0);
+      roomAmount = prevRoom;
+      totalAmount = status === "cancelled"
+        ? retainedDepositAmount
+        : Math.max(0, roundVND(roomAmount + servicesTotal + adjustmentsTotal));
+    } else {
+      roomAmount = parseVND(obj.totalAmount);
+      totalAmount = status === "cancelled" ? retainedDepositAmount : roomAmount;
+    }
+
     const paidAmount = parseVND(obj.paidAmount);
-    const payErr = validatePaymentAmounts(totalAmount, paidAmount);
-    if (payErr) {
-      return { ok: false, error: payErr };
+    const allowOverpaid = Boolean(obj.allowOverpaid || status === "cancelled" || (existingRecord && existingRecord.ledgerManaged) || obj.ledgerManaged);
+    if (!allowOverpaid) {
+      const payErr = validatePaymentAmounts(totalAmount, paidAmount);
+      if (payErr) {
+        return { ok: false, error: payErr };
+      }
     }
 
     const includeVat = Boolean(obj.includeVat);
     const vatRate = includeVat ? 8 : 0;
-    let preVatAmount = totalAmount;
+    let preVatAmount = roomAmount;
     let vatAmount = 0;
     if (includeVat) {
       const hasExplicitPreVat = obj.preVatAmount !== undefined && obj.preVatAmount !== null && String(obj.preVatAmount).trim() !== "";
-      const parsedPre = hasExplicitPreVat ? parseVND(obj.preVatAmount) : extractPreVatFromTotal(totalAmount).preVatAmount;
-      preVatAmount = Math.min(totalAmount, parsedPre);
-      vatAmount = Math.max(0, totalAmount - preVatAmount);
+      const parsedPre = hasExplicitPreVat ? parseVND(obj.preVatAmount) : extractPreVatFromTotal(roomAmount).preVatAmount;
+      preVatAmount = Math.min(roomAmount, parsedPre);
+      vatAmount = Math.max(0, roomAmount - preVatAmount);
     }
 
     let slots = [];
@@ -620,9 +815,11 @@
     const extraBed = room.isDorm ? 0 : Math.min(2, Math.max(0, parseInt(obj.extraBed, 10) || 0));
     const mergeBed = room.type === "Twins" ? Boolean(obj.mergeBed) : false;
 
-    const paymentStatus = totalAmount === 0
-      ? (room.isDorm || obj.paymentStatus === "paid" ? "paid" : "unpaid")
-      : (paidAmount >= totalAmount ? "paid" : paidAmount > 0 ? "deposit" : "unpaid");
+    const paymentStatus = status === "cancelled"
+      ? (paidAmount > retainedDepositAmount ? "overpaid" : "cancelled")
+      : totalAmount === 0
+        ? (room.isDorm || obj.paymentStatus === "paid" ? "paid" : "unpaid")
+        : (paidAmount > totalAmount ? "overpaid" : paidAmount >= totalAmount ? "paid" : paidAmount > 0 ? "deposit" : "unpaid");
 
     let confirmationPdf = null;
     if (obj.confirmationPdf === undefined) {
@@ -647,6 +844,35 @@
         : getTodayISO();
     const bookingDate = isValidISODate(obj.bookingDate) ? obj.bookingDate : fallbackBookingDate;
 
+    const existingChargeHistory = Array.isArray(obj.chargeHistory)
+      ? obj.chargeHistory
+      : (existingRecord && Array.isArray(existingRecord.chargeHistory) ? existingRecord.chargeHistory : []);
+    const chargeHistory = existingChargeHistory.slice(-40).map((ch) => ({
+      effectiveDate: normalizeFinanceDateISO(ch.effectiveDate) || bookingDate,
+      totalPayable: parseVND(ch.totalPayable),
+      roomAmount: parseVND(ch.roomAmount),
+      servicesTotal: parseVND(ch.servicesTotal),
+      adjustmentsTotal: parseSignedVND(ch.adjustmentsTotal),
+      status: ch.status === "cancelled" ? "cancelled" : "active",
+      recordedAt: sanitizeText(ch.recordedAt, 40) || nowISO,
+      reason: sanitizeText(ch.reason, 200)
+    }));
+    const lastHist = chargeHistory[chargeHistory.length - 1];
+    const effectiveChangeDate = normalizeFinanceDateISO(obj.chargeEffectiveDate)
+      || (existingRecord ? getVietnamTodayISO() : bookingDate);
+    if (!lastHist || lastHist.totalPayable !== totalAmount || lastHist.status !== status) {
+      chargeHistory.push({
+        effectiveDate: effectiveChangeDate,
+        totalPayable: totalAmount,
+        roomAmount,
+        servicesTotal,
+        adjustmentsTotal,
+        status,
+        recordedAt: nowISO,
+        reason: sanitizeText(obj.chargeChangeReason, 200) || (existingRecord ? "Cập nhật giá trị đơn" : "Tạo đơn")
+      });
+    }
+
     const record = {
       id,
       roomId: room.id,
@@ -662,6 +888,16 @@
       guestCount,
       dormBeds,
       slots: room.isDorm ? slots : undefined,
+      status,
+      cancelledAt,
+      cancelledBy,
+      cancelReason,
+      depositDisposition,
+      retainedDepositAmount,
+      roomAmount,
+      services,
+      adjustments,
+      chargeHistory,
       totalAmount,
       includeVat,
       vatRate,
@@ -669,6 +905,7 @@
       vatAmount,
       paidAmount,
       paymentStatus,
+      ledgerManaged: Boolean(obj.ledgerManaged || (existingRecord && existingRecord.ledgerManaged)),
       mergeBed,
       extraBed,
       confirmedBy: sanitizeText(obj.confirmedBy, 60),
@@ -713,10 +950,15 @@
         continue;
       }
 
-      const payErr = validatePaymentAmounts(bk.totalAmount, bk.paidAmount);
-      if (payErr) {
-        errors.push(`Bản ghi ${bk.id} (P.${room.name}): ${payErr}`);
+      const isCancelled = isBookingCancelled(bk);
+      if (!isCancelled && !bk.ledgerManaged) {
+        const payErr = validatePaymentAmounts(bk.totalAmount, bk.paidAmount);
+        if (payErr) {
+          errors.push(`Bản ghi ${bk.id} (P.${room.name}): ${payErr}`);
+        }
       }
+
+      if (isCancelled) continue;
 
       if (room.isDorm) {
         if (!Array.isArray(bk.slots) || bk.slots.length === 0) {
@@ -2397,6 +2639,9 @@
       "issues:read", "issues:create", "issues:manage",
       "photos:upload", "photos:read",
       "costs:read", "costs:write",
+      "finance:collect", "finance:ar_read", "finance:shift_read",
+      "finance:cashbook_read", "finance:approve_refund", "finance:approve_adjustment",
+      "finance:transfer", "finance:reconcile", "finance:opening_balance", "finance:export",
       "accounts:manage", "accounts:create", "accounts:lock", "accounts:delete",
       "reports:daily", "reports:management",
       "admin:backup", "admin:restore", "admin:reset"
@@ -2407,6 +2652,9 @@
       "issues:read", "issues:create", "issues:manage",
       "photos:upload", "photos:read",
       "costs:read", "costs:write",
+      "finance:collect", "finance:ar_read", "finance:shift_read",
+      "finance:cashbook_read", "finance:approve_refund", "finance:approve_adjustment",
+      "finance:transfer", "finance:reconcile", "finance:opening_balance", "finance:export",
       "reports:daily", "reports:management",
       "admin:backup", "admin:restore", "admin:reset"
     ])),
@@ -2415,6 +2663,7 @@
       "housekeeping:read", "housekeeping:create", "housekeeping:execute",
       "issues:read", "issues:create", "issues:manage",
       "photos:upload", "photos:read",
+      "finance:collect", "finance:ar_read", "finance:shift_read",
       "reports:daily"
     ])),
     housekeeping: Object.freeze(new Set([
@@ -2487,9 +2736,9 @@
       key: "finance",
       label: "Tài chính",
       items: Object.freeze([
-        Object.freeze({ key: "operating_costs", label: "Chi phí & giá vốn", id: "btn-open-costs", icon: "wallet", permission: "costs:read", implemented: true }),
-        Object.freeze({ key: "receivables", label: "Thu tiền & công nợ", id: "btn-nav-receivables", icon: "receipt", permission: "costs:read", implemented: false }),
-        Object.freeze({ key: "cashbook", label: "Sổ quỹ & quyết toán", id: "btn-nav-cashbook", icon: "book", permission: "costs:read", implemented: false })
+        Object.freeze({ key: "receivables", label: "Thu tiền & công nợ", id: "btn-open-receivables", icon: "receipt", permission: "finance:ar_read", implemented: true }),
+        Object.freeze({ key: "cashbook", label: "Sổ quỹ & đối soát", id: "btn-open-cashbook", icon: "book", permission: "finance:cashbook_read", implemented: true }),
+        Object.freeze({ key: "operating_costs", label: "Chi phí & giá vốn", id: "btn-open-costs", icon: "wallet", permission: "costs:read", implemented: true })
       ])
     }),
     Object.freeze({
@@ -3611,6 +3860,27 @@
       }
     }
 
+    function getFinanceState() {
+      try {
+        const raw = storageAdapter.getItem(FINANCE_KEY);
+        if (!raw) return createDefaultFinanceState();
+        return sanitizeFinanceState(JSON.parse(raw));
+      } catch {
+        return createDefaultFinanceState();
+      }
+    }
+
+    function saveFinanceState(nextState) {
+      const clean = sanitizeFinanceState(nextState);
+      clean.updatedAt = new Date().toISOString();
+      try {
+        storageAdapter.setItem(FINANCE_KEY, JSON.stringify(clean));
+        return { ok: true, financeState: clean };
+      } catch (err) {
+        return { ok: false, error: `Không thể lưu sổ quỹ & tài chính: ${err && err.message ? err.message : "lỗi bộ nhớ"}` };
+      }
+    }
+
     function getHousekeepingTasks() {
       try {
         const raw = storageAdapter.getItem(HOUSEKEEPING_KEY);
@@ -3745,6 +4015,8 @@
       getStorageStatus,
       getOperatingCosts,
       saveOperatingCosts,
+      getFinanceState,
+      saveFinanceState,
       getHousekeepingTasks,
       saveHousekeepingTasks,
       getMaintenanceIssues,
@@ -3762,6 +4034,982 @@
     };
   }
 
+  /* -------------------- Phase 1 Finance & Accounting Engine (Thu tiền, Công nợ & Sổ quỹ) -------------------- */
+
+  const FINANCE_FUNDS = Object.freeze([
+    Object.freeze({ id: "cash_frontdesk", name: "Quỹ tiền mặt lễ tân", shortName: "Tiền mặt", kind: "cash", isLegacyBucket: false }),
+    Object.freeze({ id: "bank_main", name: "Tài khoản ngân hàng khách sạn", shortName: "Ngân hàng", kind: "bank", isLegacyBucket: false }),
+    Object.freeze({ id: "unassigned_legacy", name: "Dữ liệu chuyển tiếp – chưa xác định quỹ", shortName: "Chuyển tiếp (chưa gán quỹ)", kind: "legacy", isLegacyBucket: true })
+  ]);
+
+  const PAYMENT_METHODS = Object.freeze([
+    Object.freeze({ key: "cash", label: "Tiền mặt", defaultFundId: "cash_frontdesk" }),
+    Object.freeze({ key: "bank_transfer", label: "Chuyển khoản ngân hàng", defaultFundId: "bank_main" }),
+    Object.freeze({ key: "card", label: "Quẹt thẻ / POS", defaultFundId: "bank_main" }),
+    Object.freeze({ key: "ota_payout", label: "OTA đối soát chuyển khoản", defaultFundId: "bank_main" }),
+    Object.freeze({ key: "other", label: "Phương thức khác", defaultFundId: "cash_frontdesk" })
+  ]);
+
+  const FINANCE_TX_TYPES = Object.freeze({
+    customer_payment: Object.freeze({ key: "customer_payment", label: "Thu tiền khách", shortLabel: "Thu khách", prefix: "PT" }),
+    customer_refund: Object.freeze({ key: "customer_refund", label: "Hoàn tiền khách", shortLabel: "Hoàn khách", prefix: "PH" }),
+    fund_transfer: Object.freeze({ key: "fund_transfer", label: "Chuyển quỹ nội bộ", shortLabel: "Chuyển quỹ", prefix: "CK" }),
+    opening_balance: Object.freeze({ key: "opening_balance", label: "Số dư đầu kỳ", shortLabel: "Đầu kỳ", prefix: "DK" }),
+    balance_adjustment: Object.freeze({ key: "balance_adjustment", label: "Điều chỉnh số dư quỹ", shortLabel: "Điều chỉnh quỹ", prefix: "DC" }),
+    legacy_payment: Object.freeze({ key: "legacy_payment", label: "Dữ liệu chuyển tiếp – cần đối soát", shortLabel: "Chuyển tiếp", prefix: "CT" })
+  });
+
+  const REFUND_CATEGORIES = Object.freeze({
+    overpayment: Object.freeze({ key: "overpayment", label: "Hoàn tiền do khách trả thừa" }),
+    cancel_deposit: Object.freeze({ key: "cancel_deposit", label: "Hoàn cọc do hủy đơn" }),
+    service_reduction: Object.freeze({ key: "service_reduction", label: "Hoàn do giảm/hủy dịch vụ" }),
+    other: Object.freeze({ key: "other", label: "Hoàn tiền lý do khác" })
+  });
+
+  function getFinanceFundById(fundId) {
+    return FINANCE_FUNDS.find((f) => f.id === fundId) || FINANCE_FUNDS[0];
+  }
+
+  function getPaymentMethodMeta(methodKey) {
+    return PAYMENT_METHODS.find((m) => m.key === methodKey) || PAYMENT_METHODS[0];
+  }
+
+  function createDefaultFinanceState() {
+    return {
+      version: 1,
+      ledgerVersion: 0,
+      voucherSeq: 0,
+      transactions: [],
+      openingBalances: [],
+      reconciliationChecks: [],
+      syncLogs: [],
+      migrationHistory: [],
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  function sanitizeFinanceTransaction(raw, idx = 0) {
+    const obj = stripDangerousKeys(raw);
+    if (!obj || typeof obj !== "object") return null;
+    const txType = FINANCE_TX_TYPES[obj.txType] ? obj.txType : "customer_payment";
+    const id = sanitizeText(obj.id, 80) || `ftx_${Date.now().toString(36)}_${idx}`;
+    const voucherCode = sanitizeText(obj.voucherCode, 48) || `${FINANCE_TX_TYPES[txType].prefix}-${String(idx + 1).padStart(4, "0")}`;
+    const amount = txType === "balance_adjustment" ? parseSignedVND(obj.amount) : parseVND(obj.amount);
+    const isLegacyMigrated = Boolean(obj.isLegacyMigrated || txType === "legacy_payment");
+    const hasExplicitDate = obj.receivedDate !== null && obj.receivedDate !== undefined && String(obj.receivedDate).trim() !== "";
+    let receivedDate = hasExplicitDate ? normalizeFinanceDateISO(obj.receivedDate) : null;
+    let receivedAt = sanitizeText(obj.receivedAt, 40) || "";
+    if (!isLegacyMigrated && !receivedDate) {
+      const ts = normalizeFinanceTimestamp(receivedAt || obj.recordedAt);
+      receivedDate = ts.receivedDate;
+      receivedAt = ts.receivedAt;
+    } else if (receivedDate && !receivedAt) {
+      receivedAt = `${receivedDate}T12:00:00+07:00`;
+    }
+    const rawFund = sanitizeText(obj.fundId, 48);
+    const fundId = FINANCE_FUNDS.some((f) => f.id === rawFund)
+      ? rawFund
+      : (isLegacyMigrated ? "unassigned_legacy" : "cash_frontdesk");
+    const fromFundId = txType === "fund_transfer" && FINANCE_FUNDS.some((f) => f.id === obj.fromFundId)
+      ? obj.fromFundId
+      : (txType === "fund_transfer" ? fundId : "");
+    const toFundId = txType === "fund_transfer" && FINANCE_FUNDS.some((f) => f.id === obj.toFundId)
+      ? obj.toFundId
+      : "";
+    const entityType = obj.entityType === "group" ? "group" : (obj.entityType === "booking" ? "booking" : "fund");
+    const methodKey = PAYMENT_METHODS.some((m) => m.key === obj.paymentMethod) ? obj.paymentMethod : (fundId === "bank_main" ? "bank_transfer" : "cash");
+    const refundCategory = txType === "customer_refund"
+      ? (REFUND_CATEGORIES[obj.refundCategory] ? obj.refundCategory : "other")
+      : "";
+    const legacyStatus = isLegacyMigrated
+      ? (obj.legacyStatus === "reconciled" ? "reconciled" : "needs_reconciliation")
+      : "";
+
+    return {
+      id,
+      voucherCode,
+      txType,
+      entityType,
+      bookingId: sanitizeText(obj.bookingId, 80),
+      groupCode: normalizeGroupCode(obj.groupCode),
+      groupCodeDisplay: sanitizeText(obj.groupCodeDisplay || obj.groupCode, 60),
+      amount,
+      receivedDate,
+      receivedAt,
+      recordedAt: sanitizeText(obj.recordedAt, 40) || new Date().toISOString(),
+      paymentMethod: methodKey,
+      fundId,
+      fromFundId,
+      toFundId,
+      operator: sanitizeText(obj.operator, 60) || "Hệ thống",
+      approvedBy: sanitizeText(obj.approvedBy, 60),
+      linkedVoucherId: sanitizeText(obj.linkedVoucherId, 80),
+      linkedVoucherCode: sanitizeText(obj.linkedVoucherCode, 48),
+      refundCategory,
+      reason: sanitizeText(obj.reason, 300),
+      note: sanitizeText(obj.note, 500),
+      idempotencyKey: sanitizeText(obj.idempotencyKey, 120) || id,
+      reconciled: Boolean(obj.reconciled),
+      reconciledAt: sanitizeText(obj.reconciledAt, 40),
+      reconciledBy: sanitizeText(obj.reconciledBy, 60),
+      reconcileNote: sanitizeText(obj.reconcileNote, 300),
+      isLegacyMigrated,
+      legacyStatus,
+      voucherRef: sanitizeText(obj.voucherRef, 80)
+    };
+  }
+
+  function sanitizeFinanceState(raw) {
+    const base = createDefaultFinanceState();
+    const obj = stripDangerousKeys(raw);
+    if (!obj || typeof obj !== "object") return base;
+    const transactions = Array.isArray(obj.transactions)
+      ? obj.transactions.map((t, i) => sanitizeFinanceTransaction(t, i)).filter(Boolean)
+      : [];
+    const openingBalances = Array.isArray(obj.openingBalances)
+      ? obj.openingBalances.map((ob, i) => {
+          const o = stripDangerousKeys(ob) || {};
+          const fundId = FINANCE_FUNDS.some((f) => f.id === o.fundId && !f.isLegacyBucket) ? o.fundId : "cash_frontdesk";
+          return {
+            id: sanitizeText(o.id, 64) || `ob_${fundId}_${i}`,
+            fundId,
+            amount: parseSignedVND(o.amount),
+            asOfDate: normalizeFinanceDateISO(o.asOfDate) || getVietnamTodayISO(),
+            voucherRef: sanitizeText(o.voucherRef, 80),
+            note: sanitizeText(o.note, 300),
+            recordedBy: sanitizeText(o.recordedBy, 60),
+            recordedAt: sanitizeText(o.recordedAt, 40) || new Date().toISOString()
+          };
+        })
+      : [];
+    const reconciliationChecks = Array.isArray(obj.reconciliationChecks)
+      ? obj.reconciliationChecks.map((rc, i) => {
+          const r = stripDangerousKeys(rc) || {};
+          const fundId = FINANCE_FUNDS.some((f) => f.id === r.fundId && !f.isLegacyBucket) ? r.fundId : "cash_frontdesk";
+          return {
+            id: sanitizeText(r.id, 64) || `rec_${fundId}_${i}`,
+            fundId,
+            asOfDate: normalizeFinanceDateISO(r.asOfDate) || getVietnamTodayISO(),
+            actualBalance: parseSignedVND(r.actualBalance),
+            bookBalanceAtCheck: parseSignedVND(r.bookBalanceAtCheck),
+            discrepancy: parseSignedVND(r.discrepancy),
+            note: sanitizeText(r.note, 300),
+            checkedBy: sanitizeText(r.checkedBy, 60),
+            checkedAt: sanitizeText(r.checkedAt, 40) || new Date().toISOString()
+          };
+        })
+      : [];
+    const syncLogs = Array.isArray(obj.syncLogs)
+      ? obj.syncLogs.slice(0, 120).map((lg) => {
+          const l = stripDangerousKeys(lg) || {};
+          return {
+            id: sanitizeText(l.id, 64) || `slog_${Date.now().toString(36)}`,
+            ts: sanitizeText(l.ts, 40) || new Date().toISOString(),
+            level: sanitizeText(l.level, 20) || "info",
+            category: sanitizeText(l.category, 40) || "sync",
+            message: sanitizeText(l.message, 400),
+            idempotencyKey: sanitizeText(l.idempotencyKey, 120),
+            operator: sanitizeText(l.operator, 60)
+          };
+        })
+      : [];
+    const migrationHistory = Array.isArray(obj.migrationHistory) ? obj.migrationHistory.slice(0, 20) : [];
+
+    return {
+      version: 1,
+      ledgerVersion: Math.max(0, Math.trunc(Number(obj.ledgerVersion) || 0)),
+      voucherSeq: Math.max(transactions.length, Math.trunc(Number(obj.voucherSeq) || 0)),
+      transactions,
+      openingBalances,
+      reconciliationChecks,
+      syncLogs,
+      migrationHistory,
+      updatedAt: sanitizeText(obj.updatedAt, 40) || new Date().toISOString()
+    };
+  }
+
+  function getBookingChargesBreakdown(bk, asOfDateISO = null) {
+    if (!bk || typeof bk !== "object") {
+      return { roomAmount: 0, servicesTotal: 0, adjustmentsTotal: 0, totalPayable: 0, status: "active", effectiveOnDate: false };
+    }
+    const bookingDate = normalizeFinanceDateISO(bk.bookingDate)
+      || (typeof bk.createdAt === "string" ? normalizeFinanceDateISO(bk.createdAt) : null)
+      || normalizeFinanceDateISO(bk.checkin)
+      || getVietnamTodayISO();
+
+    if (asOfDateISO && isValidISODate(asOfDateISO)) {
+      const history = Array.isArray(bk.chargeHistory) ? bk.chargeHistory : [];
+      if (history.length > 0) {
+        const eligible = history.filter((h) => h && isValidISODate(h.effectiveDate) && h.effectiveDate <= asOfDateISO);
+        if (eligible.length > 0) {
+          const latest = eligible[eligible.length - 1];
+          return {
+            roomAmount: parseVND(latest.roomAmount),
+            servicesTotal: parseVND(latest.servicesTotal),
+            adjustmentsTotal: parseSignedVND(latest.adjustmentsTotal),
+            totalPayable: parseVND(latest.totalPayable),
+            status: latest.status === "cancelled" ? "cancelled" : "active",
+            effectiveOnDate: true
+          };
+        }
+        // Booking's first charge snapshot is AFTER asOfDateISO -> booking did not exist yet
+        return { roomAmount: 0, servicesTotal: 0, adjustmentsTotal: 0, totalPayable: 0, status: "active", effectiveOnDate: false };
+      }
+      if (bookingDate > asOfDateISO) {
+        return { roomAmount: 0, servicesTotal: 0, adjustmentsTotal: 0, totalPayable: 0, status: "active", effectiveOnDate: false };
+      }
+    }
+
+    const services = Array.isArray(bk.services) ? bk.services : [];
+    const adjustments = Array.isArray(bk.adjustments) ? bk.adjustments : [];
+    const servicesTotal = services.reduce((s, it) => s + parseVND(it.amount), 0);
+    const adjustmentsTotal = adjustments.reduce((s, it) => s + parseSignedVND(it.amount), 0);
+    const isCancelled = isBookingCancelled(bk);
+    const roomAmount = bk.roomAmount !== undefined && bk.roomAmount !== null
+      ? parseVND(bk.roomAmount)
+      : Math.max(0, parseVND(bk.totalAmount) - servicesTotal - adjustmentsTotal);
+    const retained = isCancelled && bk.depositDisposition === "retained" ? parseVND(bk.retainedDepositAmount) : 0;
+    const totalPayable = isCancelled
+      ? retained
+      : (bk.roomAmount !== undefined && bk.roomAmount !== null
+        ? Math.max(0, roundVND(roomAmount + servicesTotal + adjustmentsTotal))
+        : parseVND(bk.totalAmount));
+    return {
+      roomAmount,
+      servicesTotal,
+      adjustmentsTotal,
+      totalPayable,
+      status: isCancelled ? "cancelled" : "active",
+      effectiveOnDate: true
+    };
+  }
+
+  // Group bookings into authoritative AR entities (multi-room group = 1 entity; single room = 1 entity)
+  function buildFinanceEntities(bookings) {
+    const list = Array.isArray(bookings) ? bookings.filter(Boolean) : [];
+    const byNormCode = new Map();
+    for (const bk of list) {
+      const nc = normalizeGroupCode(bk.bookingCode);
+      if (!nc) continue;
+      if (!byNormCode.has(nc)) byNormCode.set(nc, []);
+      byNormCode.get(nc).push(bk);
+    }
+
+    const entities = [];
+    const bookingToEntity = new Map();
+
+    for (const [normCode, members] of byNormCode.entries()) {
+      if (members.length < 2) continue;
+      const sorted = [...members].sort((a, b) => a.checkin.localeCompare(b.checkin) || a.roomId.localeCompare(b.roomId));
+      const lead = sorted[0];
+      const entity = {
+        entityKey: `group:${normCode}`,
+        entityType: "group",
+        groupCode: normCode,
+        groupCodeDisplay: lead.bookingCode || normCode,
+        bookingId: lead.id,
+        bookings: sorted,
+        memberIds: new Set(sorted.map((m) => m.id)),
+        guestName: lead.guestName || "",
+        phone: lead.phone || "",
+        tourName: sorted.map((m) => m.tourName).find(Boolean) || "",
+        sourceName: lead.sourceName || "",
+        channelKey: lead.channelKey || "direct",
+        roomLabel: sorted.map((m) => (m.roomId === "DORM" ? "Dorm" : `P.${m.roomId}`)).join(", "),
+        minCheckin: sorted.reduce((min, m) => (m.checkin < min ? m.checkin : min), sorted[0].checkin),
+        maxCheckout: sorted.reduce((max, m) => (m.checkout > max ? m.checkout : max), sorted[0].checkout),
+        earliestBookingDate: sorted.reduce((min, m) => {
+          const bd = normalizeFinanceDateISO(m.bookingDate) || m.checkin;
+          return bd < min ? bd : min;
+        }, normalizeFinanceDateISO(sorted[0].bookingDate) || sorted[0].checkin)
+      };
+      entities.push(entity);
+      sorted.forEach((m) => bookingToEntity.set(m.id, entity));
+    }
+
+    for (const bk of list) {
+      if (bookingToEntity.has(bk.id)) continue;
+      const entity = {
+        entityKey: `booking:${bk.id}`,
+        entityType: "booking",
+        groupCode: normalizeGroupCode(bk.bookingCode),
+        groupCodeDisplay: bk.bookingCode || "",
+        bookingId: bk.id,
+        bookings: [bk],
+        memberIds: new Set([bk.id]),
+        guestName: bk.guestName || "",
+        phone: bk.phone || "",
+        tourName: bk.tourName || "",
+        sourceName: bk.sourceName || "",
+        channelKey: bk.channelKey || "direct",
+        roomLabel: bk.roomId === "DORM" ? `Dorm (${(bk.slots || []).join(",")})` : `P.${bk.roomId}`,
+        minCheckin: bk.checkin,
+        maxCheckout: bk.checkout,
+        earliestBookingDate: normalizeFinanceDateISO(bk.bookingDate) || bk.checkin
+      };
+      entities.push(entity);
+      bookingToEntity.set(bk.id, entity);
+    }
+
+    return { entities, bookingToEntity };
+  }
+
+  function computeEntityFinancials(entity, financeState, asOfDateISO = null) {
+    const fState = financeState && Array.isArray(financeState.transactions) ? financeState : createDefaultFinanceState();
+    const effectiveAsOf = asOfDateISO && isValidISODate(asOfDateISO) ? asOfDateISO : null;
+
+    let roomAmount = 0;
+    let servicesTotal = 0;
+    let adjustmentsTotal = 0;
+    let totalPayable = 0;
+    let effectiveRoomCount = 0;
+    let allCancelled = true;
+    let hasCancelled = false;
+    let retainedDepositAmount = 0;
+    let legacyBookingPaidFallback = 0;
+
+    for (const bk of entity.bookings) {
+      const ch = getBookingChargesBreakdown(bk, effectiveAsOf);
+      if (ch.effectiveOnDate) {
+        effectiveRoomCount += 1;
+        roomAmount += ch.roomAmount;
+        servicesTotal += ch.servicesTotal;
+        adjustmentsTotal += ch.adjustmentsTotal;
+        totalPayable += ch.totalPayable;
+        if (ch.status === "cancelled") {
+          hasCancelled = true;
+          if (bk.depositDisposition === "retained") retainedDepositAmount += parseVND(bk.retainedDepositAmount);
+        } else {
+          allCancelled = false;
+        }
+        legacyBookingPaidFallback += parseVND(bk.paidAmount);
+      }
+    }
+
+    // Match authoritative ledger transactions ONCE by unique tx.id (no double-counting across group rooms!)
+    const matchedTxAll = [];
+    const seenTxIds = new Set();
+    for (const tx of fState.transactions) {
+      if (!tx || seenTxIds.has(tx.id)) continue;
+      if (tx.txType !== "customer_payment" && tx.txType !== "customer_refund" && tx.txType !== "legacy_payment") continue;
+      const hitByGroup = entity.entityType === "group" && entity.groupCode && tx.groupCode === entity.groupCode;
+      const hitByBooking = tx.bookingId && entity.memberIds.has(tx.bookingId);
+      if (!hitByGroup && !hitByBooking) continue;
+      seenTxIds.add(tx.id);
+      matchedTxAll.push(tx);
+    }
+
+    const matchedTx = matchedTxAll.filter((tx) => {
+      if (!effectiveAsOf) return true;
+      if (tx.txType === "legacy_payment" && !tx.receivedDate) {
+        return effectiveRoomCount > 0;
+      }
+      return Boolean(tx.receivedDate && tx.receivedDate <= effectiveAsOf);
+    });
+
+    matchedTx.sort((a, b) => {
+      const da = a.receivedAt || a.recordedAt || "";
+      const db = b.receivedAt || b.recordedAt || "";
+      return da.localeCompare(db) || a.voucherCode.localeCompare(b.voucherCode);
+    });
+
+    let grossPaid = 0;
+    let totalRefunded = 0;
+    let legacyMigratedPaid = 0;
+    let legacyNeedsReconcileCount = 0;
+
+    for (const tx of matchedTx) {
+      if (tx.txType === "customer_payment") {
+        grossPaid += parseVND(tx.amount);
+      } else if (tx.txType === "legacy_payment") {
+        grossPaid += parseVND(tx.amount);
+        legacyMigratedPaid += parseVND(tx.amount);
+        if (tx.legacyStatus !== "reconciled") legacyNeedsReconcileCount += 1;
+      } else if (tx.txType === "customer_refund") {
+        totalRefunded += parseVND(tx.amount);
+      }
+    }
+
+    // Backward-compatible fallback ONLY when zero ledger rows exist for an un-migrated legacy booking
+    let unmigratedLegacyPaid = 0;
+    if (matchedTxAll.length === 0 && legacyBookingPaidFallback > 0 && effectiveRoomCount > 0) {
+      unmigratedLegacyPaid = legacyBookingPaidFallback;
+      grossPaid = legacyBookingPaidFallback;
+    }
+
+    const effectiveOnDate = effectiveRoomCount > 0 || matchedTx.length > 0;
+    const netPaid = roundVND(grossPaid - totalRefunded);
+    const remaining = Math.max(0, roundVND(totalPayable - netPaid));
+    const overpaid = Math.max(0, roundVND(netPaid - totalPayable));
+    const cancelledHeldDeposit = allCancelled && effectiveRoomCount > 0 && overpaid > 0 ? overpaid : 0;
+
+    let arStatus = "unpaid";
+    if (allCancelled && effectiveRoomCount > 0) {
+      arStatus = cancelledHeldDeposit > 0 ? "cancelled_deposit" : "cancelled_settled";
+    } else if (overpaid > 0) {
+      arStatus = "overpaid";
+    } else if (remaining === 0 && totalPayable > 0) {
+      arStatus = "paid";
+    } else if (remaining === 0 && totalPayable === 0) {
+      arStatus = netPaid > 0 ? "overpaid" : "paid";
+    } else if (netPaid > 0) {
+      arStatus = "partial";
+    }
+
+    return {
+      ...entity,
+      effectiveOnDate,
+      roomCount: entity.bookings.length,
+      roomAmount: roundVND(roomAmount),
+      servicesTotal: roundVND(servicesTotal),
+      adjustmentsTotal: roundVND(adjustmentsTotal),
+      totalPayable: roundVND(totalPayable),
+      grossPaid: roundVND(grossPaid),
+      totalRefunded: roundVND(totalRefunded),
+      netPaid,
+      remaining,
+      overpaid,
+      cancelledHeldDeposit,
+      retainedDepositAmount: roundVND(retainedDepositAmount),
+      allCancelled: allCancelled && effectiveRoomCount > 0,
+      hasCancelled,
+      arStatus,
+      transactions: matchedTx,
+      allTransactions: matchedTxAll,
+      legacyMigratedPaid: roundVND(legacyMigratedPaid),
+      unmigratedLegacyPaid: roundVND(unmigratedLegacyPaid),
+      hasLegacyNeedsReconcile: legacyNeedsReconcileCount > 0 || unmigratedLegacyPaid > 0
+    };
+  }
+
+  function computeBookingFinancialSummary(booking, allBookings, financeState, asOfDateISO = null) {
+    if (!booking) return null;
+    const { bookingToEntity } = buildFinanceEntities(allBookings || [booking]);
+    const entity = bookingToEntity.get(booking.id);
+    if (!entity) return null;
+    const summary = computeEntityFinancials(entity, financeState, asOfDateISO);
+    const roomBreakdown = getBookingChargesBreakdown(booking, asOfDateISO);
+    return {
+      ...summary,
+      currentRoomId: booking.roomId,
+      currentBookingId: booking.id,
+      currentRoomBreakdown: roomBreakdown,
+      isGroupSharedLedger: entity.entityType === "group"
+    };
+  }
+
+  function computeReceivablesReport(bookings, financeState, filters = {}) {
+    const asOfDate = normalizeFinanceDateISO(filters.asOfDate) || null;
+    const search = String(filters.search || "").trim().toLowerCase();
+    const statusFilter = String(filters.status || "all");
+    const entityTypeFilter = String(filters.entityType || "all"); // all | group | booking
+    const tourFilter = String(filters.tour || "").trim().toLowerCase();
+
+    const { entities } = buildFinanceEntities(bookings);
+    const allComputed = entities
+      .map((ent) => computeEntityFinancials(ent, financeState, asOfDate))
+      .filter((row) => row.effectiveOnDate);
+
+    const filtered = allComputed.filter((row) => {
+      if (entityTypeFilter !== "all" && row.entityType !== entityTypeFilter) return false;
+      if (statusFilter === "debt" && row.remaining <= 0) return false;
+      if (statusFilter === "overpaid" && row.overpaid <= 0) return false;
+      if (statusFilter === "paid" && (row.remaining > 0 || row.overpaid > 0 || row.allCancelled)) return false;
+      if (statusFilter === "cancelled_deposit" && row.cancelledHeldDeposit <= 0) return false;
+      if (statusFilter === "legacy" && !row.hasLegacyNeedsReconcile) return false;
+      if (tourFilter && !(row.tourName || "").toLowerCase().includes(tourFilter)) return false;
+      if (search) {
+        const hay = [
+          row.guestName,
+          row.phone,
+          row.groupCodeDisplay,
+          row.tourName,
+          row.sourceName,
+          row.roomLabel,
+          row.bookingId,
+          ...row.bookings.map((b) => `${b.guestName} ${b.roomId} ${b.bookingCode || ""} ${b.tourName || ""}`)
+        ].join(" ").toLowerCase();
+        if (!hay.includes(search)) return false;
+      }
+      return true;
+    });
+
+    filtered.sort((a, b) => {
+      // Prioritize unpaid/cancelled-deposit/overpaid first, then newest checkin
+      const prio = (r) => (r.cancelledHeldDeposit > 0 ? 0 : r.remaining > 0 ? 1 : r.overpaid > 0 ? 2 : 3);
+      return prio(a) - prio(b) || b.remaining - a.remaining || a.minCheckin.localeCompare(b.minCheckin);
+    });
+
+    const totals = filtered.reduce((acc, r) => {
+      acc.totalPayable += r.totalPayable;
+      acc.totalGrossPaid += r.grossPaid;
+      acc.totalRefunded += r.totalRefunded;
+      acc.totalNetPaid += r.netPaid;
+      acc.totalRemaining += r.remaining;
+      acc.totalOverpaid += r.overpaid;
+      acc.totalCancelledHeldDeposit += r.cancelledHeldDeposit;
+      if (r.remaining > 0) acc.debtCount += 1;
+      if (r.overpaid > 0) acc.overpaidCount += 1;
+      if (r.hasLegacyNeedsReconcile) {
+        acc.legacyCount += 1;
+        acc.legacyTotal += r.legacyMigratedPaid + r.unmigratedLegacyPaid;
+      }
+      return acc;
+    }, {
+      totalPayable: 0,
+      totalGrossPaid: 0,
+      totalRefunded: 0,
+      totalNetPaid: 0,
+      totalRemaining: 0,
+      totalOverpaid: 0,
+      totalCancelledHeldDeposit: 0,
+      debtCount: 0,
+      overpaidCount: 0,
+      legacyCount: 0,
+      legacyTotal: 0
+    });
+
+    const fState = financeState && Array.isArray(financeState.transactions) ? financeState : createDefaultFinanceState();
+    const legacyTransactions = fState.transactions.filter((tx) => tx && tx.txType === "legacy_payment" && tx.legacyStatus !== "reconciled");
+
+    return {
+      asOfDate: asOfDate || getVietnamTodayISO(),
+      rows: filtered,
+      allRowsCount: allComputed.length,
+      ...totals,
+      legacyTransactions
+    };
+  }
+
+  function computeCashbookReport(financeState, bookings, filters = {}) {
+    const fState = financeState && Array.isArray(financeState.transactions) ? financeState : createDefaultFinanceState();
+    const fromDate = normalizeFinanceDateISO(filters.fromDate) || null;
+    const toDate = normalizeFinanceDateISO(filters.toDate) || null;
+    const fundFilter = String(filters.fundId || "all");
+    const typeFilter = String(filters.txType || "all");
+    const reconcileFilter = String(filters.reconcile || "all"); // all | reconciled | unreconciled
+
+    const { bookingToEntity } = buildFinanceEntities(bookings || []);
+    const bookingMap = new Map((bookings || []).map((b) => [b.id, b]));
+
+    // Build per-fund balances up to toDate (or all-time if toDate omitted)
+    const fundMap = {};
+    for (const f of FINANCE_FUNDS) {
+      fundMap[f.id] = {
+        ...f,
+        openingBalance: 0,
+        openingAsOfDate: null,
+        openingVoucherRef: "",
+        customerIn: 0,
+        customerRefund: 0,
+        transferIn: 0,
+        transferOut: 0,
+        adjustments: 0,
+        closingBalance: 0,
+        reconciledCount: 0,
+        unreconciledCount: 0,
+        unreconciledNetAmount: 0,
+        latestCheck: null
+      };
+    }
+
+    // Apply latest declared opening balance per fund (effective <= toDate if toDate specified)
+    for (const ob of (fState.openingBalances || [])) {
+      const bucket = fundMap[ob.fundId];
+      if (!bucket || bucket.isLegacyBucket) continue;
+      if (toDate && ob.asOfDate > toDate) continue;
+      if (!bucket.openingAsOfDate || ob.asOfDate >= bucket.openingAsOfDate) {
+        bucket.openingBalance = parseSignedVND(ob.amount);
+        bucket.openingAsOfDate = ob.asOfDate;
+        bucket.openingVoucherRef = ob.voucherRef || "";
+      }
+    }
+
+    // Attach latest physical/statement reconciliation check per fund
+    for (const chk of (fState.reconciliationChecks || [])) {
+      const bucket = fundMap[chk.fundId];
+      if (!bucket || bucket.isLegacyBucket) continue;
+      if (toDate && chk.asOfDate > toDate) continue;
+      if (!bucket.latestCheck || chk.checkedAt >= bucket.latestCheck.checkedAt) {
+        bucket.latestCheck = chk;
+      }
+    }
+
+    // Build ledger entries (a fund_transfer produces 1 summary row with both fromFundId & toFundId clearly visible,
+    // and applies -amount to fromFundId and +amount to toFundId simultaneously)
+    const allTxSorted = [...fState.transactions].sort((a, b) => {
+      const da = a.receivedDate || "0000-00-00";
+      const db = b.receivedDate || "0000-00-00";
+      return db.localeCompare(da) || (b.recordedAt || "").localeCompare(a.recordedAt || "");
+    });
+
+    let totalCustomerNetCollected = 0;
+    let totalCustomerGrossIn = 0;
+    let totalCustomerRefunded = 0;
+    const legacyUnreconciled = [];
+    const ledgerLines = [];
+
+    for (const tx of allTxSorted) {
+      if (!tx) continue;
+      if (tx.txType === "legacy_payment" && tx.legacyStatus !== "reconciled") {
+        legacyUnreconciled.push(tx);
+        const legBucket = fundMap.unassigned_legacy;
+        legBucket.customerIn += parseVND(tx.amount);
+        legBucket.closingBalance += parseVND(tx.amount);
+        legBucket.unreconciledCount += 1;
+        continue;
+      }
+
+      const txDate = tx.receivedDate;
+      if (toDate && txDate && txDate > toDate) continue;
+
+      const amt = tx.txType === "balance_adjustment" ? parseSignedVND(tx.amount) : parseVND(tx.amount);
+
+      // Update cumulative fund balances (respecting opening balance cutoff date when present)
+      if (tx.txType === "customer_payment" || (tx.txType === "legacy_payment" && tx.legacyStatus === "reconciled")) {
+        const b = fundMap[tx.fundId];
+        if (b && !b.isLegacyBucket) {
+          if (!b.openingAsOfDate || !txDate || txDate >= b.openingAsOfDate) {
+            b.customerIn += amt;
+            if (tx.reconciled) b.reconciledCount += 1;
+            else { b.unreconciledCount += 1; b.unreconciledNetAmount += amt; }
+          }
+        }
+        totalCustomerGrossIn += amt;
+        totalCustomerNetCollected += amt;
+      } else if (tx.txType === "customer_refund") {
+        const b = fundMap[tx.fundId];
+        if (b && !b.isLegacyBucket) {
+          if (!b.openingAsOfDate || !txDate || txDate >= b.openingAsOfDate) {
+            b.customerRefund += amt;
+            if (tx.reconciled) b.reconciledCount += 1;
+            else { b.unreconciledCount += 1; b.unreconciledNetAmount -= amt; }
+          }
+        }
+        totalCustomerRefunded += amt;
+        totalCustomerNetCollected -= amt;
+      } else if (tx.txType === "fund_transfer") {
+        const src = fundMap[tx.fromFundId];
+        const dst = fundMap[tx.toFundId];
+        if (src && !src.isLegacyBucket && (!src.openingAsOfDate || !txDate || txDate >= src.openingAsOfDate)) {
+          src.transferOut += amt;
+          if (tx.reconciled) src.reconciledCount += 1;
+          else { src.unreconciledCount += 1; src.unreconciledNetAmount -= amt; }
+        }
+        if (dst && !dst.isLegacyBucket && (!dst.openingAsOfDate || !txDate || txDate >= dst.openingAsOfDate)) {
+          dst.transferIn += amt;
+          if (tx.reconciled) dst.reconciledCount += 1;
+          else { dst.unreconciledCount += 1; dst.unreconciledNetAmount += amt; }
+        }
+      } else if (tx.txType === "balance_adjustment") {
+        const b = fundMap[tx.fundId];
+        if (b && !b.isLegacyBucket && (!b.openingAsOfDate || !txDate || txDate >= b.openingAsOfDate)) {
+          b.adjustments += amt;
+          if (tx.reconciled) b.reconciledCount += 1;
+          else { b.unreconciledCount += 1; b.unreconciledNetAmount += amt; }
+        }
+      }
+
+      // Period / UI filters for the visible ledger table
+      if (fromDate && txDate && txDate < fromDate) continue;
+      if (typeFilter !== "all" && tx.txType !== typeFilter) continue;
+      if (reconcileFilter === "reconciled" && !tx.reconciled) continue;
+      if (reconcileFilter === "unreconciled" && tx.reconciled) continue;
+      if (fundFilter !== "all") {
+        const touchesFund = tx.txType === "fund_transfer"
+          ? (tx.fromFundId === fundFilter || tx.toFundId === fundFilter)
+          : tx.fundId === fundFilter;
+        if (!touchesFund) continue;
+      }
+
+      const bk = tx.bookingId ? bookingMap.get(tx.bookingId) : null;
+      const ent = tx.bookingId ? bookingToEntity.get(tx.bookingId) : null;
+      const signedImpactForFund = tx.txType === "fund_transfer"
+        ? (fundFilter === tx.fromFundId ? -amt : fundFilter === tx.toFundId ? amt : 0)
+        : (tx.txType === "customer_refund" ? -amt : amt);
+
+      ledgerLines.push({
+        ...tx,
+        txTypeLabel: (FINANCE_TX_TYPES[tx.txType] && FINANCE_TX_TYPES[tx.txType].label) || tx.txType,
+        fundName: getFinanceFundById(tx.fundId).shortName,
+        fromFundName: tx.fromFundId ? getFinanceFundById(tx.fromFundId).shortName : "",
+        toFundName: tx.toFundId ? getFinanceFundById(tx.toFundId).shortName : "",
+        paymentMethodLabel: getPaymentMethodMeta(tx.paymentMethod).label,
+        guestName: (ent && ent.guestName) || (bk && bk.guestName) || "",
+        roomLabel: (ent && ent.roomLabel) || (bk ? (bk.roomId === "DORM" ? "Dorm" : `P.${bk.roomId}`) : ""),
+        signedImpactForFund
+      });
+    }
+
+    const funds = FINANCE_FUNDS.map((f) => {
+      const b = fundMap[f.id];
+      if (!b.isLegacyBucket) {
+        b.closingBalance = roundVND(b.openingBalance + b.customerIn - b.customerRefund + b.transferIn - b.transferOut + b.adjustments);
+        b.liveDiscrepancy = b.latestCheck ? roundVND(b.latestCheck.actualBalance - b.closingBalance) : null;
+      }
+      return b;
+    });
+
+    const activeFunds = funds.filter((f) => !f.isLegacyBucket);
+    const totalHotelCashHeld = activeFunds.reduce((s, f) => s + f.closingBalance, 0);
+    const totalUnreconciledCount = activeFunds.reduce((s, f) => s + f.unreconciledCount, 0);
+
+    return {
+      fromDate,
+      toDate: toDate || getVietnamTodayISO(),
+      funds,
+      activeFunds,
+      totalHotelCashHeld: roundVND(totalHotelCashHeld),
+      totalCustomerGrossIn: roundVND(totalCustomerGrossIn),
+      totalCustomerRefunded: roundVND(totalCustomerRefunded),
+      totalCustomerNetCollected: roundVND(totalCustomerNetCollected),
+      totalUnreconciledCount,
+      ledgerLines,
+      legacyUnreconciled,
+      syncLogs: fState.syncLogs || []
+    };
+  }
+
+  function computeCalendarFinanceKPIs(bookings, financeState, year, month0, customAsOfDateISO = null) {
+    const fState = financeState && Array.isArray(financeState.transactions) ? financeState : createDefaultFinanceState();
+    const daysCount = getDaysInMonth(year, month0);
+    const monthStart = formatDateISO(year, month0, 1);
+    const monthEnd = formatDateISO(year, month0, daysCount);
+    const monthKey = `${year}-${pad2(month0 + 1)}`;
+
+    const todayVN = getVietnamTodayISO();
+    const todayMonthKey = todayVN.slice(0, 7);
+    const arAsOfDate = normalizeFinanceDateISO(customAsOfDateISO)
+      || (monthKey === todayMonthKey ? todayVN : monthEnd);
+
+    const { bookingToEntity } = buildFinanceEntities(bookings || []);
+    const bookingMap = new Map((bookings || []).map((b) => [b.id, b]));
+
+    const monthlyTxList = [];
+    let monthlyGrossIn = 0;
+    let monthlyRefunds = 0;
+
+    for (const tx of fState.transactions) {
+      if (!tx || !tx.receivedDate) continue;
+      if (tx.receivedDate < monthStart || tx.receivedDate > monthEnd) continue;
+      if (tx.txType === "customer_payment" || (tx.txType === "legacy_payment" && tx.legacyStatus === "reconciled")) {
+        const amt = parseVND(tx.amount);
+        monthlyGrossIn += amt;
+        const bk = tx.bookingId ? bookingMap.get(tx.bookingId) : null;
+        const ent = tx.bookingId ? bookingToEntity.get(tx.bookingId) : null;
+        monthlyTxList.push({
+          ...tx,
+          signedAmount: amt,
+          fundName: getFinanceFundById(tx.fundId).shortName,
+          paymentMethodLabel: getPaymentMethodMeta(tx.paymentMethod).label,
+          guestName: (ent && ent.guestName) || (bk && bk.guestName) || "",
+          roomLabel: (ent && ent.roomLabel) || (bk ? (bk.roomId === "DORM" ? "Dorm" : `P.${bk.roomId}`) : "")
+        });
+      } else if (tx.txType === "customer_refund") {
+        const amt = parseVND(tx.amount);
+        monthlyRefunds += amt;
+        const bk = tx.bookingId ? bookingMap.get(tx.bookingId) : null;
+        const ent = tx.bookingId ? bookingToEntity.get(tx.bookingId) : null;
+        monthlyTxList.push({
+          ...tx,
+          signedAmount: -amt,
+          fundName: getFinanceFundById(tx.fundId).shortName,
+          paymentMethodLabel: getPaymentMethodMeta(tx.paymentMethod).label,
+          guestName: (ent && ent.guestName) || (bk && bk.guestName) || "",
+          roomLabel: (ent && ent.roomLabel) || (bk ? (bk.roomId === "DORM" ? "Dorm" : `P.${bk.roomId}`) : "")
+        });
+      }
+    }
+
+    monthlyTxList.sort((a, b) => (b.receivedAt || b.receivedDate).localeCompare(a.receivedAt || a.receivedDate));
+    const monthlyNetReceived = roundVND(monthlyGrossIn - monthlyRefunds);
+
+    const arReport = computeReceivablesReport(bookings || [], fState, { asOfDate: arAsOfDate });
+
+    return {
+      monthKey,
+      monthStart,
+      monthEnd,
+      monthlyGrossIn: roundVND(monthlyGrossIn),
+      monthlyRefunds: roundVND(monthlyRefunds),
+      monthlyNetReceived,
+      monthlyTxCount: monthlyTxList.length,
+      monthlyTxList,
+      arAsOfDate,
+      arAsOfTotal: arReport.totalRemaining,
+      arAsOfOverpaid: arReport.totalOverpaid,
+      arAsOfCancelledHeldDeposit: arReport.totalCancelledHeldDeposit,
+      arAsOfRows: arReport.rows.filter((r) => r.remaining > 0 || r.overpaid > 0 || r.cancelledHeldDeposit > 0),
+      legacyCount: arReport.legacyCount,
+      legacyTotal: arReport.legacyTotal
+    };
+  }
+
+  // Strictly idempotent legacy migration builder (preserves exact paidAmount & remaining; never guesses date or fund!)
+  function buildLegacyMigrationPlan(bookings, financeState, operator = "Hệ thống") {
+    const fState = sanitizeFinanceState(financeState);
+    const existingIdemKeys = new Set(fState.transactions.map((t) => t.idempotencyKey));
+    const txByBookingOrGroup = new Set();
+    for (const tx of fState.transactions) {
+      if (tx.txType !== "customer_payment" && tx.txType !== "legacy_payment" && tx.txType !== "customer_refund") continue;
+      if (tx.bookingId) txByBookingOrGroup.add(`b:${tx.bookingId}`);
+      if (tx.groupCode) txByBookingOrGroup.add(`g:${tx.groupCode}`);
+    }
+
+    const newTransactions = [];
+    const comparisonRows = [];
+    let seq = fState.voucherSeq || fState.transactions.length;
+    const nowISO = new Date().toISOString();
+
+    for (const bk of (bookings || [])) {
+      if (!bk || !bk.id) continue;
+      const beforePaid = parseVND(bk.paidAmount);
+      const beforeTotal = getBookingChargesBreakdown(bk).totalPayable;
+      const beforeDebt = Math.max(0, beforeTotal - beforePaid);
+      const normCode = normalizeGroupCode(bk.bookingCode);
+      const idemKey = `legacy_mig_${bk.id}`;
+
+      const alreadyHasLedger = existingIdemKeys.has(idemKey)
+        || txByBookingOrGroup.has(`b:${bk.id}`)
+        || (normCode && txByBookingOrGroup.has(`g:${normCode}`));
+
+      let createdTx = null;
+      if (beforePaid > 0 && !alreadyHasLedger) {
+        seq += 1;
+        createdTx = sanitizeFinanceTransaction({
+          id: `ftx_leg_${bk.id}`,
+          voucherCode: `CT-${String(seq).padStart(4, "0")}`,
+          txType: "legacy_payment",
+          entityType: "booking",
+          bookingId: bk.id,
+          groupCode: normCode,
+          groupCodeDisplay: bk.bookingCode || "",
+          amount: beforePaid,
+          receivedDate: null,
+          receivedAt: "",
+          recordedAt: nowISO,
+          paymentMethod: "other",
+          fundId: "unassigned_legacy",
+          operator,
+          note: `Dữ liệu chuyển tiếp từ đơn cũ P.${bk.roomId} (${bk.guestName || "Khách"}) — thiếu ngày thu & quỹ nhận, cần quản lý đối soát.`,
+          idempotencyKey: idemKey,
+          reconciled: false,
+          isLegacyMigrated: true,
+          legacyStatus: "needs_reconciliation"
+        }, seq);
+        newTransactions.push(createdTx);
+      }
+
+      comparisonRows.push({
+        bookingId: bk.id,
+        roomId: bk.roomId,
+        guestName: bk.guestName || "",
+        bookingCode: bk.bookingCode || "",
+        beforeTotal,
+        beforePaid,
+        beforeDebt,
+        migratedTxCreated: Boolean(createdTx),
+        migratedVoucherCode: createdTx ? createdTx.voucherCode : ""
+      });
+    }
+
+    const nextFinanceState = {
+      ...fState,
+      voucherSeq: seq,
+      transactions: [...fState.transactions, ...newTransactions],
+      updatedAt: nowISO
+    };
+
+    // Verify per-entity exact 0-VND preservation AFTER migration
+    const { entities } = buildFinanceEntities(bookings || []);
+    const entityDiffs = entities.map((ent) => {
+      const beforePaid = ent.bookings.reduce((s, b) => s + parseVND(b.paidAmount), 0);
+      const beforeTotal = ent.bookings.reduce((s, b) => s + getBookingChargesBreakdown(b).totalPayable, 0);
+      const beforeDebt = Math.max(0, beforeTotal - beforePaid);
+      const after = computeEntityFinancials(ent, nextFinanceState);
+      return {
+        entityKey: ent.entityKey,
+        label: ent.entityType === "group" ? `Đoàn ${ent.groupCodeDisplay}` : `${ent.roomLabel} - ${ent.guestName}`,
+        beforePaid,
+        afterPaid: after.netPaid,
+        paidDiff: after.netPaid - beforePaid,
+        beforeDebt,
+        afterDebt: after.remaining,
+        debtDiff: after.remaining - beforeDebt
+      };
+    });
+
+    return {
+      newTransactions,
+      createdCount: newTransactions.length,
+      migratedTotalAmount: newTransactions.reduce((s, t) => s + parseVND(t.amount), 0),
+      comparisonRows,
+      entityDiffs,
+      nextFinanceState
+    };
+  }
+
+  function generateReceivablesCsvContent(report) {
+    const headers = [
+      "Loại", "Mã đoàn / Đơn", "Phòng", "Khách hàng", "Công ty tour / Nguồn",
+      "Nhận phòng", "Trả phòng", "Tiền phòng (VNĐ)", "Dịch vụ (VNĐ)", "Điều chỉnh (VNĐ)",
+      "Tổng phải thu (VNĐ)", "Đã thu ròng (VNĐ)", "Còn phải thu (VNĐ)", "Trả thừa / Cọc giữ (VNĐ)",
+      "Trạng thái", "Tính đến ngày"
+    ];
+    const statusLabel = {
+      paid: "Đã thu đủ",
+      partial: "Còn nợ",
+      unpaid: "Chưa thu",
+      overpaid: "Khách trả thừa",
+      cancelled_deposit: "Đơn hủy còn cọc",
+      cancelled_settled: "Đơn hủy đã xử lý"
+    };
+    const rows = (report && report.rows ? report.rows : []).map((r) => [
+      r.entityType === "group" ? `Đoàn (${r.roomCount} phòng)` : "Đơn lẻ",
+      r.entityType === "group" ? r.groupCodeDisplay : r.bookingId,
+      r.roomLabel,
+      r.guestName,
+      r.tourName || r.sourceName,
+      r.minCheckin,
+      r.maxCheckout,
+      r.roomAmount,
+      r.servicesTotal,
+      r.adjustmentsTotal,
+      r.totalPayable,
+      r.netPaid,
+      r.remaining,
+      r.overpaid,
+      statusLabel[r.arStatus] || r.arStatus,
+      report.asOfDate || ""
+    ]);
+    return "\uFEFF" + [headers, ...rows].map((row) => row.map(sanitizeCsvCell).join(",")).join("\r\n");
+  }
+
+  function generateCashbookCsvContent(report) {
+    const headers = [
+      "Mã chứng từ", "Ngày thực nhận", "Giờ ghi sổ", "Loại giao dịch", "Quỹ / Tài khoản",
+      "Từ quỹ -> Đến quỹ", "Phương thức", "Số tiền (VNĐ)", "Khách / Đơn liên kết",
+      "Chứng từ gốc", "Người thao tác", "Người duyệt", "Đối chiếu", "Ghi chú"
+    ];
+    const rows = (report && report.ledgerLines ? report.ledgerLines : []).map((t) => [
+      t.voucherCode,
+      t.receivedDate || "Chưa xác định (chuyển tiếp)",
+      t.recordedAt || "",
+      t.txTypeLabel || t.txType,
+      t.txType === "fund_transfer" ? `${t.fromFundName} -> ${t.toFundName}` : t.fundName,
+      t.txType === "fund_transfer" ? `${t.fromFundId} -> ${t.toFundId}` : t.fundId,
+      t.paymentMethodLabel || t.paymentMethod,
+      t.txType === "customer_refund" ? -parseVND(t.amount) : t.amount,
+      t.groupCodeDisplay ? `Đoàn ${t.groupCodeDisplay} (${t.guestName})` : `${t.roomLabel} ${t.guestName}`.trim(),
+      t.linkedVoucherCode || "",
+      t.operator || "",
+      t.approvedBy || "",
+      t.reconciled ? "Đã đối chiếu" : "Chưa đối chiếu",
+      t.reason ? `${t.reason}${t.note ? ` — ${t.note}` : ""}` : (t.note || "")
+    ]);
+    return "\uFEFF" + [headers, ...rows].map((row) => row.map(sanitizeCsvCell).join(",")).join("\r\n");
+  }
+
   return {
     STORAGE_KEY,
     BACKUP_KEY,
@@ -3774,8 +5022,10 @@
     HOUSEKEEPING_KEY,
     ISSUES_KEY,
     ACCOUNTS_KEY,
+    FINANCE_KEY,
     MAX_AUTOBACKUPS,
     MAX_CONFIRMATION_PDF_BYTES,
+    HOTEL_TIMEZONE,
     ROOMS,
     ROOM_SECTIONS,
     DORM_SLOTS,
@@ -3791,12 +5041,20 @@
     formatMonthVN,
     getCurrentMonthKey,
     getTodayISO,
+    toVietnamParts,
+    getVietnamTodayISO,
+    getVietnamNowISO,
+    normalizeFinanceDateISO,
+    normalizeFinanceTimestamp,
     addDaysISO,
     diffNights,
     formatDateVN,
     getDaysInMonth,
     parseVND,
+    roundVND,
+    parseSignedVND,
     formatVND,
+    formatSignedVND,
     formatShortVND,
     formatNumberInput,
     formatFileSize,
@@ -3815,6 +5073,7 @@
     getCellPaymentBadge,
     getGroupCellPaymentBadge,
     detectChannelKey,
+    isBookingCancelled,
     bookingCoversDate,
     datesOverlap,
     getDormSlotMapForDate,
@@ -3874,6 +5133,25 @@
     getHousekeepingTasksForDate,
     computeRoomOperationalStatus,
     computeAllRoomOperationalStatuses,
+    FINANCE_FUNDS,
+    PAYMENT_METHODS,
+    FINANCE_TX_TYPES,
+    REFUND_CATEGORIES,
+    getFinanceFundById,
+    getPaymentMethodMeta,
+    createDefaultFinanceState,
+    sanitizeFinanceTransaction,
+    sanitizeFinanceState,
+    getBookingChargesBreakdown,
+    buildFinanceEntities,
+    computeEntityFinancials,
+    computeBookingFinancialSummary,
+    computeReceivablesReport,
+    computeCashbookReport,
+    computeCalendarFinanceKPIs,
+    buildLegacyMigrationPlan,
+    generateReceivablesCsvContent,
+    generateCashbookCsvContent,
     generateCsvContent,
     diffBookingChanges,
     generateAuditCsvContent,

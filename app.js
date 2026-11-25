@@ -52,6 +52,8 @@
     getDormSlotMapForDate,
     getDormOccupiedSlotsInRange,
     computeMonthlyFinancials,
+    computeCalendarFinanceKPIs,
+    getVietnamTodayISO,
     normalizeGroupCode,
     computeBookingGroupSummary,
     computeAllBookingGroups,
@@ -254,23 +256,41 @@
     const dormUsed = Object.keys(dormMap).length;
     const dormFree = Math.max(0, 8 - dormUsed);
 
-    // Strictly check-in-month attribution prevents double-counting stays spanning two months
-    const fin = computeMonthlyFinancials(state.bookings, state.year, state.month);
+    const fState = typeof store.getFinanceState === "function" ? store.getFinanceState() : null;
+    const finKpi = computeCalendarFinanceKPIs(state.bookings, fState, state.year, state.month);
+    state.lastArAsOfDate = finKpi.arAsOfDate;
 
     $("kpi-today-occ").textContent = `${occRooms} / 26 (trống ${26 - occRooms})`;
     $("kpi-today-dorm").textContent = `Đặt ${dormUsed} • Còn ${dormFree}/8`;
     $("kpi-today-hk").textContent = `${mergeToday} ghép • ${ebToday} EB`;
     $("kpi-today-buffet").textContent = `${buffetGuests} khách`;
-    $("kpi-month-paid").textContent = formatVND(fin.totalPaid);
-    $("kpi-month-debt").textContent = formatVND(fin.totalDebt);
-    $("kpi-month-debt").className = `kpi-value ${fin.totalDebt > 0 ? "warn" : "ok"}`;
+    $("kpi-month-paid").textContent = formatVND(finKpi.monthlyNetReceived);
+    const refundNote = $("kpi-month-refund-note");
+    if (refundNote) {
+      if (finKpi.monthlyRefunds > 0) {
+        refundNote.textContent = `(đã trừ hoàn ${formatVND(finKpi.monthlyRefunds)})`;
+        refundNote.style.display = "inline-block";
+      } else {
+        refundNote.textContent = "";
+        refundNote.style.display = "none";
+      }
+    }
+    const arLabel = $("kpi-ar-asof-label");
+    if (arLabel) {
+      const todayVN = getVietnamTodayISO();
+      arLabel.textContent = finKpi.arAsOfDate === todayVN
+        ? "Công nợ đến hôm nay"
+        : `Công nợ đến ${formatDateVN(finKpi.arAsOfDate).slice(0, 5)}`;
+    }
+    $("kpi-month-debt").textContent = formatVND(finKpi.arAsOfTotal);
+    $("kpi-month-debt").className = `kpi-value ${finKpi.arAsOfTotal > 0 ? "warn" : "ok"}`;
     const monthTag = $("kpi-month-tag");
     if (monthTag) {
       const nowD = new Date();
       const isCurrentMonth = state.year === nowD.getFullYear() && state.month === nowD.getMonth();
       monthTag.textContent = isCurrentMonth ? "Tháng này" : `Tháng ${state.month + 1}/${state.year}`;
       const grp = $("kpi-group-month");
-      if (grp) grp.title = `Đã thu & còn phải thu của các đơn nhận phòng trong tháng ${state.month + 1}/${state.year} (theo tháng đang xem trên lịch)`;
+      if (grp) grp.title = `Tiền thực thu theo ngày nhận trong tháng ${state.month + 1}/${state.year} & Tổng công nợ khách tính đến ${formatDateVN(finKpi.arAsOfDate)} — nhấn để xem chứng từ chi tiết`;
     }
   }
 
@@ -643,6 +663,9 @@
     renderLegend();
     renderKPIs();
     renderCalendar();
+    if (window.PMSFinanceApp && typeof window.PMSFinanceApp.updateSidebarBadges === "function") {
+      window.PMSFinanceApp.updateSidebarBadges();
+    }
   }
 
   /* -------------------- Delegated Table & Legend Listeners (Zero Listener Churn) -------------------- */
@@ -2090,6 +2113,10 @@
     updatePaymentPreview();
     renderModalGroupSummary();
     renderPcBookingOperationalBars($("field-room").value, existing || null);
+    if (window.PMSFinanceApp) {
+      if (existing) window.PMSFinanceApp.renderBookingFinancePanel(existing.id);
+      else window.PMSFinanceApp.hideBookingFinancePanel();
+    }
     $("booking-modal").classList.add("open");
     setTimeout(() => {
       if ($("booking-modal").classList.contains("open") && document.activeElement !== $("field-booking-code")) {
@@ -2582,10 +2609,11 @@
       state.bookings = res.bookings;
       renderAll();
       if ($("costs-modal").classList.contains("open")) renderOperatingCostsModal();
+      if (window.PMSFinanceApp) window.PMSFinanceApp.refreshOpenModals();
       onDataMutated("restore");
       showToast(restoredCosts
-        ? `Đã khôi phục ${res.bookings.length} lượt đặt phòng & dữ liệu chi phí vận hành`
-        : `Đã khôi phục ${res.bookings.length} lượt đặt phòng (đã lưu bản hoàn tác)`);
+        ? `Đã khôi phục ${res.bookings.length} lượt đặt phòng, sổ tài chính & chi phí vận hành`
+        : `Đã khôi phục ${res.bookings.length} lượt đặt phòng & sổ tài chính (đã lưu bản hoàn tác)`);
     };
     reader.readAsText(file);
   }
@@ -2611,14 +2639,16 @@
   }
 
   function buildFullBackupPayload(extra = {}) {
+    const fState = typeof store.getFinanceState === "function" ? store.getFinanceState() : null;
     return {
       exportedAt: new Date().toISOString(),
-      version: 3,
+      version: 4,
       hotel: "Dongvan Ville du H'mong Hotel",
       ...extra,
       bookings: state.bookings,
       auditLogs: store.getAuditLogs(),
-      operatingCosts: getCurrentOperatingCosts()
+      operatingCosts: getCurrentOperatingCosts(),
+      financeState: fState || undefined
     };
   }
 
@@ -3053,6 +3083,8 @@
     ["backup-restore-modal", "backup_restore"],
     ["accounts-modal", "accounts"],
     ["history-modal", "history"],
+    ["cashbook-modal", "cashbook"],
+    ["receivables-modal", "receivables"],
     ["costs-modal", "operating_costs"],
     ["dorm-modal", "dorm"],
     ["group-report-modal", "groups"],
@@ -3181,6 +3213,15 @@
     open: () => openBackupRestoreModal()
   };
 
+  window.PMSPcApi = {
+    openBooking: (bookingId) => openBookingModal({ bookingId }),
+    syncFromStore: () => {
+      state.bookings = store.getBookings() || state.bookings;
+      renderAll();
+    },
+    syncActiveNav: () => refreshActiveSidebarNav()
+  };
+
   function applyRolePermissionsUI() {
     const auth = typeof store.getAuthState === "function" ? store.getAuthState() : { authRequired: false, authenticated: true };
     const isAuthed = !auth.authRequired || auth.authenticated;
@@ -3198,8 +3239,12 @@
     const canAccounts = userCan("accounts:manage");
     const canBackup = userCan("admin:backup");
     const canHkCreate = userCan("housekeeping:create");
+    const canArRead = userCan("finance:ar_read");
+    const canCashbookRead = userCan("finance:cashbook_read");
 
     if ($("btn-open-costs")) $("btn-open-costs").style.display = canCosts ? "" : "none";
+    if ($("btn-open-receivables")) $("btn-open-receivables").style.display = canArRead ? "" : "none";
+    if ($("btn-open-cashbook")) $("btn-open-cashbook").style.display = canCashbookRead ? "" : "none";
     if ($("btn-open-accounts")) $("btn-open-accounts").style.display = canAccounts ? "" : "none";
     if ($("btn-backup-json")) $("btn-backup-json").style.display = canBackup ? "" : "none";
     if ($("lbl-restore-json")) $("lbl-restore-json").style.display = canBackup ? "" : "none";
@@ -3211,11 +3256,14 @@
     if ($("btn-open-hk")) $("btn-open-hk").style.display = role === "housekeeping" ? "none" : "";
     syncSidebarVisibilityFromConfig(role);
     if (!canBackup && $("backup-restore-modal")) $("backup-restore-modal").classList.remove("open");
+    if (!canArRead && $("receivables-modal")) $("receivables-modal").classList.remove("open");
+    if (!canArRead && $("monthly-receipts-modal")) $("monthly-receipts-modal").classList.remove("open");
+    if (!canCashbookRead && $("cashbook-modal")) $("cashbook-modal").classList.remove("open");
 
     if (role === "housekeeping") {
-      // Strictly lock out calendar, booking modals, PDF, costs, and accounts even if ?view=pc was passed
+      // Strictly lock out calendar, booking modals, PDF, costs, finance, and accounts even if ?view=pc was passed
       delete document.body.dataset.viewMode;
-      ["booking-modal", "dorm-modal", "day-report-modal", "group-report-modal", "history-modal", "backup-restore-modal", "confirm-pdf-modal", "costs-modal", "accounts-modal"].forEach((id) => {
+      ["booking-modal", "dorm-modal", "day-report-modal", "group-report-modal", "history-modal", "backup-restore-modal", "confirm-pdf-modal", "costs-modal", "accounts-modal", "receivables-modal", "cashbook-modal", "monthly-receipts-modal"].forEach((id) => {
         if ($(id)) $(id).classList.remove("open");
       });
       if ($("btn-hk-close")) $("btn-hk-close").style.display = "none";
@@ -3856,7 +3904,9 @@
         $("hk-complete-modal").classList.contains("open") ||
         $("issue-modal").classList.contains("open") ||
         $("accounts-modal").classList.contains("open") ||
-        $("backup-restore-modal").classList.contains("open")
+        $("backup-restore-modal").classList.contains("open") ||
+        $("receivables-modal").classList.contains("open") ||
+        $("cashbook-modal").classList.contains("open")
       );
     }
 
@@ -4073,12 +4123,24 @@
     $("btn-open-dorm-today").addEventListener("click", () => openDormBoard(getTodayISO()));
     $("btn-open-groups").addEventListener("click", openGroupReportModal);
     $("btn-open-hk").addEventListener("click", () => openHousekeepingWorkspace({ tab: "tasks", roomId: "all", dateISO: getTodayISO() }));
+    $("btn-open-receivables").addEventListener("click", () => {
+      if (window.PMSFinanceApp) window.PMSFinanceApp.openReceivables({ asOfDate: state.lastArAsOfDate || getVietnamTodayISO() });
+    });
+    $("btn-open-cashbook").addEventListener("click", () => {
+      if (window.PMSFinanceApp) window.PMSFinanceApp.openCashbook();
+    });
     $("btn-open-costs").addEventListener("click", () => openOperatingCostsModal());
     $("btn-open-accounts").addEventListener("click", openAccountsModal);
     $("btn-open-history").addEventListener("click", openHistoryModal);
     $("btn-open-backup-restore").addEventListener("click", openBackupRestoreModal);
     $("btn-open-day-report-today").addEventListener("click", () => openDailyReportModal(getTodayISO()));
     $("kpi-dorm-quick-btn").addEventListener("click", () => openDormBoard(getTodayISO()));
+    $("kpi-month-paid-btn").addEventListener("click", () => {
+      if (window.PMSFinanceApp) window.PMSFinanceApp.openMonthlyReceipts(state.year, state.month);
+    });
+    $("kpi-month-debt-btn").addEventListener("click", () => {
+      if (window.PMSFinanceApp) window.PMSFinanceApp.openReceivables({ asOfDate: state.lastArAsOfDate || getVietnamTodayISO(), status: "debt" });
+    });
     initSidebarNavigation();
     initDropdownMenus();
     $("btn-cancel-clipboard").addEventListener("click", () => clearClipboard(false));
@@ -5179,6 +5241,9 @@
         else if ($("accounts-modal").classList.contains("open")) closeModal("accounts-modal");
         else if ($("hk-workspace").classList.contains("open") && getUserRole() !== "housekeeping") $("hk-workspace").classList.remove("open");
         else if ($("confirm-pdf-modal").classList.contains("open")) closeModal("confirm-pdf-modal");
+        else if ($("monthly-receipts-modal").classList.contains("open")) closeModal("monthly-receipts-modal");
+        else if ($("cashbook-modal").classList.contains("open")) closeModal("cashbook-modal");
+        else if ($("receivables-modal").classList.contains("open")) closeModal("receivables-modal");
         else if ($("costs-modal").classList.contains("open")) closeModal("costs-modal");
         else if ($("booking-modal").classList.contains("open")) closeModal("booking-modal");
         else if ($("dorm-modal").classList.contains("open")) {

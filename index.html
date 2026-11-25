@@ -60,6 +60,15 @@
 
         <div class="nav-group" data-nav-group="finance">
           <div class="nav-group-label">Tài chính</div>
+          <button id="btn-open-receivables" class="nav-item" type="button" data-nav-key="receivables" title="Thu tiền, công nợ khách lẻ/đoàn &amp; dữ liệu chuyển tiếp cần đối soát">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1-2-1z"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="12" y2="16"/></svg></span>
+            <span class="nav-label">Thu tiền &amp; công nợ</span>
+            <span id="ar-badge-pill" class="nav-badge nav-badge-warn" style="display:none;">0</span>
+          </button>
+          <button id="btn-open-cashbook" class="nav-item" type="button" data-nav-key="cashbook" title="Sổ quỹ tiền mặt, tài khoản ngân hàng, chuyển quỹ &amp; đối soát">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
+            <span class="nav-label">Sổ quỹ &amp; đối soát</span>
+          </button>
           <button id="btn-open-costs" class="nav-item" type="button" data-nav-key="operating_costs" title="Chi phí vận hành &amp; giá vốn theo tháng">
             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3"/><path d="M16 12h5v4h-5a2 2 0 0 1 0-4z"/></svg></span>
             <span class="nav-label">Chi phí &amp; giá vốn</span>
@@ -207,15 +216,16 @@
         <div id="kpi-group-month" class="kpi-group kpi-group-month">
           <span id="kpi-month-tag" class="kpi-group-tag">Tháng này</span>
           <div class="kpi-group-items">
-            <div class="kpi-metric">
-              <span class="kpi-label">Đã thu</span>
+            <button type="button" id="kpi-month-paid-btn" class="kpi-metric kpi-metric-btn" title="Nhấn xem danh sách giao dịch cấu thành Tiền thực thu trong tháng (theo ngày thực nhận)">
+              <span class="kpi-label">Tiền thực thu</span>
               <span id="kpi-month-paid" class="kpi-value ok">0 đ</span>
-            </div>
+              <span id="kpi-month-refund-note" class="kpi-refund-note" style="display:none;"></span>
+            </button>
             <span class="kpi-sep" aria-hidden="true"></span>
-            <div class="kpi-metric">
-              <span class="kpi-label">Còn phải thu</span>
+            <button type="button" id="kpi-month-debt-btn" class="kpi-metric kpi-metric-btn" title="Nhấn mở danh sách Công nợ khách khớp chính xác đến ngày đã chọn">
+              <span id="kpi-ar-asof-label" class="kpi-label">Công nợ đến hôm nay</span>
               <span id="kpi-month-debt" class="kpi-value warn">0 đ</span>
-            </div>
+            </button>
           </div>
         </div>
       </section>
@@ -459,6 +469,9 @@
             <button id="btn-pc-group-mark-paid" type="button" class="btn btn-sm btn-success">✓ Thu đủ đoàn</button>
           </div>
         </div>
+
+        <!-- Phase 1 In-Booking Authoritative Finance Panel (Charges + Multi-Payment Ledger + Refund + Cancel Deposit) -->
+        <div id="pc-booking-finance-panel" class="fin-booking-panel" style="display:none;"></div>
 
         <!-- Room Options: Ghép giường & Extra bed -->
         <div class="options-row">
@@ -1413,6 +1426,136 @@
     </div>
   </div>
 
+  <!-- Phase 1 Finance Modal 1: Thu tiền & Công nợ khách -->
+  <div id="receivables-modal" class="modal-backdrop fin-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="ar-modal-title">
+    <div class="modal-card modal-xl fin-modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="ar-modal-title" class="modal-title">Thu tiền &amp; Công nợ khách</h2>
+          <div id="ar-modal-subtitle" class="modal-subtitle">Theo dõi công nợ khách lẻ, khách đoàn, trả thừa/cọc đang giữ và dữ liệu chuyển tiếp cần đối soát</div>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <button id="btn-ar-migrate-legacy" class="btn btn-sm" type="button" style="display:none;" title="Chạy chuyển đổi an toàn đơn cũ (chỉ Quản lý)">↺ Chuyển tiếp đơn cũ</button>
+          <button id="btn-ar-export-csv" class="btn btn-sm" type="button" style="display:none;" title="Xuất bảng công nợ ra Excel (CSV)">⬇ Xuất Excel (CSV)</button>
+          <button id="btn-close-receivables" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+        </div>
+      </div>
+      <div class="modal-body fin-modal-body">
+        <div id="ar-pending-intents-bar" class="fin-pending-bar" style="display:none;"></div>
+        <div class="fin-tabs-row">
+          <button id="btn-ar-tab-list" class="fin-tab active" type="button" data-ar-tab="list">Danh sách công nợ</button>
+          <button id="btn-ar-tab-legacy" class="fin-tab" type="button" data-ar-tab="legacy">Dữ liệu chuyển tiếp – cần đối soát <span id="ar-legacy-tab-badge" class="nav-badge nav-badge-warn" style="display:none;">0</span></button>
+        </div>
+        <div class="fin-filters-bar">
+          <input id="ar-filter-search" class="input" type="search" placeholder="Tìm khách, SĐT, mã đoàn, công ty tour, phòng..." />
+          <select id="ar-filter-entity" class="select" aria-label="Lọc loại đơn">
+            <option value="all">Tất cả (Đơn lẻ &amp; Đoàn)</option>
+            <option value="group">Chỉ khách đoàn</option>
+            <option value="booking">Chỉ đơn lẻ</option>
+          </select>
+          <select id="ar-filter-status" class="select" aria-label="Lọc trạng thái công nợ">
+            <option value="all">Mọi trạng thái</option>
+            <option value="debt">Còn phải thu (nợ)</option>
+            <option value="overpaid">Khách trả thừa / Cọc giữ</option>
+            <option value="cancelled_deposit">Đơn hủy còn cọc</option>
+            <option value="paid">Đã thu đủ</option>
+            <option value="legacy">Có dữ liệu chuyển tiếp</option>
+          </select>
+          <label class="fin-date-filter-wrap">
+            <span>Tính đến ngày:</span>
+            <input id="ar-filter-asof" class="input" type="date" aria-label="Tính công nợ đến ngày" />
+          </label>
+        </div>
+        <div id="ar-summary-strip" class="fin-kpi-grid"></div>
+        <div id="ar-migration-report" class="fin-migration-box" style="display:none;"></div>
+        <div id="ar-content-area" class="fin-list-area"></div>
+      </div>
+      <div class="modal-footer">
+        <span id="ar-footer-note" style="font-size:12px; color:var(--text-muted);">Mọi số liệu tính từ cùng sổ giao dịch gốc (VNĐ nguyên đồng • Asia/Ho_Chi_Minh).</span>
+        <button id="btn-close-receivables-2" class="btn btn-primary" type="button">Đóng</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase 1 Finance Modal 2: Sổ quỹ & Đối soát (Quản lý / Tổng quản lý) -->
+  <div id="cashbook-modal" class="modal-backdrop fin-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="cb-modal-title">
+    <div class="modal-card modal-xl fin-modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="cb-modal-title" class="modal-title">Sổ quỹ &amp; Đối soát</h2>
+          <div class="modal-subtitle">Quỹ tiền mặt lễ tân, tài khoản ngân hàng, chuyển quỹ nội bộ, số dư đầu kỳ và đối soát sao kê / tiền thực đếm</div>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <button id="btn-cb-export-csv" class="btn btn-sm" type="button" title="Xuất sổ quỹ ra Excel (CSV)">⬇ Xuất Excel (CSV)</button>
+          <button id="btn-close-cashbook" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+        </div>
+      </div>
+      <div class="modal-body fin-modal-body">
+        <div id="cb-pending-intents-bar" class="fin-pending-bar" style="display:none;"></div>
+        <div id="cb-funds-grid" class="fin-funds-grid"></div>
+        <div class="fin-cb-actions-bar">
+          <button id="btn-cb-open-transfer" class="btn btn-sm btn-primary" type="button">⇄ Chuyển quỹ (Tiền mặt ↔ Ngân hàng)</button>
+          <button id="btn-cb-open-opening" class="btn btn-sm" type="button">📌 Khai báo số dư đầu kỳ</button>
+          <button id="btn-cb-open-reconcile" class="btn btn-sm" type="button">✓ Đối chiếu tiền thực tế / sao kê</button>
+          <button id="btn-cb-open-adjust" class="btn btn-sm" type="button">± Điều chỉnh số dư quỹ</button>
+        </div>
+        <div id="cb-action-drawer" class="fin-action-drawer" style="display:none;"></div>
+        <div class="fin-tabs-row">
+          <button id="btn-cb-tab-ledger" class="fin-tab active" type="button" data-cb-tab="ledger">Sổ giao dịch quỹ</button>
+          <button id="btn-cb-tab-legacy" class="fin-tab" type="button" data-cb-tab="legacy">Chuyển tiếp chưa gán quỹ <span id="cb-legacy-tab-badge" class="nav-badge nav-badge-warn" style="display:none;">0</span></button>
+          <button id="btn-cb-tab-logs" class="fin-tab" type="button" data-cb-tab="logs">Nhật ký đồng bộ &amp; đối chiếu</button>
+        </div>
+        <div class="fin-filters-bar">
+          <label class="fin-date-filter-wrap"><span>Từ ngày:</span><input id="cb-filter-from" class="input" type="date" /></label>
+          <label class="fin-date-filter-wrap"><span>Đến ngày:</span><input id="cb-filter-to" class="input" type="date" /></label>
+          <select id="cb-filter-fund" class="select" aria-label="Lọc theo quỹ">
+            <option value="all">Tất cả quỹ</option>
+            <option value="cash_frontdesk">Quỹ tiền mặt lễ tân</option>
+            <option value="bank_main">Tài khoản ngân hàng</option>
+          </select>
+          <select id="cb-filter-type" class="select" aria-label="Lọc loại giao dịch">
+            <option value="all">Mọi loại giao dịch</option>
+            <option value="customer_payment">Thu tiền khách</option>
+            <option value="customer_refund">Hoàn tiền khách</option>
+            <option value="fund_transfer">Chuyển quỹ nội bộ</option>
+            <option value="balance_adjustment">Điều chỉnh số dư quỹ</option>
+          </select>
+          <select id="cb-filter-reconcile" class="select" aria-label="Lọc đối chiếu">
+            <option value="all">Tất cả đối chiếu</option>
+            <option value="unreconciled">Chưa đối chiếu</option>
+            <option value="reconciled">Đã đối chiếu</option>
+          </select>
+        </div>
+        <div id="cb-content-area" class="fin-list-area"></div>
+      </div>
+      <div class="modal-footer">
+        <span id="cb-footer-note" style="font-size:12px; color:var(--text-muted);">Chênh lệch kiểm kê được ghi nhận minh bạch — hệ thống không tự tạo giao dịch bù ép khớp.</span>
+        <button id="btn-close-cashbook-2" class="btn btn-primary" type="button">Đóng</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase 1 Finance Modal 3: Chi tiết Tiền thực thu trong tháng (Drilldown từ KPI Lịch phòng) -->
+  <div id="monthly-receipts-modal" class="modal-backdrop fin-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="mr-modal-title">
+    <div class="modal-card modal-lg fin-modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="mr-modal-title" class="modal-title">Tiền thực thu trong tháng</h2>
+          <div id="mr-modal-subtitle" class="modal-subtitle">Tính theo ngày thực nhận (Asia/Ho_Chi_Minh) — khớp chính xác chỉ số trên Lịch phòng</div>
+        </div>
+        <button id="btn-close-monthly-receipts" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+      <div class="modal-body fin-modal-body">
+        <div id="mr-summary-strip" class="fin-kpi-grid"></div>
+        <div id="mr-list-area" class="fin-list-area"></div>
+      </div>
+      <div class="modal-footer">
+        <span style="font-size:12px; color:var(--text-muted);">Không gồm chuyển quỹ nội bộ, số dư đầu kỳ hoặc dữ liệu chuyển tiếp chưa gán ngày.</span>
+        <button id="btn-close-monthly-receipts-2" class="btn btn-primary" type="button">Đóng</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Dedicated Print-Only Root for A4 Confirmation Sheet (no document.write needed) -->
   <div id="confirm-pdf-print-root" aria-hidden="true"></div>
 
@@ -1424,6 +1567,7 @@
   <script src="pms-supabase.js"></script>
   <script src="pms-client.js"></script>
   <script src="app.js"></script>
+  <script src="finance-ui.js"></script>
   <script src="mobile.js"></script>
 </body>
 </html>

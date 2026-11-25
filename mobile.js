@@ -44,6 +44,8 @@
     getDormOccupiedSlotsInRange,
     checkRegularConflict,
     computeMonthlyFinancials,
+    computeCalendarFinanceKPIs,
+    getVietnamTodayISO,
     normalizeGroupCode,
     computeBookingGroupSummary,
     computeAllBookingGroups,
@@ -951,6 +953,16 @@
       if (window.PMSHousekeepingApp) window.PMSHousekeepingApp.open({ tab: "tasks", roomId: "all", dateISO: getTodayISO() });
       return;
     }
+    if (key === "receivables") {
+      if (!mCan("finance:ar_read")) return showMobileToast("Bạn không có quyền truy cập Thu tiền & công nợ.");
+      if (window.PMSFinanceApp) window.PMSFinanceApp.openReceivables({ asOfDate: getVietnamTodayISO() });
+      return;
+    }
+    if (key === "cashbook") {
+      if (!mCan("finance:cashbook_read")) return showMobileToast("Sổ quỹ & đối soát chỉ dành cho Quản lý.");
+      if (window.PMSFinanceApp) window.PMSFinanceApp.openCashbook();
+      return;
+    }
     if (key === "operating_costs") {
       if (!mCan("costs:read")) return showMobileToast("Chi phí & Giá vốn chỉ dành cho Quản lý.");
       if (window.PMSOperatingCostsModal) {
@@ -1321,11 +1333,17 @@
     const [selYearStr, selMonthStr] = String(dateISO || getTodayISO()).split("-");
     const selYear = Number(selYearStr) || new Date().getFullYear();
     const selMonth = (Number(selMonthStr) || (new Date().getMonth() + 1)) - 1;
-    const fin = computeMonthlyFinancials(allBookings, selYear, selMonth);
+    const fState = typeof client.getFinanceState === "function" ? client.getFinanceState() : null;
+    const finKpi = computeCalendarFinanceKPIs(allBookings, fState, selYear, selMonth);
+    mState.lastFinYear = selYear;
+    mState.lastFinMonth = selMonth;
+    mState.lastArAsOfDate = finKpi.arAsOfDate;
     const nowD = new Date();
     const isSelCurrentMonth = selYear === nowD.getFullYear() && selMonth === nowD.getMonth();
     const dayTag = isToday ? "Hôm nay" : formatDateVN(dateISO).slice(0, 5);
     const monthTag = isSelCurrentMonth ? "Tháng này" : `Tháng ${selMonth + 1}/${selYear}`;
+    const todayVN = getVietnamTodayISO();
+    const arLbl = finKpi.arAsOfDate === todayVN ? "Công nợ đến hôm nay" : `Công nợ đến ${formatDateVN(finKpi.arAsOfDate).slice(0, 5)}`;
     const secOpen = Boolean(mState.secondaryStatsOpen);
 
     $("m-stats-grid").innerHTML = `
@@ -1367,16 +1385,17 @@
         <div id="m-kpi-month-group" class="m-kpi-group-box m-kpi-secondary ${secOpen ? "open" : ""}">
           <div class="m-kpi-group-head">
             <span class="m-kpi-group-badge month">${escapeHtml(monthTag)}</span>
-            <span style="font-size:10.5px; color:var(--text-muted);">Thu chi nhận phòng trong tháng</span>
+            <span style="font-size:10.5px; color:var(--text-muted);">Chạm để xem chi tiết chứng từ</span>
           </div>
           <div class="m-kpi-two-col">
-            <div class="m-kpi-cell">
-              <span class="m-kpi-cell-label">Đã thu</span>
-              <span id="m-kpi-month-paid" class="m-kpi-cell-val ok">${formatVND(fin.totalPaid)}</span>
+            <div class="m-kpi-cell is-clickable" id="m-kpi-paid-card" role="button" tabindex="0">
+              <span class="m-kpi-cell-label">Tiền thực thu</span>
+              <span id="m-kpi-month-paid" class="m-kpi-cell-val ok">${formatVND(finKpi.monthlyNetReceived)}</span>
+              ${finKpi.monthlyRefunds > 0 ? `<span class="m-kpi-cell-sub">Đã trừ hoàn ${formatVND(finKpi.monthlyRefunds)}</span>` : ""}
             </div>
-            <div class="m-kpi-cell">
-              <span class="m-kpi-cell-label">Còn phải thu</span>
-              <span id="m-kpi-month-debt" class="m-kpi-cell-val ${fin.totalDebt > 0 ? "warn" : "ok"}">${formatVND(fin.totalDebt)}</span>
+            <div class="m-kpi-cell is-clickable" id="m-kpi-debt-card" role="button" tabindex="0">
+              <span class="m-kpi-cell-label">${escapeHtml(arLbl)}</span>
+              <span id="m-kpi-month-debt" class="m-kpi-cell-val ${finKpi.arAsOfTotal > 0 ? "warn" : "ok"}">${formatVND(finKpi.arAsOfTotal)}</span>
             </div>
           </div>
         </div>
@@ -2958,6 +2977,14 @@
       if (e.target.closest("#m-stats-more-toggle")) {
         mState.secondaryStatsOpen = !mState.secondaryStatsOpen;
         renderScheduleView();
+        return;
+      }
+      if (e.target.closest("#m-kpi-paid-card")) {
+        if (window.PMSFinanceApp) window.PMSFinanceApp.openMonthlyReceipts(mState.lastFinYear, mState.lastFinMonth);
+        return;
+      }
+      if (e.target.closest("#m-kpi-debt-card")) {
+        if (window.PMSFinanceApp) window.PMSFinanceApp.openReceivables({ asOfDate: mState.lastArAsOfDate || getVietnamTodayISO(), status: "debt" });
         return;
       }
       if (e.target.closest("#m-stat-dorm-card")) return openDormSheet(mState.selectedDate);

@@ -66,6 +66,7 @@
       autoBackups: [],
       hasRollbackBackup: false,
       operatingCosts: Core.createDefaultOperatingCostsState(),
+      financeState: Core.createDefaultFinanceState(),
       housekeepingTasks: [],
       maintenanceIssues: [],
       roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
@@ -150,6 +151,7 @@
         autoBackups: stateCache.autoBackups,
         hasRollbackBackup: stateCache.hasRollbackBackup,
         operatingCosts: stateCache.operatingCosts,
+        financeState: stateCache.financeState,
         housekeepingTasks: stateCache.housekeepingTasks,
         maintenanceIssues: stateCache.maintenanceIssues,
         roomStatuses: stateCache.roomStatuses,
@@ -248,6 +250,25 @@
       } else if (data.operatingCosts === null) {
         stateCache.operatingCosts = null;
       }
+      if (data.financeState && typeof data.financeState === "object") {
+        stateCache.financeState = Core.sanitizeFinanceState(data.financeState);
+        // Auto-clear any pending unconfirmed intent whose idempotencyKey is now confirmed on server!
+        try {
+          const rawPend = localStorage.getItem("ks_pms_pending_fin_intents_v1");
+          if (rawPend) {
+            const pend = JSON.parse(rawPend);
+            if (Array.isArray(pend) && pend.length > 0) {
+              const committedKeys = new Set(stateCache.financeState.transactions.map((t) => t.idempotencyKey));
+              const remaining = pend.filter((it) => it && !committedKeys.has(it.idempotencyKey));
+              if (remaining.length !== pend.length) {
+                localStorage.setItem("ks_pms_pending_fin_intents_v1", JSON.stringify(remaining));
+              }
+            }
+          }
+        } catch {}
+      } else if (data.financeState === null) {
+        stateCache.financeState = null;
+      }
       if (Array.isArray(data.housekeepingTasks)) {
         stateCache.housekeepingTasks = data.housekeepingTasks;
       }
@@ -282,6 +303,9 @@
       stateCache.hasRollbackBackup = localStore.hasRollbackBackup();
       if (typeof localStore.getOperatingCosts === "function") {
         stateCache.operatingCosts = localStore.getOperatingCosts();
+      }
+      if (typeof localStore.getFinanceState === "function") {
+        stateCache.financeState = localStore.getFinanceState();
       }
       if (typeof localStore.getHousekeepingTasks === "function") {
         stateCache.housekeepingTasks = localStore.getHousekeepingTasks();
@@ -1143,6 +1167,418 @@
       }
     }
 
+    /* -------------------- Phase 1 Finance & Accounting Client + Pending Intent Recovery -------------------- */
+
+    const PENDING_FIN_KEY = "ks_pms_pending_fin_intents_v1";
+
+    function readPendingFinanceIntents() {
+      try {
+        const raw = localStorage.getItem(PENDING_FIN_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function writePendingFinanceIntents(list) {
+      try {
+        localStorage.setItem(PENDING_FIN_KEY, JSON.stringify((list || []).slice(0, 40)));
+      } catch {}
+    }
+
+    function upsertPendingFinanceIntent(intent) {
+      const list = readPendingFinanceIntents().filter((it) => it && it.idempotencyKey !== intent.idempotencyKey);
+      list.unshift(intent);
+      writePendingFinanceIntents(list);
+      emit({ type: "finance_pending", pendingIntents: list, state: getSnapshot(), status: getStatus() });
+      return list;
+    }
+
+    function removePendingFinanceIntent(idempotencyKey) {
+      const list = readPendingFinanceIntents().filter((it) => it && it.idempotencyKey !== idempotencyKey);
+      writePendingFinanceIntents(list);
+      emit({ type: "finance_pending", pendingIntents: list, state: getSnapshot(), status: getStatus() });
+      return list;
+    }
+
+    async function lookupFinanceByIdempotency(idempotencyKey) {
+      const key = Core.sanitizeText(idempotencyKey, 120);
+      if (!key) return { ok: true, found: false };
+      if (mode !== "server") {
+        const fState = (stateCache.financeState && Array.isArray(stateCache.financeState.transactions))
+          ? stateCache.financeState
+          : Core.createDefaultFinanceState();
+        const foundTx = fState.transactions.find((t) => t.idempotencyKey === key) || null;
+        return { ok: true, found: Boolean(foundTx), transaction: foundTx };
+      }
+      try {
+        const res = await fetchJson(`/api/finance/idempotency/${encodeURIComponent(key)}`, { timeoutMs: 8000 });
+        if (res.status === 401) {
+          handleAuthExpired(res.data && res.data.error);
+          return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
+        }
+        return (res.data && typeof res.data === "object") ? res.data : { ok: false, error: `Lỗi tra cứu (${res.status}).` };
+      } catch {
+        return { ok: false, offline: true, error: "Chưa kết nối lại được máy chủ để tra cứu chứng từ." };
+      }
+    }
+
+    async function reconcilePendingFinanceIntents() {
+      const pending = readPendingFinanceIntents();
+      if (pending.length === 0) return { ok: true, resolved: [], remaining: [] };
+      const resolved = [];
+      const remaining = [];
+      for (const item of pending) {
+        const check = await lookupFinanceByIdempotency(item.idempotencyKey);
+        if (check && check.ok && check.found && check.transaction) {
+          resolved.push({ intent: item, transaction: check.transaction });
+        } else {
+          remaining.push(item);
+        }
+      }
+      writePendingFinanceIntents(remaining);
+      if (resolved.length > 0) {
+        if (mode === "server") await pullLatestFromServer({ type: "finance_reconciled" });
+        emit({ type: "finance_pending_resolved", resolved, pendingIntents: remaining, state: getSnapshot(), status: getStatus() });
+      }
+      return { ok: true, resolved, remaining };
+    }
+
+    function applyLocalFinanceFallbackMutation(mutatorFn) {
+      if (!localStore || typeof localStore.getFinanceState !== "function") {
+        return { ok: false, error: "Bộ nhớ cục bộ chưa sẵn sàng." };
+      }
+      const fState = localStore.getFinanceState();
+      const bookings = localStore.getBookings();
+      const out = mutatorFn(fState, bookings);
+      if (!out || !out.ok) return out || { ok: false, error: "Thao tác tài chính thất bại." };
+      if (out.nextFinanceState) localStore.saveFinanceState(out.nextFinanceState);
+      syncFromLocalCache("local_commit");
+      return { ...out, bookings: stateCache.bookings, financeState: stateCache.financeState };
+    }
+
+    async function recordFinanceTransaction(payload = {}) {
+      const idempotencyKey = Core.sanitizeText(payload.idempotencyKey, 120)
+        || `ftx_${payload.txType || "pay"}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      const reqPayload = { ...payload, idempotencyKey };
+
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState) => {
+          const dup = fState.transactions.find((t) => t.idempotencyKey === idempotencyKey);
+          if (dup) return { ok: true, idempotentReplay: true, transaction: dup, nextFinanceState: fState };
+          const auxSeq = (fState.voucherSeq || fState.transactions.length) + 1;
+          const meta = Core.FINANCE_TX_TYPES[reqPayload.txType] || Core.FINANCE_TX_TYPES.customer_payment;
+          const ts = Core.normalizeFinanceTimestamp(reqPayload.receivedAt || reqPayload.receivedDate);
+          const tx = Core.sanitizeFinanceTransaction({
+            ...reqPayload,
+            id: `ftx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+            voucherCode: `${meta.prefix}-${ts.receivedDate.slice(0, 7).replace("-", "")}-${String(auxSeq).padStart(4, "0")}`,
+            receivedDate: ts.receivedDate,
+            receivedAt: ts.receivedAt,
+            recordedAt: new Date().toISOString()
+          }, auxSeq);
+          const nextFinanceState = {
+            ...fState,
+            ledgerVersion: (fState.ledgerVersion || 0) + 1,
+            voucherSeq: auxSeq,
+            transactions: [...fState.transactions, tx]
+          };
+          return { ok: true, idempotentReplay: false, transaction: tx, nextFinanceState };
+        });
+      }
+
+      // Persist pending unconfirmed intent BEFORE sending over network (Section III.4)
+      upsertPendingFinanceIntent({
+        idempotencyKey,
+        kind: "transaction",
+        payload: reqPayload,
+        status: "unconfirmed",
+        label: `${Core.formatVND(reqPayload.amount)} (${Core.getFinanceFundById(reqPayload.fundId).shortName})`,
+        createdAt: new Date().toISOString()
+      });
+
+      try {
+        const res = await fetchJson("/api/finance/transactions", {
+          method: "POST",
+          body: reqPayload,
+          headers: { "X-Idempotency-Key": idempotencyKey },
+          timeoutMs: 12000
+        });
+        if (res.status === 401) {
+          handleAuthExpired(res.data && res.data.error);
+          return { ok: false, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
+        }
+        if (!res.data) {
+          // Unknown server outcome: KEEP pending intent so staff can verify by idempotencyKey without double-charging!
+          return {
+            ok: false,
+            offline: true,
+            unconfirmed: true,
+            idempotencyKey,
+            code: "UNCONFIRMED_RESPONSE",
+            error: "Chưa xác nhận được phản hồi từ máy chủ — giao dịch đang ở trạng thái Chờ đồng bộ. Bấm Kiểm tra lại sau khi có mạng để tránh thu trùng."
+          };
+        }
+        if (res.data.ok) {
+          removePendingFinanceIntent(idempotencyKey);
+          if (Array.isArray(res.data.bookings)) stateCache.bookings = res.data.bookings;
+          if (res.data.financeState) stateCache.financeState = Core.sanitizeFinanceState(res.data.financeState);
+          if (res.data.storeVersion) storeVersion = res.data.storeVersion;
+          lastSyncedAt = new Date().toISOString();
+          emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+          return res.data;
+        }
+        // Definitive server rejection (400 / 403 / 409 STALE_BALANCE): clear pending intent & pull fresh state on conflict
+        removePendingFinanceIntent(idempotencyKey);
+        if (res.status === 409) {
+          await pullLatestFromServer({ type: "conflict_refresh" });
+        }
+        return res.data;
+      } catch {
+        // Network dropped BEFORE receiving response (server may already have committed!) -> KEEP pending intent!
+        return {
+          ok: false,
+          offline: true,
+          unconfirmed: true,
+          idempotencyKey,
+          code: "NETWORK_UNCONFIRMED",
+          error: "Chưa xác nhận (mất kết nối khi gửi giao dịch). Không thu lại ngay — hệ thống đã lưu mã yêu cầu để đối chiếu tự động khi có mạng."
+        };
+      }
+    }
+
+    async function transferBetweenFunds(payload = {}) {
+      const idempotencyKey = Core.sanitizeText(payload.idempotencyKey, 120)
+        || `ftx_trf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      const reqPayload = { ...payload, idempotencyKey };
+
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState) => {
+          const dup = fState.transactions.find((t) => t.idempotencyKey === idempotencyKey);
+          if (dup) return { ok: true, idempotentReplay: true, transaction: dup, nextFinanceState: fState };
+          const auxSeq = (fState.voucherSeq || fState.transactions.length) + 1;
+          const ts = Core.normalizeFinanceTimestamp(reqPayload.receivedAt || reqPayload.receivedDate);
+          const tx = Core.sanitizeFinanceTransaction({
+            ...reqPayload,
+            txType: "fund_transfer",
+            entityType: "fund",
+            id: `ftx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+            voucherCode: `CK-${ts.receivedDate.slice(0, 7).replace("-", "")}-${String(auxSeq).padStart(4, "0")}`,
+            receivedDate: ts.receivedDate,
+            receivedAt: ts.receivedAt,
+            fundId: reqPayload.fromFundId,
+            recordedAt: new Date().toISOString()
+          }, auxSeq);
+          return {
+            ok: true,
+            idempotentReplay: false,
+            transaction: tx,
+            nextFinanceState: { ...fState, ledgerVersion: (fState.ledgerVersion || 0) + 1, voucherSeq: auxSeq, transactions: [...fState.transactions, tx] }
+          };
+        });
+      }
+
+      upsertPendingFinanceIntent({
+        idempotencyKey,
+        kind: "transfer",
+        payload: reqPayload,
+        status: "unconfirmed",
+        label: `Chuyển quỹ ${Core.formatVND(reqPayload.amount)}`,
+        createdAt: new Date().toISOString()
+      });
+
+      try {
+        const res = await fetchJson("/api/finance/transfers", {
+          method: "POST",
+          body: reqPayload,
+          headers: { "X-Idempotency-Key": idempotencyKey },
+          timeoutMs: 12000
+        });
+        if (res.status === 401) {
+          handleAuthExpired(res.data && res.data.error);
+          return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
+        }
+        if (!res.data) {
+          return { ok: false, offline: true, unconfirmed: true, idempotencyKey, error: "Chưa xác nhận chuyển quỹ — đang chờ đồng bộ." };
+        }
+        removePendingFinanceIntent(idempotencyKey);
+        if (res.data.ok) {
+          if (res.data.financeState) stateCache.financeState = Core.sanitizeFinanceState(res.data.financeState);
+          if (res.data.storeVersion) storeVersion = res.data.storeVersion;
+          lastSyncedAt = new Date().toISOString();
+          emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        }
+        return res.data;
+      } catch {
+        return { ok: false, offline: true, unconfirmed: true, idempotencyKey, error: "Mất kết nối — lệnh chuyển quỹ đang ở trạng thái Chưa xác nhận." };
+      }
+    }
+
+    async function retryPendingFinanceIntent(idempotencyKey) {
+      const item = readPendingFinanceIntents().find((it) => it && it.idempotencyKey === idempotencyKey);
+      if (!item) return { ok: false, error: "Không tìm thấy lệnh chờ đồng bộ." };
+      // First check if server already committed before retrying!
+      const check = await lookupFinanceByIdempotency(idempotencyKey);
+      if (check && check.ok && check.found && check.transaction) {
+        removePendingFinanceIntent(idempotencyKey);
+        await pullLatestFromServer({ type: "finance_reconciled" });
+        return { ok: true, idempotentReplay: true, alreadyCommitted: true, transaction: check.transaction };
+      }
+      if (item.kind === "transfer") return transferBetweenFunds(item.payload);
+      return recordFinanceTransaction(item.payload);
+    }
+
+    async function postFinanceSimple(url, method, body) {
+      try {
+        const res = await fetchJson(url, { method, body, timeoutMs: 12000 });
+        if (res.status === 401) {
+          handleAuthExpired(res.data && res.data.error);
+          return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
+        }
+        if (!res.data) return { ok: false, error: `Lỗi máy chủ (${res.status}).` };
+        if (res.data.ok) {
+          if (Array.isArray(res.data.bookings)) stateCache.bookings = res.data.bookings;
+          if (res.data.financeState) stateCache.financeState = Core.sanitizeFinanceState(res.data.financeState);
+          if (res.data.storeVersion) storeVersion = res.data.storeVersion;
+          lastSyncedAt = new Date().toISOString();
+          emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+        }
+        return res.data;
+      } catch {
+        return { ok: false, offline: true, error: "Không kết nối được tới máy chủ." };
+      }
+    }
+
+    async function setFundOpeningBalance(payload) {
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState) => {
+          const entry = {
+            id: `ob_${payload.fundId}_${payload.asOfDate || Core.getVietnamTodayISO()}`,
+            fundId: payload.fundId,
+            amount: Core.parseSignedVND(payload.amount),
+            asOfDate: Core.normalizeFinanceDateISO(payload.asOfDate) || Core.getVietnamTodayISO(),
+            voucherRef: Core.sanitizeText(payload.voucherRef, 80),
+            note: Core.sanitizeText(payload.note, 300),
+            recordedBy: "Quản lý",
+            recordedAt: new Date().toISOString()
+          };
+          return {
+            ok: true,
+            openingBalance: entry,
+            nextFinanceState: { ...fState, openingBalances: [...(fState.openingBalances || []).filter((o) => o.id !== entry.id), entry] }
+          };
+        });
+      }
+      return postFinanceSimple("/api/finance/opening-balance", "POST", payload);
+    }
+
+    async function reconcileFinanceTransaction(txId, payload) {
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState) => {
+          const nextList = fState.transactions.map((t) => (t.id === txId
+            ? {
+                ...t,
+                reconciled: payload.reconciled !== undefined ? Boolean(payload.reconciled) : true,
+                fundId: payload.fundId || t.fundId,
+                receivedDate: payload.receivedDate || t.receivedDate,
+                legacyStatus: (t.isLegacyMigrated && payload.fundId && payload.receivedDate) ? "reconciled" : t.legacyStatus,
+                reconciledAt: new Date().toISOString(),
+                reconciledBy: "Quản lý",
+                reconcileNote: Core.sanitizeText(payload.reconcileNote || t.reconcileNote, 300)
+              }
+            : t));
+          return { ok: true, nextFinanceState: { ...fState, transactions: nextList } };
+        });
+      }
+      return postFinanceSimple(`/api/finance/transactions/${encodeURIComponent(txId)}/reconcile`, "PATCH", payload);
+    }
+
+    async function saveFundReconciliationCheck(payload) {
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState, bookings) => {
+          const asOfDate = Core.normalizeFinanceDateISO(payload.asOfDate) || Core.getVietnamTodayISO();
+          const cb = Core.computeCashbookReport(fState, bookings, { toDate: asOfDate });
+          const fRep = cb.funds.find((f) => f.id === payload.fundId);
+          const bookBal = fRep ? fRep.closingBalance : 0;
+          const actBal = Core.parseSignedVND(payload.actualBalance);
+          const check = {
+            id: `rec_${payload.fundId}_${Date.now().toString(36)}`,
+            fundId: payload.fundId,
+            asOfDate,
+            actualBalance: actBal,
+            bookBalanceAtCheck: bookBal,
+            discrepancy: Core.roundVND(actBal - bookBal),
+            note: Core.sanitizeText(payload.note, 300),
+            checkedBy: "Quản lý",
+            checkedAt: new Date().toISOString()
+          };
+          return { ok: true, check, nextFinanceState: { ...fState, reconciliationChecks: [...(fState.reconciliationChecks || []), check] } };
+        });
+      }
+      return postFinanceSimple("/api/finance/reconcile-check", "POST", payload);
+    }
+
+    async function cancelBookingWithDeposit(bookingId, payload) {
+      if (mode !== "server") {
+        const bookings = localStore.getBookings();
+        const target = bookings.find((b) => b.id === bookingId);
+        if (!target) return { ok: false, error: "Không tìm thấy đặt phòng." };
+        const res = localStore.saveBooking({
+          ...target,
+          status: "cancelled",
+          cancelReason: payload.reason || "Khách hủy",
+          depositDisposition: payload.depositDisposition || "pending",
+          retainedDepositAmount: payload.retainedDepositAmount || 0,
+          allowOverpaid: true,
+          ledgerManaged: true
+        });
+        if (res.ok) syncFromLocalCache("local_commit");
+        return res;
+      }
+      return postFinanceSimple(`/api/bookings/${encodeURIComponent(bookingId)}/cancel`, "POST", payload);
+    }
+
+    async function updateBookingCharges(bookingId, payload) {
+      if (mode !== "server") {
+        const bookings = localStore.getBookings();
+        const target = bookings.find((b) => b.id === bookingId);
+        if (!target) return { ok: false, error: "Không tìm thấy đặt phòng." };
+        const res = localStore.saveBooking({
+          ...target,
+          roomAmount: payload.roomAmount !== undefined ? payload.roomAmount : Core.getBookingChargesBreakdown(target).roomAmount,
+          services: payload.services !== undefined ? payload.services : (target.services || []),
+          adjustments: payload.adjustments !== undefined ? payload.adjustments : (target.adjustments || []),
+          allowOverpaid: true,
+          ledgerManaged: true
+        });
+        if (res.ok) syncFromLocalCache("local_commit");
+        return res;
+      }
+      return postFinanceSimple(`/api/bookings/${encodeURIComponent(bookingId)}/charges`, "POST", payload);
+    }
+
+    async function migrateLegacyPayments(opts = {}) {
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState, bookings) => {
+          const plan = Core.buildLegacyMigrationPlan(bookings, fState, "Quản lý");
+          if (opts.dryRun) return { ok: true, dryRun: true, ...plan };
+          return { ok: true, dryRun: false, ...plan, nextFinanceState: plan.nextFinanceState };
+        });
+      }
+      return postFinanceSimple("/api/finance/migrate-legacy", "POST", { dryRun: Boolean(opts.dryRun) });
+    }
+
+    async function appendFinanceSyncLog(entry) {
+      if (mode !== "server") return { ok: true };
+      try {
+        const res = await fetchJson("/api/finance/sync-logs", { method: "POST", body: entry || {}, timeoutMs: 6000 });
+        return (res && res.data) || { ok: false };
+      } catch {
+        return { ok: false, offline: true };
+      }
+    }
+
     function runHealthCheck() {
       if (mode === "server") {
         const consistency = Core.auditBookingConsistency(stateCache.bookings);
@@ -1188,6 +1624,21 @@
       hasRollbackBackup: () => stateCache.hasRollbackBackup,
       getOperatingCosts: () => stateCache.operatingCosts,
       saveOperatingCosts,
+      getFinanceState: () => stateCache.financeState,
+      getPendingFinanceIntents: readPendingFinanceIntents,
+      dismissPendingFinanceIntent: removePendingFinanceIntent,
+      lookupFinanceByIdempotency,
+      reconcilePendingFinanceIntents,
+      retryPendingFinanceIntent,
+      recordFinanceTransaction,
+      transferBetweenFunds,
+      setFundOpeningBalance,
+      reconcileFinanceTransaction,
+      saveFundReconciliationCheck,
+      cancelBookingWithDeposit,
+      updateBookingCharges,
+      migrateLegacyPayments,
+      appendFinanceSyncLog,
       getHousekeepingTasks: () => stateCache.housekeepingTasks,
       getMaintenanceIssues: () => stateCache.maintenanceIssues,
       getRoomStatuses: () => stateCache.roomStatuses,
