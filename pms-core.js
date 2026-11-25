@@ -2763,7 +2763,7 @@
       "issues:read", "issues:create", "issues:manage",
       "photos:upload", "photos:read",
       "costs:read", "costs:write",
-      "finance:collect", "finance:ar_read", "finance:shift_read",
+      "finance:collect", "finance:ar_read", "finance:shift_read", "finance:shift_write", "finance:shift_manage",
       "finance:cashbook_read", "finance:approve_refund", "finance:approve_adjustment",
       "finance:transfer", "finance:reconcile", "finance:opening_balance", "finance:export",
       "finance:payables_read", "finance:payables_write", "finance:payables_pay",
@@ -2777,7 +2777,7 @@
       "issues:read", "issues:create", "issues:manage",
       "photos:upload", "photos:read",
       "costs:read", "costs:write",
-      "finance:collect", "finance:ar_read", "finance:shift_read",
+      "finance:collect", "finance:ar_read", "finance:shift_read", "finance:shift_write", "finance:shift_manage",
       "finance:cashbook_read", "finance:approve_refund", "finance:approve_adjustment",
       "finance:transfer", "finance:reconcile", "finance:opening_balance", "finance:export",
       "finance:payables_read", "finance:payables_write", "finance:payables_pay",
@@ -2789,7 +2789,7 @@
       "housekeeping:read", "housekeeping:create", "housekeeping:execute",
       "issues:read", "issues:create", "issues:manage",
       "photos:upload", "photos:read",
-      "finance:collect", "finance:ar_read", "finance:shift_read",
+      "finance:collect", "finance:ar_read", "finance:shift_read", "finance:shift_write",
       "reports:daily"
     ])),
     housekeeping: Object.freeze(new Set([
@@ -2830,6 +2830,7 @@
     sparkles: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z"/></svg>',
     wallet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3"/><path d="M16 12h5v4h-5a2 2 0 0 1 0-4z"/></svg>',
     receipt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1-2-1z"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="12" y2="16"/></svg>',
+    handover: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>',
     file_text: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
     book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
     tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>',
@@ -2864,6 +2865,7 @@
       label: "Tài chính",
       items: Object.freeze([
         Object.freeze({ key: "receivables", label: "Thu tiền & công nợ", id: "btn-open-receivables", badgeId: "ar-badge-pill", icon: "receipt", permission: "finance:ar_read", implemented: true }),
+        Object.freeze({ key: "cash_shifts", label: "Giao ca lễ tân", id: "btn-open-shifts", badgeId: "shifts-badge-pill", icon: "handover", permission: "finance:shift_read", implemented: true }),
         Object.freeze({ key: "cashbook", label: "Sổ quỹ & đối soát", id: "btn-open-cashbook", icon: "book", permission: "finance:cashbook_read", implemented: true }),
         Object.freeze({ key: "payables", label: "Hóa đơn NCC & công nợ trả", id: "btn-open-payables", badgeId: "ap-badge-pill", icon: "file_text", permission: "finance:payables_read", implemented: true }),
         Object.freeze({ key: "operating_costs", label: "Chi phí & giá vốn", id: "btn-open-costs", icon: "wallet", permission: "costs:read", implemented: true })
@@ -4210,18 +4212,174 @@
     return PAYMENT_METHODS.find((m) => m.key === methodKey) || PAYMENT_METHODS[0];
   }
 
+  const SHIFT_STATUSES = Object.freeze({
+    open: Object.freeze({ key: "open", label: "Đang trong ca" }),
+    pending_handover: Object.freeze({ key: "pending_handover", label: "Chờ nhận bàn giao" }),
+    confirmed: Object.freeze({ key: "confirmed", label: "Đã bàn giao" })
+  });
+
   function createDefaultFinanceState() {
     return {
-      version: 2,
+      version: 3,
       ledgerVersion: 0,
       voucherSeq: 0,
       transactions: [],
       supplierInvoices: [],
+      cashShifts: [],
       openingBalances: [],
       reconciliationChecks: [],
       syncLogs: [],
       migrationHistory: [],
       updatedAt: new Date().toISOString()
+    };
+  }
+
+  function sanitizeCashShift(raw, idx = 0) {
+    const obj = stripDangerousKeys(raw);
+    if (!obj || typeof obj !== "object") return null;
+    const id = sanitizeText(obj.id, 80) || `shift_${Date.now().toString(36)}_${idx}`;
+    const fundId = FINANCE_FUNDS.some((f) => f.id === obj.fundId && !f.isLegacyBucket)
+      ? obj.fundId
+      : "cash_frontdesk";
+    const status = SHIFT_STATUSES[obj.status] ? obj.status : "open";
+    const openedAt = sanitizeText(obj.openedAt, 40) || getVietnamNowISO();
+    const openParts = toVietnamParts(openedAt);
+    const shiftDate = isValidISODate(obj.shiftDate)
+      ? obj.shiftDate
+      : (openParts ? formatDateISO(openParts.year, openParts.month - 1, openParts.day) : getVietnamTodayISO());
+    const shiftCode = sanitizeText(obj.shiftCode, 48)
+      || `CA-${shiftDate.replace(/-/g, "")}-${String(idx + 1).padStart(2, "0")}`;
+
+    const openingBasisType = ["previous_shift", "opening_balance", "opening_count", "unestablished"].includes(obj.openingBasisType)
+      ? obj.openingBasisType
+      : "unestablished";
+    const openingCash = parseSignedVND(obj.openingCash);
+    const expectedCash = obj.expectedCash !== undefined && obj.expectedCash !== null && obj.expectedCash !== ""
+      ? parseSignedVND(obj.expectedCash)
+      : openingCash;
+    const countedCash = obj.countedCash !== undefined && obj.countedCash !== null && obj.countedCash !== ""
+      ? parseSignedVND(obj.countedCash)
+      : null;
+    const discrepancy = countedCash !== null
+      ? roundVND(countedCash - expectedCash)
+      : (obj.discrepancy !== undefined && obj.discrepancy !== null && obj.discrepancy !== "" ? parseSignedVND(obj.discrepancy) : 0);
+    const receivedCash = obj.receivedCash !== undefined && obj.receivedCash !== null && obj.receivedCash !== ""
+      ? parseSignedVND(obj.receivedCash)
+      : null;
+    const handoverCountDiff = (receivedCash !== null && countedCash !== null)
+      ? roundVND(receivedCash - countedCash)
+      : 0;
+    const hasAnyDiff = (countedCash !== null && discrepancy !== 0) || (receivedCash !== null && handoverCountDiff !== 0);
+    const rawDiscStatus = String(obj.discrepancyStatus || "").trim();
+    const discrepancyStatus = rawDiscStatus === "resolved"
+      ? "resolved"
+      : (rawDiscStatus === "pending_review" || hasAnyDiff ? "pending_review" : "none");
+
+    const includedTxIds = Array.isArray(obj.includedTxIds)
+      ? [...new Set(obj.includedTxIds.map((x) => sanitizeText(x, 80)).filter(Boolean))]
+      : [];
+    const bankRefTxIds = Array.isArray(obj.bankRefTxIds)
+      ? [...new Set(obj.bankRefTxIds.map((x) => sanitizeText(x, 80)).filter(Boolean))]
+      : [];
+    const includedTxSnapshot = Array.isArray(obj.includedTxSnapshot)
+      ? obj.includedTxSnapshot.slice(0, 500).map((s) => {
+          const it = stripDangerousKeys(s) || {};
+          return {
+            id: sanitizeText(it.id, 80),
+            voucherCode: sanitizeText(it.voucherCode, 48),
+            txType: sanitizeText(it.txType, 32),
+            txTypeLabel: sanitizeText(it.txTypeLabel, 60),
+            fundId: sanitizeText(it.fundId, 48),
+            receivedDate: sanitizeText(it.receivedDate, 20),
+            recordedAt: sanitizeText(it.recordedAt, 40),
+            signedCashImpact: parseSignedVND(it.signedCashImpact),
+            amount: parseVND(it.amount),
+            bookingId: sanitizeText(it.bookingId, 80),
+            groupCodeDisplay: sanitizeText(it.groupCodeDisplay, 60),
+            invoiceId: sanitizeText(it.invoiceId, 80),
+            invoiceVoucherNo: sanitizeText(it.invoiceVoucherNo, 80),
+            supplierName: sanitizeText(it.supplierName, 120),
+            guestName: sanitizeText(it.guestName, 120),
+            roomLabel: sanitizeText(it.roomLabel, 80),
+            operator: sanitizeText(it.operator, 60),
+            note: sanitizeText(it.note, 300)
+          };
+        })
+      : [];
+    const adjustmentHistory = Array.isArray(obj.adjustmentHistory)
+      ? obj.adjustmentHistory.slice(0, 50).map((ah) => {
+          const a = stripDangerousKeys(ah) || {};
+          return {
+            id: sanitizeText(a.id, 64) || `sadj_${Date.now().toString(36)}`,
+            ts: sanitizeText(a.ts, 40) || new Date().toISOString(),
+            operator: sanitizeText(a.operator, 60) || "Quản lý",
+            action: sanitizeText(a.action, 40) || "resolve",
+            adjustmentAmount: parseSignedVND(a.adjustmentAmount),
+            voucherId: sanitizeText(a.voucherId, 80),
+            voucherCode: sanitizeText(a.voucherCode, 48),
+            reason: sanitizeText(a.reason, 300),
+            note: sanitizeText(a.note, 500)
+          };
+        })
+      : [];
+
+    const nowISO = new Date().toISOString();
+    return {
+      id,
+      shiftCode,
+      fundId,
+      shiftDate,
+      shiftLabel: sanitizeText(obj.shiftLabel, 80),
+      status,
+      previousShiftId: sanitizeText(obj.previousShiftId, 80),
+      previousShiftCode: sanitizeText(obj.previousShiftCode, 48),
+      txWindowStart: sanitizeText(obj.txWindowStart, 40) || openedAt,
+      openingBasisType,
+      openingBasisRef: sanitizeText(obj.openingBasisRef, 200),
+      openingCash,
+      handedOverBy: sanitizeText(obj.handedOverBy, 60),
+      outgoingStaffName: sanitizeText(obj.outgoingStaffName, 60) || "Lễ tân",
+      outgoingUsername: sanitizeText(obj.outgoingUsername, 60),
+      openedAt,
+      openedBy: sanitizeText(obj.openedBy, 60) || sanitizeText(obj.outgoingStaffName, 60) || "Lễ tân",
+      openNote: sanitizeText(obj.openNote, 400),
+      openIdempotencyKey: sanitizeText(obj.openIdempotencyKey, 120) || id,
+      // Close / handover submission fields (frozen at close)
+      closedAt: sanitizeText(obj.closedAt, 40),
+      closedBy: sanitizeText(obj.closedBy, 60),
+      closeIdempotencyKey: sanitizeText(obj.closeIdempotencyKey, 120),
+      cashInTotal: parseVND(obj.cashInTotal),
+      cashOutTotal: parseVND(obj.cashOutTotal),
+      bankRefTotal: parseVND(obj.bankRefTotal),
+      expectedCash,
+      countedCash,
+      discrepancy,
+      discrepancyExplanation: sanitizeText(obj.discrepancyExplanation, 500),
+      closeNote: sanitizeText(obj.closeNote, 500),
+      lastTxId: sanitizeText(obj.lastTxId, 80),
+      lastTxRecordedAt: sanitizeText(obj.lastTxRecordedAt, 40),
+      includedTxIds,
+      bankRefTxIds,
+      includedTxSnapshot,
+      // Incoming receiver confirmation fields
+      targetIncomingStaffName: sanitizeText(obj.targetIncomingStaffName, 60),
+      incomingStaffName: sanitizeText(obj.incomingStaffName, 60),
+      incomingUsername: sanitizeText(obj.incomingUsername, 60),
+      receivedCash,
+      handoverCountDiff,
+      confirmedAt: sanitizeText(obj.confirmedAt, 40),
+      confirmNote: sanitizeText(obj.confirmNote, 500),
+      confirmIdempotencyKey: sanitizeText(obj.confirmIdempotencyKey, 120),
+      nextShiftId: sanitizeText(obj.nextShiftId, 80),
+      // Manager discrepancy resolution & post-close adjustment history
+      discrepancyStatus,
+      resolvedBy: sanitizeText(obj.resolvedBy, 60),
+      resolvedAt: sanitizeText(obj.resolvedAt, 40),
+      resolutionNote: sanitizeText(obj.resolutionNote, 500),
+      adjustmentHistory,
+      createdAt: sanitizeText(obj.createdAt, 40) || nowISO,
+      updatedAt: sanitizeText(obj.updatedAt, 40) || nowISO,
+      revision: Math.max(1, Math.trunc(Number(obj.revision) || 1))
     };
   }
 
@@ -4384,7 +4542,8 @@
       isLegacyMigrated,
       legacyStatus,
       legacyResolution,
-      voucherRef: sanitizeText(obj.voucherRef, 80)
+      voucherRef: sanitizeText(obj.voucherRef, 80),
+      shiftId: sanitizeText(obj.shiftId, 80)
     };
   }
 
@@ -4397,6 +4556,9 @@
       : [];
     const supplierInvoices = Array.isArray(obj.supplierInvoices)
       ? obj.supplierInvoices.map((inv, i) => sanitizeSupplierInvoice(inv, i)).filter(Boolean)
+      : [];
+    const cashShifts = Array.isArray(obj.cashShifts)
+      ? obj.cashShifts.map((sh, i) => sanitizeCashShift(sh, i)).filter(Boolean)
       : [];
     const openingBalances = Array.isArray(obj.openingBalances)
       ? obj.openingBalances.map((ob, i) => {
@@ -4448,11 +4610,12 @@
     const migrationHistory = Array.isArray(obj.migrationHistory) ? obj.migrationHistory.slice(0, 20) : [];
 
     return {
-      version: 2,
+      version: 3,
       ledgerVersion: Math.max(0, Math.trunc(Number(obj.ledgerVersion) || 0)),
       voucherSeq: Math.max(transactions.length, Math.trunc(Number(obj.voucherSeq) || 0)),
       transactions,
       supplierInvoices,
+      cashShifts,
       openingBalances,
       reconciliationChecks,
       syncLogs,
@@ -5572,6 +5735,536 @@
     return "\uFEFF" + [headers, ...rows].map((row) => row.map(sanitizeCsvCell).join(",")).join("\r\n");
   }
 
+  /* -------------------- Front Desk Cash Shift Handover Engine (v1.8.0) -------------------- */
+
+  function formatVietnamDateTime(isoStr) {
+    if (!isoStr) return "—";
+    const p = toVietnamParts(isoStr);
+    if (!p) return String(isoStr);
+    return `${pad2(p.day)}/${pad2(p.month)}/${p.year} ${pad2(p.hours)}:${pad2(p.minutes)}`;
+  }
+
+  function getVietnamDateFromISO(isoStr) {
+    if (!isoStr) return "";
+    const p = toVietnamParts(isoStr);
+    if (!p) return "";
+    return formatDateISO(p.year, p.month - 1, p.day);
+  }
+
+  function getShiftCashImpact(tx, fundId = "cash_frontdesk") {
+    if (!tx || typeof tx !== "object") return null;
+    if (!fundId || tx.fundId === "unassigned_legacy") return null;
+    if (tx.txType === "legacy_payment") {
+      // Unassigned legacy receipts or receipts already inside opening balance NEVER enter shift drawer cash
+      if (tx.legacyStatus !== "reconciled") return null;
+      return tx.fundId === fundId ? parseVND(tx.amount) : null;
+    }
+    if (tx.txType === "customer_payment") {
+      return tx.fundId === fundId ? parseVND(tx.amount) : null;
+    }
+    if (tx.txType === "customer_refund") {
+      return tx.fundId === fundId ? -parseVND(tx.amount) : null;
+    }
+    if (tx.txType === "supplier_payment") {
+      return tx.fundId === fundId ? -parseVND(tx.amount) : null;
+    }
+    if (tx.txType === "fund_transfer") {
+      if (tx.fromFundId === fundId && tx.toFundId !== fundId) return -parseVND(tx.amount);
+      if (tx.toFundId === fundId && tx.fromFundId !== fundId) return parseVND(tx.amount);
+      return null;
+    }
+    if (tx.txType === "balance_adjustment") {
+      return tx.fundId === fundId ? parseSignedVND(tx.amount) : null;
+    }
+    return null;
+  }
+
+  function getShiftOpeningBasis(financeState, fundId = "cash_frontdesk") {
+    const fState = financeState && typeof financeState === "object" ? financeState : createDefaultFinanceState();
+    const targetFund = FINANCE_FUNDS.some((f) => f.id === fundId && !f.isLegacyBucket) ? fundId : "cash_frontdesk";
+    const shifts = (Array.isArray(fState.cashShifts) ? fState.cashShifts : [])
+      .filter((s) => s && s.fundId === targetFund && s.status === "confirmed" && s.receivedCash !== null && s.receivedCash !== undefined)
+      .slice()
+      .sort((a, b) => String(b.confirmedAt || b.closedAt || b.openedAt).localeCompare(String(a.confirmedAt || a.closedAt || a.openedAt)));
+
+    if (shifts.length > 0) {
+      const prev = shifts[0];
+      return {
+        established: true,
+        openingBasisType: "previous_shift",
+        openingCash: parseSignedVND(prev.receivedCash),
+        previousShiftId: prev.id,
+        previousShiftCode: prev.shiftCode || "",
+        handedOverBy: prev.outgoingStaffName || "",
+        txWindowStart: prev.closedAt || prev.openedAt || "",
+        openingBasisRef: `Từ ca trước ${prev.shiftCode} (${prev.outgoingStaffName || "Lễ tân"} bàn giao ${formatVND(prev.receivedCash)})`
+      };
+    }
+
+    const checks = (Array.isArray(fState.reconciliationChecks) ? fState.reconciliationChecks : [])
+      .filter((c) => c && c.fundId === targetFund && c.actualBalance !== null && c.actualBalance !== undefined && c.asOfDate)
+      .slice()
+      .sort((a, b) => String(b.asOfDate || "").localeCompare(String(a.asOfDate || "")) || String(b.recordedAt || "").localeCompare(String(a.recordedAt || "")));
+
+    const obs = (Array.isArray(fState.openingBalances) ? fState.openingBalances : [])
+      .filter((o) => o && o.fundId === targetFund && o.asOfDate)
+      .slice()
+      .sort((a, b) => String(b.asOfDate || "").localeCompare(String(a.asOfDate || "")) || String(b.recordedAt || "").localeCompare(String(a.recordedAt || "")));
+
+    const latestCheck = checks[0] || null;
+    const latestOb = obs[0] || null;
+
+    if (latestCheck && (!latestOb || String(latestCheck.asOfDate) > String(latestOb.asOfDate) || (String(latestCheck.asOfDate) === String(latestOb.asOfDate) && String(latestCheck.recordedAt || "") >= String(latestOb.recordedAt || "")))) {
+      return {
+        established: true,
+        openingBasisType: "opening_count",
+        openingCash: parseSignedVND(latestCheck.actualBalance),
+        previousShiftId: "",
+        previousShiftCode: "",
+        handedOverBy: latestCheck.operator || "Quản lý",
+        txWindowStart: "",
+        openingBasisRef: `Biên bản kiểm đếm mở đầu ngày ${formatDateVN(latestCheck.asOfDate)} (${latestCheck.operator || "Quản lý"})`
+      };
+    }
+
+    if (latestOb) {
+      return {
+        established: true,
+        openingBasisType: "opening_balance",
+        openingCash: parseSignedVND(latestOb.amount),
+        previousShiftId: "",
+        previousShiftCode: "",
+        handedOverBy: latestOb.operator || "Quản lý",
+        txWindowStart: "",
+        openingBasisRef: `Số dư đầu kỳ đã xác minh ngày ${formatDateVN(latestOb.asOfDate)} (${latestOb.operator || "Quản lý"})`
+      };
+    }
+
+    return {
+      established: false,
+      openingBasisType: "unestablished",
+      openingCash: 0,
+      previousShiftId: "",
+      previousShiftCode: "",
+      handedOverBy: "",
+      txWindowStart: "",
+      openingBasisRef: "Chưa xác lập số đầu ca — cần số dư đầu kỳ đã xác minh hoặc biên bản kiểm đếm mở đầu"
+    };
+  }
+
+  function enrichShiftTransactionItem(tx, fundId, bookingMap, invoiceMap) {
+    const impact = getShiftCashImpact(tx, fundId);
+    const bk = tx.bookingId ? bookingMap.get(tx.bookingId) : null;
+    const inv = tx.invoiceId ? invoiceMap.get(tx.invoiceId) : null;
+    const meta = FINANCE_TX_TYPES[tx.txType] || { label: tx.txType };
+    return {
+      id: tx.id,
+      voucherCode: tx.voucherCode || tx.id,
+      txType: tx.txType,
+      txTypeLabel: meta.label,
+      fundId: tx.fundId,
+      fundName: getFinanceFundById(tx.fundId).shortName,
+      fromFundId: tx.fromFundId || "",
+      toFundId: tx.toFundId || "",
+      fromFundName: tx.fromFundId ? getFinanceFundById(tx.fromFundId).shortName : "",
+      toFundName: tx.toFundId ? getFinanceFundById(tx.toFundId).shortName : "",
+      paymentMethod: tx.paymentMethod || "",
+      paymentMethodLabel: getPaymentMethodMeta(tx.paymentMethod).label,
+      receivedDate: tx.receivedDate || "",
+      recordedAt: tx.recordedAt || "",
+      amount: parseVND(tx.amount),
+      signedCashImpact: impact !== null ? impact : (tx.txType === "customer_refund" ? -parseVND(tx.amount) : parseVND(tx.amount)),
+      bookingId: tx.bookingId || "",
+      groupCode: tx.groupCode || "",
+      groupCodeDisplay: tx.groupCodeDisplay || (bk && bk.bookingCode) || "",
+      roomLabel: bk ? (bk.roomId === "DORM" ? "Dorm" : `P.${bk.roomId}`) : "",
+      guestName: bk ? (bk.guestName || "") : "",
+      invoiceId: tx.invoiceId || "",
+      invoiceVoucherNo: tx.invoiceVoucherNo || (inv && inv.voucherNo) || "",
+      supplierName: tx.supplierName || (inv && inv.supplierName) || "",
+      linkedVoucherCode: tx.linkedVoucherCode || "",
+      operator: tx.operator || "",
+      approvedBy: tx.approvedBy || "",
+      reason: tx.reason || "",
+      note: tx.note || "",
+      shiftId: tx.shiftId || ""
+    };
+  }
+
+  function computeShiftLiveSummary(shift, financeState, bookings = []) {
+    const cleanShift = sanitizeCashShift(shift);
+    if (!cleanShift) return null;
+    const fState = financeState && typeof financeState === "object" ? financeState : createDefaultFinanceState();
+    const allTxs = Array.isArray(fState.transactions) ? fState.transactions : [];
+    const allShifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
+    const invoices = Array.isArray(fState.supplierInvoices) ? fState.supplierInvoices : [];
+
+    const bookingMap = new Map((Array.isArray(bookings) ? bookings : []).filter((b) => b && b.id).map((b) => [b.id, b]));
+    const invoiceMap = new Map(invoices.filter((i) => i && i.id).map((i) => [i.id, i]));
+    const txById = new Map(allTxs.filter((t) => t && t.id).map((t) => [t.id, t]));
+
+    const txWindowStart = cleanShift.txWindowStart || cleanShift.openedAt;
+    let cashTransactions = [];
+    let bankRefTransactions = [];
+
+    if (cleanShift.status === "open") {
+      // Collect transactions already locked into ANY closed/confirmed shift on the same fund -> zero double count
+      const claimedTxIds = new Set();
+      for (const s of allShifts) {
+        if (!s || s.id === cleanShift.id || s.fundId !== cleanShift.fundId || s.status === "open") continue;
+        for (const tid of (s.includedTxIds || [])) {
+          if (tid) claimedTxIds.add(tid);
+        }
+      }
+
+      for (const tx of allTxs) {
+        if (!tx || !tx.id) continue;
+        if (claimedTxIds.has(tx.id)) continue;
+
+        const impact = getShiftCashImpact(tx, cleanShift.fundId);
+        if (impact !== null) {
+          // Post-close manager adjustments targeting a different historical shift MUST NOT distort the active drawer
+          if (tx.txType === "balance_adjustment" && tx.shiftId && tx.shiftId !== cleanShift.id) continue;
+          const belongsByTag = tx.shiftId === cleanShift.id;
+          const belongsByWindow = !tx.shiftId && String(tx.recordedAt || "") >= String(txWindowStart || "");
+          if (belongsByTag || belongsByWindow) {
+            cashTransactions.push(enrichShiftTransactionItem(tx, cleanShift.fundId, bookingMap, invoiceMap));
+          }
+          continue;
+        }
+
+        // Bank transfers from/to guests during this shift: READ-ONLY reference only, NEVER added to counter cash!
+        if (tx.fundId === "bank_main" && (tx.txType === "customer_payment" || tx.txType === "customer_refund")) {
+          if (String(tx.recordedAt || "") >= String(txWindowStart || "")) {
+            bankRefTransactions.push(enrichShiftTransactionItem(tx, "bank_main", bookingMap, invoiceMap));
+          }
+        }
+      }
+
+      cashTransactions.sort((a, b) => String(a.recordedAt || "").localeCompare(String(b.recordedAt || "")) || String(a.id).localeCompare(String(b.id)));
+      bankRefTransactions.sort((a, b) => String(a.recordedAt || "").localeCompare(String(b.recordedAt || "")) || String(a.id).localeCompare(String(b.id)));
+    } else {
+      // Closed or confirmed shift: strictly use frozen includedTxIds & snapshot so signed minutes are immutable!
+      const snapshotById = new Map((cleanShift.includedTxSnapshot || []).map((s) => [s.id, s]));
+      for (const tid of (cleanShift.includedTxIds || [])) {
+        const liveTx = txById.get(tid);
+        if (liveTx) {
+          cashTransactions.push(enrichShiftTransactionItem(liveTx, cleanShift.fundId, bookingMap, invoiceMap));
+        } else if (snapshotById.has(tid)) {
+          cashTransactions.push({ ...snapshotById.get(tid) });
+        }
+      }
+      if (cashTransactions.length === 0 && (cleanShift.includedTxSnapshot || []).length > 0) {
+        cashTransactions = cleanShift.includedTxSnapshot.map((s) => ({ ...s }));
+      }
+      for (const tid of (cleanShift.bankRefTxIds || [])) {
+        const liveTx = txById.get(tid);
+        if (liveTx) bankRefTransactions.push(enrichShiftTransactionItem(liveTx, "bank_main", bookingMap, invoiceMap));
+      }
+    }
+
+    const computedCashIn = roundVND(cashTransactions.reduce((s, t) => s + (t.signedCashImpact > 0 ? t.signedCashImpact : 0), 0));
+    const computedCashOut = roundVND(cashTransactions.reduce((s, t) => s + (t.signedCashImpact < 0 ? Math.abs(t.signedCashImpact) : 0), 0));
+    const computedNetCashFlow = roundVND(computedCashIn - computedCashOut);
+    const computedExpectedCash = roundVND(cleanShift.openingCash + computedNetCashFlow);
+    const computedBankRefTotal = roundVND(bankRefTransactions.reduce((s, t) => s + (t.txType === "customer_refund" ? -t.amount : t.amount), 0));
+
+    const cashInTotal = cleanShift.status === "open" ? computedCashIn : cleanShift.cashInTotal;
+    const cashOutTotal = cleanShift.status === "open" ? computedCashOut : cleanShift.cashOutTotal;
+    const expectedCash = cleanShift.status === "open" ? computedExpectedCash : cleanShift.expectedCash;
+    const bankRefTotal = cleanShift.status === "open" ? computedBankRefTotal : cleanShift.bankRefTotal;
+
+    const lastTx = cashTransactions.length > 0 ? cashTransactions[cashTransactions.length - 1] : null;
+    const lastTxId = cleanShift.status === "open" ? (lastTx ? lastTx.id : "") : cleanShift.lastTxId;
+    const lastTxRecordedAt = cleanShift.status === "open" ? (lastTx ? lastTx.recordedAt : "") : cleanShift.lastTxRecordedAt;
+
+    const discrepancy = cleanShift.countedCash !== null
+      ? roundVND(cleanShift.countedCash - expectedCash)
+      : 0;
+    const discrepancyType = cleanShift.countedCash === null
+      ? "uncounted"
+      : (discrepancy > 0 ? "over" : discrepancy < 0 ? "short" : "matched");
+    const discrepancyLabel = discrepancyType === "over"
+      ? "Thừa"
+      : discrepancyType === "short"
+        ? "Thiếu"
+        : discrepancyType === "matched"
+          ? "Khớp"
+          : "Chưa đếm";
+
+    const openDateVN = getVietnamDateFromISO(cleanShift.openedAt);
+    const closeDateVN = cleanShift.closedAt ? getVietnamDateFromISO(cleanShift.closedAt) : getVietnamTodayISO();
+    const isOvernight = Boolean(openDateVN && closeDateVN && closeDateVN > openDateVN);
+    const statusMeta = SHIFT_STATUSES[cleanShift.status] || SHIFT_STATUSES.open;
+
+    return {
+      ...cleanShift,
+      fundName: getFinanceFundById(cleanShift.fundId).name,
+      fundShortName: getFinanceFundById(cleanShift.fundId).shortName,
+      statusLabel: statusMeta.label,
+      cashInTotal,
+      cashOutTotal,
+      netCashFlow: roundVND(cashInTotal - cashOutTotal),
+      expectedCash,
+      bankRefTotal,
+      discrepancy,
+      discrepancyType,
+      discrepancyLabel,
+      hasDiscrepancy: (cleanShift.countedCash !== null && discrepancy !== 0) || (cleanShift.receivedCash !== null && cleanShift.handoverCountDiff !== 0),
+      lastTxId,
+      lastTxRecordedAt,
+      txCount: cashTransactions.length,
+      cashTransactions,
+      bankRefTransactions,
+      openDateVN,
+      closeDateVN,
+      isOvernight,
+      openedAtVN: formatVietnamDateTime(cleanShift.openedAt),
+      closedAtVN: cleanShift.closedAt ? formatVietnamDateTime(cleanShift.closedAt) : "—",
+      confirmedAtVN: cleanShift.confirmedAt ? formatVietnamDateTime(cleanShift.confirmedAt) : "—"
+    };
+  }
+
+  function computeShiftsReport(financeState, bookings = [], filters = {}) {
+    const fState = financeState && typeof financeState === "object" ? financeState : createDefaultFinanceState();
+    const rawShifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
+    const targetFund = filters.fundId && filters.fundId !== "all" ? filters.fundId : "cash_frontdesk";
+    const fundFilter = String(filters.fundId || "all").trim();
+    const statusFilter = String(filters.status || "all").trim();
+    const staffFilter = String(filters.staff || "all").trim();
+    const dateFrom = normalizeFinanceDateISO(filters.dateFrom) || "";
+    const dateTo = normalizeFinanceDateISO(filters.dateTo) || "";
+    const search = String(filters.search || "").trim().toLowerCase();
+
+    const summaries = rawShifts
+      .map((s) => computeShiftLiveSummary(s, fState, bookings))
+      .filter(Boolean);
+
+    const staffSet = new Set();
+    for (const s of summaries) {
+      if (s.outgoingStaffName) staffSet.add(s.outgoingStaffName);
+      if (s.incomingStaffName) staffSet.add(s.incomingStaffName);
+    }
+
+    const activeOpenShift = summaries.find((s) => s.fundId === targetFund && s.status === "open") || null;
+    const pendingHandoverShifts = summaries
+      .filter((s) => s.status === "pending_handover")
+      .sort((a, b) => String(b.closedAt || b.openedAt).localeCompare(String(a.closedAt || a.openedAt)));
+    const pendingDiscrepancyShifts = summaries
+      .filter((s) => s.discrepancyStatus === "pending_review")
+      .sort((a, b) => String(b.closedAt || b.openedAt).localeCompare(String(a.closedAt || a.openedAt)));
+
+    const filtered = summaries.filter((s) => {
+      if (fundFilter && fundFilter !== "all" && s.fundId !== fundFilter) return false;
+      if (statusFilter === "discrepancy") {
+        if (s.discrepancyStatus !== "pending_review") return false;
+      } else if (statusFilter && statusFilter !== "all" && s.status !== statusFilter) {
+        return false;
+      }
+      if (staffFilter && staffFilter !== "all") {
+        if (s.outgoingStaffName !== staffFilter && s.incomingStaffName !== staffFilter && s.targetIncomingStaffName !== staffFilter) {
+          return false;
+        }
+      }
+      if (dateFrom && s.shiftDate && s.shiftDate < dateFrom) return false;
+      if (dateTo && s.shiftDate && s.shiftDate > dateTo) return false;
+      if (search) {
+        const hay = [
+          s.shiftCode,
+          s.shiftLabel,
+          s.outgoingStaffName,
+          s.incomingStaffName,
+          s.targetIncomingStaffName,
+          s.discrepancyExplanation,
+          s.closeNote,
+          s.confirmNote,
+          s.resolutionNote
+        ].join(" ").toLowerCase();
+        if (!hay.includes(search)) return false;
+      }
+      return true;
+    });
+
+    // Pin pending_handover and unresolved discrepancy shifts to the top for Manager attention
+    const sortPriority = (s) => {
+      if (s.status === "pending_handover") return 0;
+      if (s.discrepancyStatus === "pending_review") return 1;
+      if (s.status === "open") return 2;
+      return 3;
+    };
+    filtered.sort((a, b) => {
+      const pDiff = sortPriority(a) - sortPriority(b);
+      if (pDiff !== 0) return pDiff;
+      return String(b.openedAt || "").localeCompare(String(a.openedAt || ""));
+    });
+
+    const unassignedLegacyTxs = (Array.isArray(fState.transactions) ? fState.transactions : [])
+      .filter((t) => t && t.txType === "legacy_payment" && t.legacyStatus === "needs_reconciliation");
+    const unassignedLegacyAmount = roundVND(unassignedLegacyTxs.reduce((s, t) => s + parseVND(t.amount), 0));
+
+    return {
+      rows: filtered,
+      allRows: summaries,
+      allCount: summaries.length,
+      activeOpenShift,
+      pendingHandoverShifts,
+      pendingDiscrepancyShifts,
+      pendingHandoverCount: pendingHandoverShifts.length,
+      pendingDiscrepancyCount: pendingDiscrepancyShifts.length,
+      openingBasis: getShiftOpeningBasis(fState, targetFund),
+      staffList: [...staffSet].sort((a, b) => a.localeCompare(b, "vi")),
+      unassignedLegacyCount: unassignedLegacyTxs.length,
+      unassignedLegacyAmount
+    };
+  }
+
+  function generateShiftsCsvContent(report) {
+    const headers = [
+      "Mã ca", "Ngày ca", "Quỹ tại quầy", "Trạng thái", "Qua đêm",
+      "Người giao ca", "Người nhận ca", "Giờ mở ca", "Giờ kết ca", "Giờ nhận bàn giao",
+      "Căn cứ đầu ca", "Đầu ca (VNĐ)", "Tiền mặt vào (VNĐ)", "Tiền mặt ra (VNĐ)",
+      "Dự kiến tại két (VNĐ)", "Thực đếm khi giao (VNĐ)", "Chênh lệch giao ca (VNĐ)", "Phân loại",
+      "Thực nhận ca sau (VNĐ)", "Chênh lệch nhận - giao (VNĐ)", "Trạng thái chênh lệch",
+      "Giải trình chênh lệch", "Chứng từ trong ca", "CK ngân hàng tham khảo (VNĐ)",
+      "Ghi chú xử lý quản lý"
+    ];
+    const discStatusMap = {
+      none: "Khớp",
+      pending_review: "Cần quản lý xử lý",
+      resolved: "Đã xử lý"
+    };
+    const rows = (report && report.rows ? report.rows : []).map((s) => [
+      s.shiftCode,
+      s.shiftDate,
+      s.fundName,
+      s.statusLabel,
+      s.isOvernight ? "Ca qua đêm" : "Trong ngày",
+      s.outgoingStaffName,
+      s.incomingStaffName || s.targetIncomingStaffName || "",
+      s.openedAtVN || s.openedAt,
+      s.closedAtVN || "",
+      s.confirmedAtVN || "",
+      s.openingBasisRef,
+      s.openingCash,
+      s.cashInTotal,
+      s.cashOutTotal,
+      s.expectedCash,
+      s.countedCash !== null ? s.countedCash : "",
+      s.countedCash !== null ? s.discrepancy : "",
+      s.discrepancyLabel,
+      s.receivedCash !== null ? s.receivedCash : "",
+      s.receivedCash !== null ? s.handoverCountDiff : "",
+      discStatusMap[s.discrepancyStatus] || s.discrepancyStatus,
+      s.discrepancyExplanation || "",
+      (s.cashTransactions || []).map((t) => `${t.voucherCode}(${t.signedCashImpact >= 0 ? "+" : ""}${t.signedCashImpact})`).join("; "),
+      s.bankRefTotal || 0,
+      s.resolutionNote || ""
+    ]);
+    return "\uFEFF" + [headers, ...rows].map((row) => row.map(sanitizeCsvCell).join(",")).join("\r\n");
+  }
+
+  function generateShiftHandoverHtml(summary) {
+    if (!summary || typeof summary !== "object") return "";
+    const esc = escapeHtml;
+    const cashRows = (summary.cashTransactions || []).map((t, idx) => {
+      const target = t.txType === "supplier_payment"
+        ? `HĐ ${t.invoiceVoucherNo || t.invoiceId} — ${t.supplierName || "NCC"}`
+        : t.txType === "fund_transfer"
+          ? `${t.fromFundName || t.fromFundId} → ${t.toFundName || t.toFundId}`
+          : (t.groupCodeDisplay ? `Đoàn ${t.groupCodeDisplay} (${t.guestName || ""})` : `${t.roomLabel || ""} ${t.guestName || ""}`.trim() || t.note || "—");
+      return `<tr>
+        <td>${idx + 1}</td>
+        <td><strong>${esc(t.voucherCode)}</strong></td>
+        <td>${esc(formatVietnamDateTime(t.recordedAt))}</td>
+        <td>${esc(t.txTypeLabel || t.txType)}</td>
+        <td>${esc(target)}</td>
+        <td style="text-align:right;font-weight:600;color:${t.signedCashImpact < 0 ? "#b91c1c" : "#15803d"}">${esc(formatSignedVND(t.signedCashImpact))}</td>
+        <td>${esc(t.operator || "")}</td>
+      </tr>`;
+    }).join("");
+
+    const bankRows = (summary.bankRefTransactions || []).map((t, idx) => {
+      const target = t.groupCodeDisplay ? `Đoàn ${t.groupCodeDisplay} (${t.guestName || ""})` : `${t.roomLabel || ""} ${t.guestName || ""}`.trim() || t.note || "—";
+      return `<tr>
+        <td>${idx + 1}</td>
+        <td>${esc(t.voucherCode)}</td>
+        <td>${esc(formatVietnamDateTime(t.recordedAt))}</td>
+        <td>${esc(target)}</td>
+        <td style="text-align:right">${esc(formatSignedVND(t.txType === "customer_refund" ? -t.amount : t.amount))}</td>
+      </tr>`;
+    }).join("");
+
+    const adjRows = (summary.adjustmentHistory || []).map((a) => `<li><strong>${esc(formatVietnamDateTime(a.ts))}</strong> — ${esc(a.operator)}: ${esc(a.reason || a.action)}${a.voucherCode ? ` (Chứng từ ${esc(a.voucherCode)}: ${esc(formatSignedVND(a.adjustmentAmount))})` : ""}${a.note ? ` • ${esc(a.note)}` : ""}</li>`).join("");
+
+    return `<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<title>Biên bản bàn giao ca ${esc(summary.shiftCode)} — Dongvan Ville du H'mong Hotel</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; color: #1e293b; margin: 24px; font-size: 13px; line-height: 1.45; }
+  h1 { font-size: 18px; margin: 0 0 4px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .sub { color: #475569; margin: 0 0 16px; font-size: 12px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 24px; margin-bottom: 16px; padding: 12px; border: 1px solid #cbd5e1; border-radius: 8px; background: #f8fafc; }
+  .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+  .kpi { border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
+  .kpi span { display: block; font-size: 11px; color: #64748b; }
+  .kpi strong { font-size: 15px; display: block; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 16px; font-size: 12px; }
+  th, td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; }
+  th { background: #f1f5f9; }
+  .alert { padding: 10px 12px; border-radius: 6px; border: 1px solid #f59e0b; background: #fffbeb; margin-bottom: 14px; }
+  .sigs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 28px; text-align: center; }
+  .sig-box { min-height: 80px; }
+  @media print { .no-print { display: none; } body { margin: 10px; } }
+</style>
+</head>
+<body>
+  <div class="no-print" style="margin-bottom:12px;text-align:right">
+    <button onclick="window.print()" style="padding:7px 14px;font-weight:600;cursor:pointer">In biên bản</button>
+  </div>
+  <h1>Biên bản bàn giao ca lễ tân — ${esc(summary.shiftCode)}</h1>
+  <p class="sub">Dongvan Ville du H'mong Hotel • Quỹ: ${esc(summary.fundName)} • Trạng thái: ${esc(summary.statusLabel)}${summary.isOvernight ? " • Ca qua đêm" : ""}</p>
+  <div class="grid">
+    <div><strong>Người giao ca:</strong> ${esc(summary.outgoingStaffName)}</div>
+    <div><strong>Người nhận ca:</strong> ${esc(summary.incomingStaffName || summary.targetIncomingStaffName || "Chưa xác nhận")}</div>
+    <div><strong>Giờ mở ca:</strong> ${esc(summary.openedAtVN)}</div>
+    <div><strong>Giờ kết ca:</strong> ${esc(summary.closedAtVN)}</div>
+    <div><strong>Căn cứ đầu ca:</strong> ${esc(summary.openingBasisRef)}</div>
+    <div><strong>Giờ xác nhận nhận:</strong> ${esc(summary.confirmedAtVN)}</div>
+  </div>
+  <div class="kpi-row">
+    <div class="kpi"><span>Số đầu ca</span><strong>${esc(formatVND(summary.openingCash))}</strong></div>
+    <div class="kpi"><span>Tiền mặt vào / ra</span><strong>+${esc(formatVND(summary.cashInTotal))} / -${esc(formatVND(summary.cashOutTotal))}</strong></div>
+    <div class="kpi"><span>Dự kiến tại két</span><strong>${esc(formatVND(summary.expectedCash))}</strong></div>
+    <div class="kpi"><span>Thực đếm giao / Thực nhận</span><strong>${summary.countedCash !== null ? esc(formatVND(summary.countedCash)) : "—"} / ${summary.receivedCash !== null ? esc(formatVND(summary.receivedCash)) : "—"}</strong></div>
+  </div>
+  ${summary.hasDiscrepancy ? `<div class="alert">
+    <strong>Chênh lệch giao ca: ${esc(summary.discrepancyLabel)} (${esc(formatSignedVND(summary.discrepancy))})</strong>
+    ${summary.handoverCountDiff ? ` • <strong>Chênh lệch người nhận đếm lại: ${esc(formatSignedVND(summary.handoverCountDiff))}</strong>` : ""}
+    ${summary.discrepancyExplanation ? `<div>Giải trình: ${esc(summary.discrepancyExplanation)}</div>` : ""}
+    ${summary.confirmNote ? `<div>Ghi chú người nhận: ${esc(summary.confirmNote)}</div>` : ""}
+  </div>` : ""}
+  <h3>1. Chứng từ tiền mặt tính trong ca (${(summary.cashTransactions || []).length} chứng từ)</h3>
+  <table>
+    <thead><tr><th>#</th><th>Mã CT</th><th>Thời điểm</th><th>Loại</th><th>Đơn / NCC / Quỹ</th><th style="text-align:right">Tiền mặt két</th><th>Người ghi</th></tr></thead>
+    <tbody>${cashRows || '<tr><td colspan="7" style="text-align:center;color:#64748b">Không có phát sinh tiền mặt tại quầy trong ca này.</td></tr>'}</tbody>
+  </table>
+  <h3>2. Khách chuyển khoản ngân hàng trong ca — chỉ tham khảo, KHÔNG cộng vào tiền mặt bàn giao (${(summary.bankRefTransactions || []).length} giao dịch • ${esc(formatVND(summary.bankRefTotal))})</h3>
+  <table>
+    <thead><tr><th>#</th><th>Mã CT</th><th>Thời điểm</th><th>Đơn / Khách</th><th style="text-align:right">Số tiền CK</th></tr></thead>
+    <tbody>${bankRows || '<tr><td colspan="5" style="text-align:center;color:#64748b">Không có giao dịch chuyển khoản ngân hàng trong ca.</td></tr>'}</tbody>
+  </table>
+  ${adjRows ? `<h3>3. Lịch sử xử lý / điều chỉnh sau kết ca của Quản lý</h3><ul>${adjRows}</ul>` : ""}
+  <div class="sigs">
+    <div class="sig-box"><strong>Người giao ca</strong><br/><small>(Ký, ghi rõ họ tên)</small><br/><br/><br/>${esc(summary.outgoingStaffName)}</div>
+    <div class="sig-box"><strong>Người nhận ca</strong><br/><small>(Ký, ghi rõ họ tên)</small><br/><br/><br/>${esc(summary.incomingStaffName || "")}</div>
+    <div class="sig-box"><strong>Quản lý kiểm tra</strong><br/><small>(Ký, ghi rõ họ tên)</small><br/><br/><br/>${esc(summary.resolvedBy || "")}</div>
+  </div>
+</body>
+</html>`;
+  }
+
   return {
     STORAGE_KEY,
     BACKUP_KEY,
@@ -5606,6 +6299,8 @@
     toVietnamParts,
     getVietnamTodayISO,
     getVietnamNowISO,
+    formatVietnamDateTime,
+    getVietnamDateFromISO,
     normalizeFinanceDateISO,
     normalizeFinanceTimestamp,
     addDaysISO,
@@ -5700,12 +6395,14 @@
     FINANCE_TX_TYPES,
     SUPPLIER_INVOICE_STATUSES,
     REFUND_CATEGORIES,
+    SHIFT_STATUSES,
     getFinanceFundById,
     getPaymentMethodMeta,
     createDefaultFinanceState,
     sanitizeSupplierInvoiceAttachment,
     sanitizeSupplierInvoiceLine,
     sanitizeSupplierInvoice,
+    sanitizeCashShift,
     sanitizeFinanceTransaction,
     sanitizeFinanceState,
     getBookingChargesBreakdown,
@@ -5717,9 +6414,15 @@
     computeSupplierPayablesReport,
     computeCalendarFinanceKPIs,
     buildLegacyMigrationPlan,
+    getShiftCashImpact,
+    getShiftOpeningBasis,
+    computeShiftLiveSummary,
+    computeShiftsReport,
     generateReceivablesCsvContent,
     generateCashbookCsvContent,
     generateSupplierPayablesCsvContent,
+    generateShiftsCsvContent,
+    generateShiftHandoverHtml,
     generateCsvContent,
     diffBookingChanges,
     generateAuditCsvContent,

@@ -65,6 +65,11 @@
             <span class="nav-label">Thu tiền &amp; công nợ</span>
             <span id="ar-badge-pill" class="nav-badge nav-badge-warn" style="display:none;">0</span>
           </button>
+          <button id="btn-open-shifts" class="nav-item" type="button" data-nav-key="cash_shifts" title="Nhận ca, kiểm đếm két tiền mặt tại quầy &amp; bàn giao ca lễ tân">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span>
+            <span class="nav-label">Giao ca lễ tân</span>
+            <span id="shifts-badge-pill" class="nav-badge nav-badge-warn" style="display:none;">0</span>
+          </button>
           <button id="btn-open-cashbook" class="nav-item" type="button" data-nav-key="cashbook" title="Sổ quỹ tiền mặt, tài khoản ngân hàng, chuyển quỹ &amp; đối soát">
             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
             <span class="nav-label">Sổ quỹ &amp; đối soát</span>
@@ -1627,6 +1632,100 @@
 
   <!-- Toast -->
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- Modal Giao ca lễ tân (Phase 3 — v1.8.0) -->
+  <div id="shifts-modal" class="modal-backdrop fin-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="shifts-modal-title">
+    <div class="modal-card modal-xl fin-modal-card shifts-modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="shifts-modal-title" class="modal-title">Giao ca lễ tân — Quỹ tiền mặt tại quầy</h2>
+          <div class="modal-subtitle" id="shifts-subtitle">Nhận ca, theo dõi thu/chi tiền mặt trong ca từ sổ quỹ gốc, kiểm đếm &amp; bàn giao không tạo phiếu thu/chi giả.</div>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <button id="btn-shifts-transfer" class="btn btn-sm" type="button" style="display:none;">⇄ Chuyển quỹ</button>
+          <button id="btn-shifts-export-csv" class="btn btn-sm" type="button" style="display:none;">⬇ Xuất CSV giao ca</button>
+          <button id="btn-close-shifts" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+        </div>
+      </div>
+
+      <div class="modal-body fin-modal-body shifts-body">
+        <!-- Pending Sync Banner for Shift Operations (network drop protection) -->
+        <div id="shifts-pending-sync-bar" class="fin-pending-bar" style="display:none;"></div>
+
+        <!-- Tabs: Active Shift Desk vs Manager History & Discrepancies -->
+        <div class="shifts-tabs" role="tablist">
+          <button id="tab-shift-desk" class="shifts-tab active" type="button" role="tab" aria-selected="true" data-shift-tab="desk">
+            Ca hiện tại &amp; bàn giao
+          </button>
+          <button id="tab-shift-history" class="shifts-tab" type="button" role="tab" aria-selected="false" data-shift-tab="history">
+            Lịch sử ca &amp; chênh lệch <span id="shifts-history-badge" class="nav-badge nav-badge-warn" style="display:none;">0</span>
+          </button>
+        </div>
+
+        <!-- Tab 1: Active Shift & Handover Desk -->
+        <div id="shifts-panel-desk" class="shifts-panel">
+          <div id="shifts-desk-content"></div>
+        </div>
+
+        <!-- Tab 2: Manager / Staff Shift History & Discrepancy Queue -->
+        <div id="shifts-panel-history" class="shifts-panel" style="display:none;">
+          <div class="fin-filters-bar shifts-filter-bar">
+            <div class="field">
+              <label for="shifts-filter-from">Từ ngày</label>
+              <input type="date" id="shifts-filter-from" class="input" />
+            </div>
+            <div class="field">
+              <label for="shifts-filter-to">Đến ngày</label>
+              <input type="date" id="shifts-filter-to" class="input" />
+            </div>
+            <div class="field">
+              <label for="shifts-filter-staff">Nhân viên</label>
+              <select id="shifts-filter-staff" class="select"><option value="all">Tất cả nhân viên</option></select>
+            </div>
+            <div class="field">
+              <label for="shifts-filter-fund">Quỹ</label>
+              <select id="shifts-filter-fund" class="select">
+                <option value="all">Tất cả quỹ</option>
+                <option value="cash_frontdesk">Tiền mặt tại quầy</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="shifts-filter-status">Trạng thái</label>
+              <select id="shifts-filter-status" class="select">
+                <option value="all">Tất cả</option>
+                <option value="pending_handover">Chờ nhận bàn giao</option>
+                <option value="discrepancy">Có chênh lệch cần xử lý</option>
+                <option value="open">Đang trong ca</option>
+                <option value="confirmed">Đã bàn giao</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="shifts-filter-search">Tìm kiếm</label>
+              <input type="text" id="shifts-filter-search" class="input" placeholder="Mã ca, nhân viên, giải trình..." />
+            </div>
+          </div>
+          <div id="shifts-history-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sub-modal Biên bản bàn giao ca (Chi tiết + In + Xử lý chênh lệch) -->
+  <div id="shift-minutes-modal" class="modal-backdrop fin-modal-backdrop shift-minutes-backdrop" role="dialog" aria-modal="true" aria-labelledby="shift-minutes-title">
+    <div class="modal-card modal-lg fin-modal-card shifts-modal-card">
+      <div class="modal-header">
+        <div>
+          <h3 id="shift-minutes-title" class="modal-title">Biên bản bàn giao ca</h3>
+          <div class="modal-subtitle" id="shift-minutes-subtitle"></div>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <button id="btn-print-shift-minutes" class="btn btn-sm" type="button">🖨 In / Mở biên bản</button>
+          <button id="btn-close-shift-minutes" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+        </div>
+      </div>
+      <div class="modal-body fin-modal-body" id="shift-minutes-body"></div>
+    </div>
+  </div>
 
   <script src="pms-core.js"></script>
   <script src="supabase-config.js"></script>

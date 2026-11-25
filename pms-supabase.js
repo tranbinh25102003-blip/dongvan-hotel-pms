@@ -2288,6 +2288,220 @@
         const tx = Core.sanitizeFinanceTransaction({ ...payload, txType: "supplier_payment", entityType: "supplier_invoice", invoiceId: inv.id, invoiceVoucherNo: inv.voucherNo, supplierName: inv.supplierName, id: `ftx_${Date.now().toString(36)}`, voucherCode: `PC-${ts.receivedDate.slice(0, 7).replace("-", "")}-${String(auxSeq).padStart(4, "0")}`, receivedDate: ts.receivedDate, receivedAt: ts.receivedAt, operator: (session && session.staffName) || "Quản lý", approvedBy: (session && session.staffName) || "Quản lý", idempotencyKey: idemKey, recordedAt: new Date().toISOString() }, auxSeq);
         return { ok: true, idempotentReplay: false, transaction: tx, invoice: inv, nextFinanceState: { ...fState, voucherSeq: auxSeq, transactions: [...fState.transactions, tx] } };
       }),
+      lookupShiftByIdempotency: async (key) => {
+        const cleanKey = Core.sanitizeText(key, 120);
+        const fState = stateCache.financeState || Core.createDefaultFinanceState();
+        const found = (fState.cashShifts || []).find((s) => (
+          s.openIdempotencyKey === cleanKey || s.closeIdempotencyKey === cleanKey || s.confirmIdempotencyKey === cleanKey
+        )) || null;
+        return { ok: true, found: Boolean(found), shift: found };
+      },
+      openCashShift: (payload = {}) => cloudFinanceOp((fState) => {
+        if (!can("finance:shift_write")) return { ok: false, code: "FORBIDDEN", error: "Bạn không có quyền mở ca lễ tân." };
+        const shifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
+        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120) || `shift_open_${Date.now().toString(36)}`;
+        const dup = shifts.find((s) => s.openIdempotencyKey === idemKey);
+        if (dup) return { ok: true, idempotentReplay: true, shift: dup, nextFinanceState: fState };
+        const fundId = payload.fundId || "cash_frontdesk";
+        const openSh = shifts.find((s) => s.fundId === fundId && s.status === "open");
+        if (openSh) return { ok: false, code: "SHIFT_ALREADY_OPEN", shift: openSh, error: `Đang có ca ${openSh.shiftCode} mở.` };
+        const pendSh = shifts.find((s) => s.fundId === fundId && s.status === "pending_handover");
+        if (pendSh) return { ok: false, code: "PENDING_HANDOVER_EXISTS", shift: pendSh, error: `Ca ${pendSh.shiftCode} đang chờ nhận bàn giao.` };
+        const basis = Core.getShiftOpeningBasis(fState, fundId);
+        const nowISO = new Date().toISOString();
+        const vnDate = Core.getVietnamTodayISO();
+        const code = `CA-${vnDate.replace(/-/g, "")}-${String(shifts.filter((s) => s.shiftDate === vnDate).length + 1).padStart(2, "0")}`;
+        const staffName = (session && session.staffName) || "Lễ tân";
+        const username = (session && session.username) || "";
+        const shift = Core.sanitizeCashShift({
+          id: `shift_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+          shiftCode: code,
+          fundId,
+          shiftDate: vnDate,
+          shiftLabel: payload.shiftLabel || "",
+          status: "open",
+          previousShiftId: basis.previousShiftId,
+          previousShiftCode: basis.previousShiftCode,
+          txWindowStart: basis.openingBasisType === "previous_shift" && basis.txWindowStart ? basis.txWindowStart : nowISO,
+          openingBasisType: basis.openingBasisType,
+          openingBasisRef: basis.openingBasisRef,
+          openingCash: basis.openingCash,
+          expectedCash: basis.openingCash,
+          handedOverBy: basis.handedOverBy,
+          outgoingStaffName: staffName,
+          outgoingUsername: username,
+          openedAt: nowISO,
+          openedBy: staffName,
+          openNote: payload.note || "",
+          openIdempotencyKey: idemKey
+        });
+        return { ok: true, idempotentReplay: false, shift, openingBasis: basis, nextFinanceState: { ...fState, cashShifts: [shift, ...shifts] } };
+      }),
+      closeCashShift: (shiftId, payload = {}) => cloudFinanceOp((fState, bookings) => {
+        if (!can("finance:shift_write")) return { ok: false, code: "FORBIDDEN", error: "Bạn không có quyền kết ca." };
+        const shifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
+        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120) || `shift_close_${shiftId}_${Date.now().toString(36)}`;
+        const dup = shifts.find((s) => s.closeIdempotencyKey === idemKey);
+        if (dup) return { ok: true, idempotentReplay: true, shift: dup, nextFinanceState: fState };
+        const idx = shifts.findIndex((s) => s.id === shiftId);
+        if (idx < 0) return { ok: false, error: "Không tìm thấy ca cần kết." };
+        const shift = shifts[idx];
+        if (shift.status !== "open") return { ok: false, code: "SHIFT_ALREADY_CLOSED", shift, error: `Ca ${shift.shiftCode} đã kết trước đó.` };
+        const live = Core.computeShiftLiveSummary(shift, fState, bookings);
+        if (payload.expectedTxCount !== undefined && Number(payload.expectedTxCount) !== live.txCount) {
+          return { ok: false, code: "STALE_SHIFT_TRANSACTIONS", liveSummary: live, liveExpectedCash: live.expectedCash, liveTxCount: live.txCount, liveLastTxId: live.lastTxId, error: "Có chứng từ tiền mặt mới trong lúc đếm tiền." };
+        }
+        const countedCash = Core.parseSignedVND(payload.countedCash);
+        const discrepancy = Core.roundVND(countedCash - live.expectedCash);
+        const explanation = Core.sanitizeText(payload.discrepancyExplanation || payload.explanation, 500);
+        if (discrepancy !== 0 && !explanation) return { ok: false, code: "EXPLANATION_REQUIRED", error: "Có chênh lệch — vui lòng nhập giải trình." };
+        const nowISO = new Date().toISOString();
+        const staffName = (session && session.staffName) || shift.outgoingStaffName;
+        const updated = Core.sanitizeCashShift({
+          ...shift,
+          status: "pending_handover",
+          closedAt: nowISO,
+          closedBy: staffName,
+          closeIdempotencyKey: idemKey,
+          cashInTotal: live.cashInTotal,
+          cashOutTotal: live.cashOutTotal,
+          bankRefTotal: live.bankRefTotal,
+          expectedCash: live.expectedCash,
+          countedCash,
+          discrepancy,
+          discrepancyExplanation: explanation,
+          discrepancyStatus: discrepancy !== 0 ? "pending_review" : "none",
+          closeNote: payload.closeNote || "",
+          targetIncomingStaffName: payload.targetIncomingStaffName || "",
+          lastTxId: live.lastTxId,
+          lastTxRecordedAt: live.lastTxRecordedAt,
+          includedTxIds: live.cashTransactions.map((t) => t.id),
+          bankRefTxIds: live.bankRefTransactions.map((t) => t.id),
+          includedTxSnapshot: live.cashTransactions,
+          updatedAt: nowISO
+        });
+        const nextShifts = shifts.slice();
+        nextShifts[idx] = updated;
+        return { ok: true, idempotentReplay: false, shift: updated, nextFinanceState: { ...fState, cashShifts: nextShifts } };
+      }),
+      confirmCashShift: (shiftId, payload = {}) => cloudFinanceOp((fState) => {
+        if (!can("finance:shift_write")) return { ok: false, code: "FORBIDDEN", error: "Bạn không có quyền xác nhận nhận bàn giao." };
+        const shifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
+        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120) || `shift_confirm_${shiftId}_${Date.now().toString(36)}`;
+        const dup = shifts.find((s) => s.confirmIdempotencyKey === idemKey);
+        if (dup) return { ok: true, idempotentReplay: true, shift: dup, nextFinanceState: fState };
+        const idx = shifts.findIndex((s) => s.id === shiftId);
+        if (idx < 0) return { ok: false, error: "Không tìm thấy biên bản giao ca." };
+        const shift = shifts[idx];
+        if (shift.status !== "pending_handover") return { ok: false, code: "SHIFT_NOT_PENDING_HANDOVER", error: "Ca này không ở trạng thái chờ nhận." };
+        const staffName = (session && session.staffName) || "Lễ tân ca sau";
+        const username = (session && session.username) || "";
+        if (getCurrentRole() === "reception" && staffName.toLowerCase() === String(shift.outgoingStaffName || "").toLowerCase()) {
+          return { ok: false, code: "SELF_CONFIRM_FORBIDDEN", error: "Người nhận ca phải xác nhận bằng tài khoản của chính mình." };
+        }
+        const receivedCash = Core.parseSignedVND(payload.receivedCash);
+        const handoverCountDiff = Core.roundVND(receivedCash - shift.countedCash);
+        const confirmNote = Core.sanitizeText(payload.confirmNote || payload.note, 500);
+        if (handoverCountDiff !== 0 && !confirmNote) return { ok: false, code: "CONFIRM_NOTE_REQUIRED", error: "Số thực nhận khác số giao — vui lòng ghi chú." };
+        const nowISO = new Date().toISOString();
+        const vnDate = Core.getVietnamTodayISO();
+        const nextShift = Core.sanitizeCashShift({
+          id: `shift_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+          shiftCode: `CA-${vnDate.replace(/-/g, "")}-${String(shifts.filter((s) => s.shiftDate === vnDate).length + 1).padStart(2, "0")}`,
+          fundId: shift.fundId,
+          shiftDate: vnDate,
+          status: "open",
+          previousShiftId: shift.id,
+          previousShiftCode: shift.shiftCode,
+          txWindowStart: shift.closedAt || nowISO,
+          openingBasisType: "previous_shift",
+          openingBasisRef: `Từ ca trước ${shift.shiftCode} (${shift.outgoingStaffName} bàn giao • thực nhận ${Core.formatVND(receivedCash)})`,
+          openingCash: receivedCash,
+          expectedCash: receivedCash,
+          handedOverBy: shift.outgoingStaffName,
+          outgoingStaffName: staffName,
+          outgoingUsername: username,
+          openedAt: nowISO,
+          openedBy: staffName,
+          openIdempotencyKey: `${idemKey}_next`
+        });
+        const confirmed = Core.sanitizeCashShift({
+          ...shift,
+          status: "confirmed",
+          incomingStaffName: staffName,
+          incomingUsername: username,
+          receivedCash,
+          handoverCountDiff,
+          confirmedAt: nowISO,
+          confirmNote,
+          confirmIdempotencyKey: idemKey,
+          nextShiftId: nextShift.id,
+          discrepancyStatus: (shift.discrepancy !== 0 || handoverCountDiff !== 0) ? "pending_review" : shift.discrepancyStatus,
+          updatedAt: nowISO
+        });
+        const nextShifts = shifts.slice();
+        nextShifts[idx] = confirmed;
+        nextShifts.unshift(nextShift);
+        return { ok: true, idempotentReplay: false, shift: confirmed, nextShift, nextFinanceState: { ...fState, cashShifts: nextShifts } };
+      }),
+      resolveCashShiftDiscrepancy: (shiftId, payload = {}) => cloudFinanceOp((fState) => {
+        if (!can("finance:shift_manage")) return { ok: false, code: "FORBIDDEN", error: "Chỉ Quản lý được xử lý chênh lệch ca." };
+        const shifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
+        const idx = shifts.findIndex((s) => s.id === shiftId);
+        if (idx < 0) return { ok: false, error: "Không tìm thấy biên bản ca." };
+        const shift = shifts[idx];
+        const note = Core.sanitizeText(payload.resolutionNote || payload.reason, 500);
+        if (!note) return { ok: false, error: "Vui lòng nhập lý do xử lý." };
+        const staffName = (session && session.staffName) || "Quản lý";
+        const nowISO = new Date().toISOString();
+        let nextTxs = fState.transactions || [];
+        let auxSeq = fState.voucherSeq || nextTxs.length;
+        let adjustmentTx = null;
+        if (payload.createAdjustment) {
+          auxSeq += 1;
+          const adjAmount = payload.adjustmentAmount !== undefined && payload.adjustmentAmount !== "" ? Core.parseSignedVND(payload.adjustmentAmount) : (shift.receivedCash !== null ? Core.roundVND(shift.receivedCash - shift.expectedCash) : shift.discrepancy);
+          const ts = Core.normalizeFinanceTimestamp(nowISO);
+          adjustmentTx = Core.sanitizeFinanceTransaction({
+            id: `ftx_${Date.now().toString(36)}`,
+            voucherCode: `DC-${ts.receivedDate.slice(0, 7).replace("-", "")}-${String(auxSeq).padStart(4, "0")}`,
+            txType: "balance_adjustment",
+            entityType: "fund",
+            amount: adjAmount,
+            receivedDate: ts.receivedDate,
+            receivedAt: ts.receivedAt,
+            recordedAt: nowISO,
+            paymentMethod: "cash",
+            fundId: shift.fundId,
+            operator: staffName,
+            approvedBy: staffName,
+            reason: `Xử lý chênh lệch ca ${shift.shiftCode}: ${note}`,
+            shiftId: shift.id,
+            reconciled: true
+          }, auxSeq);
+          nextTxs = [...nextTxs, adjustmentTx];
+        }
+        const updated = Core.sanitizeCashShift({
+          ...shift,
+          discrepancyStatus: "resolved",
+          resolvedBy: staffName,
+          resolvedAt: nowISO,
+          resolutionNote: note,
+          adjustmentHistory: [...(shift.adjustmentHistory || []), {
+            id: `sadj_${Date.now().toString(36)}`,
+            ts: nowISO,
+            operator: staffName,
+            action: adjustmentTx ? "adjustment_voucher" : "resolve_without_voucher",
+            adjustmentAmount: adjustmentTx ? adjustmentTx.amount : 0,
+            voucherId: adjustmentTx ? adjustmentTx.id : "",
+            voucherCode: adjustmentTx ? adjustmentTx.voucherCode : "",
+            reason: note
+          }],
+          updatedAt: nowISO
+        });
+        const nextShifts = shifts.slice();
+        nextShifts[idx] = updated;
+        return { ok: true, shift: updated, adjustmentTx, nextFinanceState: { ...fState, voucherSeq: auxSeq, transactions: nextTxs, cashShifts: nextShifts } };
+      }),
       appendFinanceSyncLog: async () => ({ ok: true }),
       getHousekeepingTasks: () => stateCache.housekeepingTasks,
       getMaintenanceIssues: () => stateCache.maintenanceIssues,

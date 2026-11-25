@@ -958,6 +958,11 @@
       if (window.PMSFinanceApp) window.PMSFinanceApp.openReceivables({ asOfDate: getVietnamTodayISO() });
       return;
     }
+    if (key === "cash_shifts") {
+      if (!mCan("finance:shift_read")) return showMobileToast("Bạn không có quyền truy cập Giao ca lễ tân.");
+      if (window.PMSFinanceApp) window.PMSFinanceApp.openShifts();
+      return;
+    }
     if (key === "cashbook") {
       if (!mCan("finance:cashbook_read")) return showMobileToast("Sổ quỹ & đối soát chỉ dành cho Quản lý.");
       if (window.PMSFinanceApp) window.PMSFinanceApp.openCashbook();

@@ -1224,12 +1224,49 @@
       }
     }
 
+    async function lookupShiftByIdempotency(idempotencyKey) {
+      const key = Core.sanitizeText(idempotencyKey, 120);
+      if (!key) return { ok: true, found: false };
+      if (mode !== "server") {
+        const fState = (stateCache.financeState && Array.isArray(stateCache.financeState.cashShifts))
+          ? stateCache.financeState
+          : Core.createDefaultFinanceState();
+        const foundShift = (fState.cashShifts || []).find((s) => (
+          s.openIdempotencyKey === key || s.closeIdempotencyKey === key || s.confirmIdempotencyKey === key
+        )) || null;
+        return { ok: true, found: Boolean(foundShift), shift: foundShift };
+      }
+      try {
+        const res = await fetchJson(`/api/finance/shifts/by-idempotency/${encodeURIComponent(key)}`, { timeoutMs: 8000 });
+        if (res.status === 401) {
+          handleAuthExpired(res.data && res.data.error);
+          return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
+        }
+        return (res.data && typeof res.data === "object") ? res.data : { ok: false, error: `Lỗi tra cứu ca (${res.status}).` };
+      } catch {
+        return { ok: false, offline: true, error: "Chưa kết nối lại được máy chủ để tra cứu biên bản giao ca." };
+      }
+    }
+
+    function isShiftPendingKind(kind) {
+      return kind === "shift_open" || kind === "shift_close" || kind === "shift_confirm";
+    }
+
     async function reconcilePendingFinanceIntents() {
       const pending = readPendingFinanceIntents();
       if (pending.length === 0) return { ok: true, resolved: [], remaining: [] };
       const resolved = [];
       const remaining = [];
       for (const item of pending) {
+        if (isShiftPendingKind(item.kind)) {
+          const check = await lookupShiftByIdempotency(item.idempotencyKey);
+          if (check && check.ok && check.found && check.shift) {
+            resolved.push({ intent: item, shift: check.shift });
+          } else {
+            remaining.push(item);
+          }
+          continue;
+        }
         const check = await lookupFinanceByIdempotency(item.idempotencyKey);
         if (check && check.ok && check.found && check.transaction) {
           resolved.push({ intent: item, transaction: check.transaction });
@@ -1419,6 +1456,17 @@
       const item = readPendingFinanceIntents().find((it) => it && it.idempotencyKey === idempotencyKey);
       if (!item) return { ok: false, error: "Không tìm thấy lệnh chờ đồng bộ." };
       // First check if server already committed before retrying!
+      if (isShiftPendingKind(item.kind)) {
+        const check = await lookupShiftByIdempotency(idempotencyKey);
+        if (check && check.ok && check.found && check.shift) {
+          removePendingFinanceIntent(idempotencyKey);
+          await pullLatestFromServer({ type: "finance_reconciled" });
+          return { ok: true, idempotentReplay: true, alreadyCommitted: true, shift: check.shift, nextShift: check.nextShift || null };
+        }
+        if (item.kind === "shift_open") return openCashShift(item.payload);
+        if (item.kind === "shift_close") return closeCashShift(item.shiftId, item.payload);
+        if (item.kind === "shift_confirm") return confirmCashShift(item.shiftId, item.payload);
+      }
       const check = await lookupFinanceByIdempotency(idempotencyKey);
       if (check && check.ok && check.found && check.transaction) {
         removePendingFinanceIntent(idempotencyKey);
@@ -1710,6 +1758,393 @@
       }
     }
 
+    /* -------------------- Cash Shift Handover Client Methods (v1.8.0) -------------------- */
+
+    async function openCashShift(payload = {}) {
+      const idempotencyKey = Core.sanitizeText(payload.idempotencyKey, 120)
+        || `shift_open_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      const reqPayload = { ...payload, idempotencyKey };
+
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState) => {
+          const shifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
+          const dup = shifts.find((s) => s.openIdempotencyKey === idempotencyKey);
+          if (dup) return { ok: true, idempotentReplay: true, shift: dup, nextFinanceState: fState };
+          const fundId = reqPayload.fundId || "cash_frontdesk";
+          const openSh = shifts.find((s) => s.fundId === fundId && s.status === "open");
+          if (openSh) return { ok: false, code: "SHIFT_ALREADY_OPEN", shift: openSh, error: `Đang có ca ${openSh.shiftCode} mở.` };
+          const pendSh = shifts.find((s) => s.fundId === fundId && s.status === "pending_handover");
+          if (pendSh) return { ok: false, code: "PENDING_HANDOVER_EXISTS", shift: pendSh, error: `Ca ${pendSh.shiftCode} đang chờ nhận bàn giao.` };
+          const basis = Core.getShiftOpeningBasis(fState, fundId);
+          const nowISO = new Date().toISOString();
+          const vnDate = Core.getVietnamTodayISO();
+          const code = `CA-${vnDate.replace(/-/g, "")}-${String(shifts.filter((s) => s.shiftDate === vnDate).length + 1).padStart(2, "0")}`;
+          const staffName = (authState && authState.user && authState.user.staffName) || reqPayload.staffName || "Lễ tân";
+          const username = (authState && authState.user && authState.user.username) || "";
+          const shift = Core.sanitizeCashShift({
+            id: `shift_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+            shiftCode: code,
+            fundId,
+            shiftDate: vnDate,
+            shiftLabel: reqPayload.shiftLabel || "",
+            status: "open",
+            previousShiftId: basis.previousShiftId,
+            previousShiftCode: basis.previousShiftCode,
+            txWindowStart: basis.openingBasisType === "previous_shift" && basis.txWindowStart ? basis.txWindowStart : nowISO,
+            openingBasisType: basis.openingBasisType,
+            openingBasisRef: basis.openingBasisRef,
+            openingCash: basis.openingCash,
+            expectedCash: basis.openingCash,
+            handedOverBy: basis.handedOverBy,
+            outgoingStaffName: staffName,
+            outgoingUsername: username,
+            openedAt: nowISO,
+            openedBy: staffName,
+            openNote: reqPayload.note || "",
+            openIdempotencyKey: idempotencyKey
+          });
+          return {
+            ok: true,
+            idempotentReplay: false,
+            shift,
+            openingBasis: basis,
+            nextFinanceState: { ...fState, ledgerVersion: (fState.ledgerVersion || 0) + 1, cashShifts: [shift, ...shifts] }
+          };
+        });
+      }
+
+      upsertPendingFinanceIntent({
+        idempotencyKey,
+        kind: "shift_open",
+        payload: reqPayload,
+        status: "unconfirmed",
+        label: `Mở ca lễ tân (${Core.getFinanceFundById(reqPayload.fundId || "cash_frontdesk").shortName})`,
+        createdAt: new Date().toISOString()
+      });
+
+      try {
+        const res = await fetchJson("/api/finance/shifts/open", {
+          method: "POST",
+          body: reqPayload,
+          headers: { "X-Idempotency-Key": idempotencyKey },
+          timeoutMs: 12000
+        });
+        if (res.status === 401) {
+          handleAuthExpired(res.data && res.data.error);
+          return { ok: false, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
+        }
+        if (!res.data) {
+          return {
+            ok: false,
+            offline: true,
+            unconfirmed: true,
+            idempotencyKey,
+            code: "UNCONFIRMED_RESPONSE",
+            error: "Chưa xác nhận — chờ đồng bộ (không nhận được phản hồi mở ca từ máy chủ)."
+          };
+        }
+        if (res.data.ok) {
+          removePendingFinanceIntent(idempotencyKey);
+          if (res.data.financeState) stateCache.financeState = Core.sanitizeFinanceState(res.data.financeState);
+          if (res.data.storeVersion) storeVersion = res.data.storeVersion;
+          lastSyncedAt = new Date().toISOString();
+          emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+          return res.data;
+        }
+        removePendingFinanceIntent(idempotencyKey);
+        if (res.data.financeState) {
+          stateCache.financeState = Core.sanitizeFinanceState(res.data.financeState);
+          emit({ type: "conflict_refresh", state: getSnapshot(), status: getStatus() });
+        }
+        return res.data;
+      } catch {
+        return {
+          ok: false,
+          offline: true,
+          unconfirmed: true,
+          idempotencyKey,
+          code: "NETWORK_UNCONFIRMED",
+          error: "Chưa xác nhận — chờ đồng bộ (mất kết nối khi mở ca). Bấm Kiểm tra & đồng bộ khi có mạng để tránh mở ca trùng."
+        };
+      }
+    }
+
+    async function closeCashShift(shiftId, payload = {}) {
+      const idempotencyKey = Core.sanitizeText(payload.idempotencyKey, 120)
+        || `shift_close_${shiftId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      const reqPayload = { ...payload, idempotencyKey };
+
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState, bookings) => {
+          const shifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
+          const dup = shifts.find((s) => s.closeIdempotencyKey === idempotencyKey);
+          if (dup) return { ok: true, idempotentReplay: true, shift: dup, nextFinanceState: fState };
+          const idx = shifts.findIndex((s) => s.id === shiftId);
+          if (idx < 0) return { ok: false, error: "Không tìm thấy ca cần kết." };
+          const shift = shifts[idx];
+          if (shift.status !== "open") return { ok: false, code: "SHIFT_ALREADY_CLOSED", shift, error: "Ca đã kết trước đó." };
+          const live = Core.computeShiftLiveSummary(shift, fState, bookings);
+          const countedCash = Core.parseSignedVND(reqPayload.countedCash);
+          const discrepancy = Core.roundVND(countedCash - live.expectedCash);
+          const explanation = Core.sanitizeText(reqPayload.discrepancyExplanation || reqPayload.explanation, 500);
+          if (discrepancy !== 0 && !explanation) {
+            return { ok: false, code: "EXPLANATION_REQUIRED", error: "Có chênh lệch — vui lòng nhập giải trình." };
+          }
+          const nowISO = new Date().toISOString();
+          const staffName = (authState && authState.user && authState.user.staffName) || shift.outgoingStaffName;
+          const updated = Core.sanitizeCashShift({
+            ...shift,
+            status: "pending_handover",
+            closedAt: nowISO,
+            closedBy: staffName,
+            closeIdempotencyKey: idempotencyKey,
+            cashInTotal: live.cashInTotal,
+            cashOutTotal: live.cashOutTotal,
+            bankRefTotal: live.bankRefTotal,
+            expectedCash: live.expectedCash,
+            countedCash,
+            discrepancy,
+            discrepancyExplanation: explanation,
+            discrepancyStatus: discrepancy !== 0 ? "pending_review" : "none",
+            closeNote: reqPayload.closeNote || "",
+            targetIncomingStaffName: reqPayload.targetIncomingStaffName || "",
+            lastTxId: live.lastTxId,
+            lastTxRecordedAt: live.lastTxRecordedAt,
+            includedTxIds: live.cashTransactions.map((t) => t.id),
+            bankRefTxIds: live.bankRefTransactions.map((t) => t.id),
+            includedTxSnapshot: live.cashTransactions,
+            updatedAt: nowISO
+          });
+          const nextShifts = shifts.slice();
+          nextShifts[idx] = updated;
+          return {
+            ok: true,
+            idempotentReplay: false,
+            shift: updated,
+            nextFinanceState: { ...fState, ledgerVersion: (fState.ledgerVersion || 0) + 1, cashShifts: nextShifts }
+          };
+        });
+      }
+
+      upsertPendingFinanceIntent({
+        idempotencyKey,
+        kind: "shift_close",
+        shiftId,
+        payload: reqPayload,
+        status: "unconfirmed",
+        label: `Kết ca & bàn giao (Thực đếm: ${Core.formatVND(reqPayload.countedCash)})`,
+        createdAt: new Date().toISOString()
+      });
+
+      try {
+        const res = await fetchJson(`/api/finance/shifts/${encodeURIComponent(shiftId)}/close`, {
+          method: "POST",
+          body: reqPayload,
+          headers: { "X-Idempotency-Key": idempotencyKey },
+          timeoutMs: 12000
+        });
+        if (res.status === 401) {
+          handleAuthExpired(res.data && res.data.error);
+          return { ok: false, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
+        }
+        if (!res.data) {
+          return {
+            ok: false,
+            offline: true,
+            unconfirmed: true,
+            idempotencyKey,
+            code: "UNCONFIRMED_RESPONSE",
+            error: "Chưa xác nhận — chờ đồng bộ (không nhận được phản hồi kết ca từ máy chủ)."
+          };
+        }
+        if (res.data.ok) {
+          removePendingFinanceIntent(idempotencyKey);
+          if (res.data.financeState) stateCache.financeState = Core.sanitizeFinanceState(res.data.financeState);
+          if (res.data.storeVersion) storeVersion = res.data.storeVersion;
+          lastSyncedAt = new Date().toISOString();
+          emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+          return res.data;
+        }
+        removePendingFinanceIntent(idempotencyKey);
+        if (res.data.financeState) {
+          stateCache.financeState = Core.sanitizeFinanceState(res.data.financeState);
+          emit({ type: "conflict_refresh", state: getSnapshot(), status: getStatus() });
+        } else if (res.status === 409) {
+          await pullLatestFromServer({ type: "conflict_refresh" });
+        }
+        return res.data;
+      } catch {
+        return {
+          ok: false,
+          offline: true,
+          unconfirmed: true,
+          idempotencyKey,
+          code: "NETWORK_UNCONFIRMED",
+          error: "Chưa xác nhận — chờ đồng bộ (mất kết nối khi kết ca). Không bấm kết ca lại ngay — hãy bấm Kiểm tra & đồng bộ khi có mạng."
+        };
+      }
+    }
+
+    async function confirmCashShift(shiftId, payload = {}) {
+      const idempotencyKey = Core.sanitizeText(payload.idempotencyKey, 120)
+        || `shift_confirm_${shiftId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      const reqPayload = { ...payload, idempotencyKey };
+
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState) => {
+          const shifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
+          const dup = shifts.find((s) => s.confirmIdempotencyKey === idempotencyKey);
+          if (dup) return { ok: true, idempotentReplay: true, shift: dup, nextFinanceState: fState };
+          const idx = shifts.findIndex((s) => s.id === shiftId);
+          if (idx < 0) return { ok: false, error: "Không tìm thấy biên bản giao ca." };
+          const shift = shifts[idx];
+          if (shift.status !== "pending_handover") return { ok: false, code: "SHIFT_NOT_PENDING_HANDOVER", error: "Ca này không ở trạng thái chờ nhận bàn giao." };
+          const receivedCash = Core.parseSignedVND(reqPayload.receivedCash);
+          const handoverCountDiff = Core.roundVND(receivedCash - shift.countedCash);
+          const staffName = (authState && authState.user && authState.user.staffName) || reqPayload.staffName || "Lễ tân ca sau";
+          const nowISO = new Date().toISOString();
+          const vnDate = Core.getVietnamTodayISO();
+          const nextShift = Core.sanitizeCashShift({
+            id: `shift_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+            shiftCode: `CA-${vnDate.replace(/-/g, "")}-${String(shifts.filter((s) => s.shiftDate === vnDate).length + 1).padStart(2, "0")}`,
+            fundId: shift.fundId,
+            shiftDate: vnDate,
+            status: "open",
+            previousShiftId: shift.id,
+            previousShiftCode: shift.shiftCode,
+            txWindowStart: shift.closedAt || nowISO,
+            openingBasisType: "previous_shift",
+            openingBasisRef: `Từ ca trước ${shift.shiftCode} (${shift.outgoingStaffName} bàn giao • thực nhận ${Core.formatVND(receivedCash)})`,
+            openingCash: receivedCash,
+            expectedCash: receivedCash,
+            handedOverBy: shift.outgoingStaffName,
+            outgoingStaffName: staffName,
+            openedAt: nowISO,
+            openedBy: staffName,
+            openIdempotencyKey: `${idempotencyKey}_next`
+          });
+          const confirmed = Core.sanitizeCashShift({
+            ...shift,
+            status: "confirmed",
+            incomingStaffName: staffName,
+            receivedCash,
+            handoverCountDiff,
+            confirmedAt: nowISO,
+            confirmNote: reqPayload.confirmNote || "",
+            confirmIdempotencyKey: idempotencyKey,
+            nextShiftId: nextShift.id,
+            discrepancyStatus: (shift.discrepancy !== 0 || handoverCountDiff !== 0) ? "pending_review" : shift.discrepancyStatus,
+            updatedAt: nowISO
+          });
+          const nextShifts = shifts.slice();
+          nextShifts[idx] = confirmed;
+          nextShifts.unshift(nextShift);
+          return {
+            ok: true,
+            idempotentReplay: false,
+            shift: confirmed,
+            nextShift,
+            nextFinanceState: { ...fState, ledgerVersion: (fState.ledgerVersion || 0) + 1, cashShifts: nextShifts }
+          };
+        });
+      }
+
+      upsertPendingFinanceIntent({
+        idempotencyKey,
+        kind: "shift_confirm",
+        shiftId,
+        payload: reqPayload,
+        status: "unconfirmed",
+        label: `Xác nhận nhận bàn giao (${Core.formatVND(reqPayload.receivedCash)})`,
+        createdAt: new Date().toISOString()
+      });
+
+      try {
+        const res = await fetchJson(`/api/finance/shifts/${encodeURIComponent(shiftId)}/confirm`, {
+          method: "POST",
+          body: reqPayload,
+          headers: { "X-Idempotency-Key": idempotencyKey },
+          timeoutMs: 12000
+        });
+        if (res.status === 401) {
+          handleAuthExpired(res.data && res.data.error);
+          return { ok: false, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
+        }
+        if (!res.data) {
+          return {
+            ok: false,
+            offline: true,
+            unconfirmed: true,
+            idempotencyKey,
+            code: "UNCONFIRMED_RESPONSE",
+            error: "Chưa xác nhận — chờ đồng bộ (không nhận được phản hồi xác nhận nhận ca từ máy chủ)."
+          };
+        }
+        if (res.data.ok) {
+          removePendingFinanceIntent(idempotencyKey);
+          if (res.data.financeState) stateCache.financeState = Core.sanitizeFinanceState(res.data.financeState);
+          if (res.data.storeVersion) storeVersion = res.data.storeVersion;
+          lastSyncedAt = new Date().toISOString();
+          emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
+          return res.data;
+        }
+        removePendingFinanceIntent(idempotencyKey);
+        if (res.data.financeState) {
+          stateCache.financeState = Core.sanitizeFinanceState(res.data.financeState);
+          emit({ type: "conflict_refresh", state: getSnapshot(), status: getStatus() });
+        }
+        return res.data;
+      } catch {
+        return {
+          ok: false,
+          offline: true,
+          unconfirmed: true,
+          idempotencyKey,
+          code: "NETWORK_UNCONFIRMED",
+          error: "Chưa xác nhận — chờ đồng bộ (mất kết nối khi xác nhận nhận ca). Hãy bấm Kiểm tra & đồng bộ khi có mạng."
+        };
+      }
+    }
+
+    async function resolveCashShiftDiscrepancy(shiftId, payload = {}) {
+      if (mode !== "server") {
+        return applyLocalFinanceFallbackMutation((fState) => {
+          const shifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
+          const idx = shifts.findIndex((s) => s.id === shiftId);
+          if (idx < 0) return { ok: false, error: "Không tìm thấy biên bản ca." };
+          const shift = shifts[idx];
+          const nowISO = new Date().toISOString();
+          const staffName = (authState && authState.user && authState.user.staffName) || "Quản lý";
+          const note = Core.sanitizeText(payload.resolutionNote || payload.reason, 500);
+          if (!note) return { ok: false, error: "Vui lòng nhập lý do xử lý." };
+          const updated = Core.sanitizeCashShift({
+            ...shift,
+            discrepancyStatus: "resolved",
+            resolvedBy: staffName,
+            resolvedAt: nowISO,
+            resolutionNote: note,
+            adjustmentHistory: [...(shift.adjustmentHistory || []), {
+              id: `sadj_${Date.now().toString(36)}`,
+              ts: nowISO,
+              operator: staffName,
+              action: payload.createAdjustment ? "adjustment_voucher" : "resolve_without_voucher",
+              adjustmentAmount: payload.createAdjustment ? Core.parseSignedVND(payload.adjustmentAmount || shift.discrepancy) : 0,
+              reason: note
+            }],
+            updatedAt: nowISO
+          });
+          const nextShifts = shifts.slice();
+          nextShifts[idx] = updated;
+          return {
+            ok: true,
+            shift: updated,
+            nextFinanceState: { ...fState, ledgerVersion: (fState.ledgerVersion || 0) + 1, cashShifts: nextShifts }
+          };
+        });
+      }
+      return postFinanceSimple(`/api/finance/shifts/${encodeURIComponent(shiftId)}/resolve`, "POST", payload || {});
+    }
+
     async function appendFinanceSyncLog(entry) {
       if (mode !== "server") return { ok: true };
       try {
@@ -1769,6 +2204,7 @@
       getPendingFinanceIntents: readPendingFinanceIntents,
       dismissPendingFinanceIntent: removePendingFinanceIntent,
       lookupFinanceByIdempotency,
+      lookupShiftByIdempotency,
       reconcilePendingFinanceIntents,
       retryPendingFinanceIntent,
       recordFinanceTransaction,
@@ -1782,6 +2218,10 @@
       saveSupplierInvoice,
       deleteSupplierInvoice,
       paySupplierInvoice,
+      openCashShift,
+      closeCashShift,
+      confirmCashShift,
+      resolveCashShiftDiscrepancy,
       appendFinanceSyncLog,
       getHousekeepingTasks: () => stateCache.housekeepingTasks,
       getMaintenanceIssues: () => stateCache.maintenanceIssues,

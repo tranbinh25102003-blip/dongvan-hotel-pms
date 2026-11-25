@@ -3148,6 +3148,7 @@
     ["history-modal", "history"],
     ["payables-modal", "payables"],
     ["cashbook-modal", "cashbook"],
+    ["shifts-modal", "cash_shifts"],
     ["receivables-modal", "receivables"],
     ["costs-modal", "operating_costs"],
     ["dorm-modal", "dorm"],
@@ -3305,11 +3306,13 @@
     const canBackup = userCan("admin:backup");
     const canHkCreate = userCan("housekeeping:create");
     const canArRead = userCan("finance:ar_read");
+    const canShiftRead = userCan("finance:shift_read");
     const canCashbookRead = userCan("finance:cashbook_read");
     const canPayablesRead = userCan("finance:payables_read");
 
     if ($("btn-open-costs")) $("btn-open-costs").style.display = canCosts ? "" : "none";
     if ($("btn-open-receivables")) $("btn-open-receivables").style.display = canArRead ? "" : "none";
+    if ($("btn-open-shifts")) $("btn-open-shifts").style.display = canShiftRead ? "" : "none";
     if ($("btn-open-cashbook")) $("btn-open-cashbook").style.display = canCashbookRead ? "" : "none";
     if ($("btn-open-payables")) $("btn-open-payables").style.display = canPayablesRead ? "" : "none";
     if ($("btn-open-accounts")) $("btn-open-accounts").style.display = canAccounts ? "" : "none";
@@ -3325,13 +3328,15 @@
     if (!canBackup && $("backup-restore-modal")) $("backup-restore-modal").classList.remove("open");
     if (!canArRead && $("receivables-modal")) $("receivables-modal").classList.remove("open");
     if (!canArRead && $("monthly-receipts-modal")) $("monthly-receipts-modal").classList.remove("open");
+    if (!canShiftRead && $("shifts-modal")) $("shifts-modal").classList.remove("open");
+    if (!canShiftRead && $("shift-minutes-modal")) $("shift-minutes-modal").classList.remove("open");
     if (!canCashbookRead && $("cashbook-modal")) $("cashbook-modal").classList.remove("open");
     if (!canPayablesRead && $("payables-modal")) $("payables-modal").classList.remove("open");
 
     if (role === "housekeeping") {
       // Strictly lock out calendar, booking modals, PDF, costs, finance, and accounts even if ?view=pc was passed
       delete document.body.dataset.viewMode;
-      ["booking-modal", "dorm-modal", "day-report-modal", "group-report-modal", "history-modal", "backup-restore-modal", "confirm-pdf-modal", "costs-modal", "accounts-modal", "receivables-modal", "cashbook-modal", "payables-modal", "monthly-receipts-modal"].forEach((id) => {
+      ["booking-modal", "dorm-modal", "day-report-modal", "group-report-modal", "history-modal", "backup-restore-modal", "confirm-pdf-modal", "costs-modal", "accounts-modal", "receivables-modal", "shifts-modal", "shift-minutes-modal", "cashbook-modal", "payables-modal", "monthly-receipts-modal"].forEach((id) => {
         if ($(id)) $(id).classList.remove("open");
       });
       if ($("btn-hk-close")) $("btn-hk-close").style.display = "none";
@@ -3975,6 +3980,7 @@
         $("backup-restore-modal").classList.contains("open") ||
         $("receivables-modal").classList.contains("open") ||
         $("cashbook-modal").classList.contains("open") ||
+        ($("shifts-modal") && $("shifts-modal").classList.contains("open")) ||
         ($("payables-modal") && $("payables-modal").classList.contains("open"))
       );
     }
@@ -4195,6 +4201,11 @@
     $("btn-open-receivables").addEventListener("click", () => {
       if (window.PMSFinanceApp) window.PMSFinanceApp.openReceivables({ asOfDate: state.lastArAsOfDate || getVietnamTodayISO() });
     });
+    if ($("btn-open-shifts")) {
+      $("btn-open-shifts").addEventListener("click", () => {
+        if (window.PMSFinanceApp) window.PMSFinanceApp.openShifts();
+      });
+    }
     $("btn-open-cashbook").addEventListener("click", () => {
       if (window.PMSFinanceApp) window.PMSFinanceApp.openCashbook();
     });
@@ -5326,6 +5337,14 @@
         else if ($("hk-workspace").classList.contains("open") && getUserRole() !== "housekeeping") $("hk-workspace").classList.remove("open");
         else if ($("confirm-pdf-modal").classList.contains("open")) closeModal("confirm-pdf-modal");
         else if ($("monthly-receipts-modal").classList.contains("open")) closeModal("monthly-receipts-modal");
+        else if ($("shift-minutes-modal") && $("shift-minutes-modal").classList.contains("open")) {
+          if (window.PMSFinanceApp) window.PMSFinanceApp.closeShiftMinutes();
+          else closeModal("shift-minutes-modal");
+        }
+        else if ($("shifts-modal") && $("shifts-modal").classList.contains("open")) {
+          if (window.PMSFinanceApp) window.PMSFinanceApp.closeShifts();
+          else closeModal("shifts-modal");
+        }
         else if ($("payables-modal") && $("payables-modal").classList.contains("open")) closeModal("payables-modal");
         else if ($("cashbook-modal").classList.contains("open")) closeModal("cashbook-modal");
         else if ($("receivables-modal").classList.contains("open")) closeModal("receivables-modal");

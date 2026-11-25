@@ -28,6 +28,7 @@
     FINANCE_FUNDS,
     PAYMENT_METHODS,
     REFUND_CATEGORIES,
+    SHIFT_STATUSES,
     getVietnamTodayISO,
     formatDateVN,
     parseVND,
@@ -41,9 +42,14 @@
     computeCashbookReport,
     computeCalendarFinanceKPIs,
     computeSupplierPayablesReport,
+    getShiftOpeningBasis,
+    computeShiftLiveSummary,
+    computeShiftsReport,
     generateReceivablesCsvContent,
     generateCashbookCsvContent,
     generateSupplierPayablesCsvContent,
+    generateShiftsCsvContent,
+    generateShiftHandoverHtml,
     getFinanceFundById,
     getPaymentMethodMeta
   } = Core;
@@ -68,7 +74,13 @@
     apExpandedIds: new Set(),
     apPayInvoiceId: null,
     apFocusInvoiceId: null,
-    apStaleConflict: null // { invoiceId, code, message, currentRemaining, pendingPayload }
+    apStaleConflict: null, // { invoiceId, code, message, currentRemaining, pendingPayload }
+    // Phase 3: Front Desk Cash Shift Handover
+    shiftsTab: "desk", // "desk" | "history"
+    shiftCloseOpen: false,
+    shiftCloseWatermark: null, // { shiftId, expectedTxCount, expectedLastTxId, expectedCash, knownTxIds }
+    shiftStaleConflict: null, // { message, newTransactions, liveExpectedCash, liveTxCount, liveLastTxId, liveSummary }
+    shiftMinutesId: null
   };
 
   const $ = (id) => document.getElementById(id);
@@ -132,6 +144,7 @@
     closeReceivables();
     closeCashbook();
     closePayables();
+    closeShifts();
     closeMonthlyReceipts();
     const isMobile = document.body.classList.contains("is-mobile-ui") || window.innerWidth <= 768;
     if (isMobile && root.PMSMobileApi && typeof root.PMSMobileApi.openBooking === "function") {
@@ -177,7 +190,7 @@
 
   function syncPendingBars() {
     const html = renderPendingIntentsMarkup();
-    ["ar-pending-intents-bar", "cb-pending-intents-bar", "ap-pending-intents-bar"].forEach((id) => {
+    ["ar-pending-intents-bar", "cb-pending-intents-bar", "ap-pending-intents-bar", "shifts-pending-sync-bar"].forEach((id) => {
       const el = $(id);
       if (!el) return;
       if (html) {
@@ -192,13 +205,14 @@
 
   async function handleRetryPendingIntent(idemKey) {
     if (!idemKey || typeof store.retryPendingFinanceIntent !== "function") return;
-    showToast("Đang kiểm tra trạng thái chứng từ trên máy chủ...", "info");
+    showToast("Đang kiểm tra trạng thái trên máy chủ...", "info");
     const res = await store.retryPendingFinanceIntent(idemKey);
     if (res && res.ok) {
+      const code = (res.transaction && res.transaction.voucherCode) || (res.shift && res.shift.shiftCode) || "";
       if (res.alreadyCommitted || res.idempotentReplay) {
-        showToast(`Máy chủ đã ghi nhận chứng từ ${res.transaction ? res.transaction.voucherCode : ""} trước đó — không tạo trùng!`, "success");
+        showToast(`Máy chủ đã ghi nhận ${code || "thao tác"} trước đó — không tạo trùng!`, "success");
       } else {
-        showToast(`Đã đồng bộ thành công chứng từ ${res.transaction ? res.transaction.voucherCode : ""}.`, "success");
+        showToast(`Đã đồng bộ thành công ${code || "giao dịch"}.`, "success");
       }
       notifyHostUI();
       refreshOpenModals();
@@ -2608,6 +2622,939 @@
   }
 
   /* ============================================================================
+     5b. FRONT DESK CASH SHIFT HANDOVER (#shifts-modal & #shift-minutes-modal — v1.8.0)
+     ============================================================================ */
+
+  function getCurrentAuthUser() {
+    const auth = typeof store.getAuthState === "function" ? store.getAuthState() : null;
+    return (auth && auth.user) || { username: "", staffName: "Nhân viên", role: typeof store.getRole === "function" ? store.getRole() : "reception" };
+  }
+
+  function isCurrentUserSameAsOutgoing(shift) {
+    const u = getCurrentAuthUser();
+    const myUser = String(u.username || "").trim().toLowerCase();
+    const myName = String(u.staffName || "").trim().toLowerCase();
+    const outUser = String(shift.outgoingUsername || "").trim().toLowerCase();
+    const outName = String(shift.outgoingStaffName || "").trim().toLowerCase();
+    if (myUser && outUser && myUser === outUser) return true;
+    if (myName && outName && myName === outName) return true;
+    return false;
+  }
+
+  function openShifts(opts = {}) {
+    if (!can("finance:shift_read")) {
+      showToast("Bạn không có quyền truy cập Giao ca lễ tân.", "error");
+      return;
+    }
+    const modal = $("shifts-modal");
+    if (!modal) return;
+    if (opts.tab === "history" || opts.tab === "desk") {
+      uiState.shiftsTab = opts.tab;
+    } else {
+      uiState.shiftsTab = "desk";
+    }
+    uiState.shiftStaleConflict = null;
+    modal.classList.add("open");
+    syncPendingBars();
+    renderShifts();
+    if (root.PMSPcApi && typeof root.PMSPcApi.syncActiveNav === "function") {
+      root.PMSPcApi.syncActiveNav();
+    }
+  }
+
+  function closeShifts() {
+    const modal = $("shifts-modal");
+    if (modal) modal.classList.remove("open");
+    closeShiftMinutes();
+    uiState.shiftCloseOpen = false;
+    uiState.shiftCloseWatermark = null;
+    uiState.shiftStaleConflict = null;
+    if (root.PMSPcApi && typeof root.PMSPcApi.syncActiveNav === "function") {
+      root.PMSPcApi.syncActiveNav();
+    }
+  }
+
+  function openShiftMinutes(shiftId) {
+    if (!shiftId || !can("finance:shift_read")) return;
+    uiState.shiftMinutesId = shiftId;
+    const modal = $("shift-minutes-modal");
+    if (!modal) return;
+    modal.classList.add("open");
+    renderShiftMinutes();
+  }
+
+  function closeShiftMinutes() {
+    uiState.shiftMinutesId = null;
+    const modal = $("shift-minutes-modal");
+    if (modal) modal.classList.remove("open");
+  }
+
+  function getShiftsFilters() {
+    return {
+      dateFrom: ($("shifts-filter-from") && $("shifts-filter-from").value) || "",
+      dateTo: ($("shifts-filter-to") && $("shifts-filter-to").value) || "",
+      staff: ($("shifts-filter-staff") && $("shifts-filter-staff").value) || "all",
+      fundId: ($("shifts-filter-fund") && $("shifts-filter-fund").value) || "all",
+      status: ($("shifts-filter-status") && $("shifts-filter-status").value) || "all",
+      search: ($("shifts-filter-search") && $("shifts-filter-search").value) || ""
+    };
+  }
+
+  function renderShiftVoucherRowsHtml(txs, emptyText) {
+    if (!txs || txs.length === 0) {
+      return `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:14px;">${escapeHtml(emptyText)}</td></tr>`;
+    }
+    return txs.map((t) => {
+      const target = t.txType === "supplier_payment"
+        ? `HĐ ${t.invoiceVoucherNo || t.invoiceId} — ${t.supplierName || "NCC"}`
+        : t.txType === "fund_transfer"
+          ? `${t.fromFundName || t.fromFundId} → ${t.toFundName || t.toFundId}`
+          : (t.groupCodeDisplay ? `Đoàn ${t.groupCodeDisplay} (${t.guestName || ""})` : `${t.roomLabel || ""} ${t.guestName || ""}`.trim() || t.note || "—");
+      const jumpAttrs = t.bookingId
+        ? `data-shift-jump-booking="${escapeHtml(t.bookingId)}"`
+        : t.invoiceId
+          ? `data-shift-jump-invoice="${escapeHtml(t.invoiceId)}" data-shift-voucher-label="${escapeHtml(`${t.voucherCode} • ${target} (${formatSignedVND(t.signedCashImpact)})`)}"`
+          : `data-shift-jump-voucher="${escapeHtml(t.id)}" data-shift-voucher-label="${escapeHtml(`${t.voucherCode} • ${t.txTypeLabel}: ${target} (${formatSignedVND(t.signedCashImpact)})`)}"`;
+      return `
+        <tr class="shift-voucher-row" ${jumpAttrs} title="Bấm để mở đơn phòng / hóa đơn / chứng từ gốc">
+          <td><span class="fin-voucher-code">${escapeHtml(t.voucherCode)}</span></td>
+          <td>${escapeHtml(formatDateTimeVN(t.recordedAt))}</td>
+          <td><span class="fin-pill ${t.signedCashImpact < 0 ? "warn" : "ok"}">${escapeHtml(t.txTypeLabel)}</span></td>
+          <td>
+            <span class="fin-link-btn">${escapeHtml(target)}</span>
+            ${t.note ? `<div style="font-size:11px;color:var(--text-muted);">${escapeHtml(t.note)}</div>` : ""}
+          </td>
+          <td class="num" style="font-weight:800;color:${t.signedCashImpact < 0 ? "#dc2626" : "var(--status-paid,#15803d)"};">${escapeHtml(formatSignedVND(t.signedCashImpact))}</td>
+          <td>${escapeHtml(t.operator || "—")}</td>
+        </tr>
+      `;
+    }).join("");
+  }
+
+  function renderShiftDesk(report) {
+    const container = $("shifts-desk-content");
+    if (!container) return;
+
+    const user = getCurrentAuthUser();
+    const isManager = can("finance:shift_manage");
+    const pendingList = report.pendingHandoverShifts.filter((s) => s.fundId === "cash_frontdesk");
+    const pendingShift = pendingList[0] || null;
+    const openShift = report.activeOpenShift;
+    const basis = report.openingBasis;
+
+    const legacyReminderHtml = report.unassignedLegacyCount > 0
+      ? `<div class="shift-banner info">
+          <strong>Lưu ý dữ liệu chuyển tiếp:</strong> Hiện có <strong>${report.unassignedLegacyCount} khoản thu cũ chưa gán quỹ</strong> (tổng <strong>${escapeHtml(formatVND(report.unassignedLegacyAmount))}</strong>). Các khoản này <strong>KHÔNG cộng vào tiền mặt bàn giao ca</strong> cho tới khi Quản lý xác minh ngày thu và quỹ nhận.
+        </div>`
+      : "";
+
+    // CASE 1: Pending handover waiting for incoming shift confirmation
+    if (pendingShift) {
+      const sameOutgoing = isCurrentUserSameAsOutgoing(pendingShift);
+      const canConfirm = can("finance:shift_write") && (!sameOutgoing || isManager);
+      const diffClass = pendingShift.discrepancy === 0 ? "matched" : pendingShift.discrepancy < 0 ? "short" : "over";
+      container.innerHTML = `
+        ${legacyReminderHtml}
+        <div class="shift-banner warn">
+          <strong>⏳ Ca ${escapeHtml(pendingShift.shiftCode)} đang chờ người nhận bàn giao xác nhận tiền mặt tại két.</strong>
+          ${sameOutgoing && !isManager ? " Bạn là người bàn giao ca này — lễ tân nhận ca cần đăng nhập bằng tài khoản của chính mình để xác nhận." : ""}
+        </div>
+
+        <div class="shift-hero-card">
+          <div class="shift-hero-head">
+            <div>
+              <div class="shift-code-title">
+                <span>${escapeHtml(pendingShift.shiftCode)}</span>
+                <span class="shift-status-pill pending_handover">Chờ nhận bàn giao</span>
+                ${pendingShift.isOvernight ? '<span class="shift-status-pill overnight">Ca qua đêm</span>' : ""}
+                ${pendingShift.hasDiscrepancy ? `<span class="shift-status-pill discrepancy">${escapeHtml(pendingShift.discrepancyLabel)} ${escapeHtml(formatSignedVND(pendingShift.discrepancy))}</span>` : ""}
+              </div>
+              <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">Quỹ: <strong>${escapeHtml(pendingShift.fundName)}</strong></div>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" data-shift-open-minutes="${escapeHtml(pendingShift.id)}">Xem biên bản đầy đủ</button>
+          </div>
+
+          <div class="shift-meta-grid">
+            <div>Người giao ca: <strong>${escapeHtml(pendingShift.outgoingStaffName)}</strong></div>
+            <div>Người nhận dự kiến: <strong>${escapeHtml(pendingShift.targetIncomingStaffName || "Lễ tân ca kế tiếp")}</strong></div>
+            <div>Mở ca lúc: <strong>${escapeHtml(pendingShift.openedAtVN)}</strong></div>
+            <div>Kết ca lúc: <strong>${escapeHtml(pendingShift.closedAtVN)}</strong></div>
+            <div style="grid-column:1/-1;">Căn cứ đầu ca: <strong>${escapeHtml(pendingShift.openingBasisRef)}</strong></div>
+          </div>
+
+          <div class="shift-kpi-grid">
+            <div class="shift-kpi-box">
+              <div class="shift-kpi-label">Số đầu ca</div>
+              <div class="shift-kpi-val">${escapeHtml(formatVND(pendingShift.openingCash))}</div>
+            </div>
+            <div class="shift-kpi-box">
+              <div class="shift-kpi-label">Dự kiến tại két</div>
+              <div class="shift-kpi-val">${escapeHtml(formatVND(pendingShift.expectedCash))}</div>
+              <div class="shift-kpi-sub">+${escapeHtml(formatVND(pendingShift.cashInTotal))} / -${escapeHtml(formatVND(pendingShift.cashOutTotal))}</div>
+            </div>
+            <div class="shift-kpi-box highlight">
+              <div class="shift-kpi-label">Người giao thực đếm</div>
+              <div class="shift-kpi-val" id="shift-pending-counted-val">${escapeHtml(formatVND(pendingShift.countedCash))}</div>
+              <div class="shift-kpi-sub">Số tiền bàn giao thực tế</div>
+            </div>
+            <div class="shift-kpi-box">
+              <div class="shift-kpi-label">Chênh lệch giao ca</div>
+              <div class="shift-kpi-val" style="color:${pendingShift.discrepancy === 0 ? "#15803d" : "#dc2626"};">${escapeHtml(pendingShift.discrepancyLabel)} (${escapeHtml(formatSignedVND(pendingShift.discrepancy))})</div>
+              ${pendingShift.discrepancyExplanation ? `<div class="shift-kpi-sub">Giải trình: ${escapeHtml(pendingShift.discrepancyExplanation)}</div>` : ""}
+            </div>
+          </div>
+
+          ${canConfirm ? `
+            <div class="shift-section-card" style="margin-bottom:0;border-color:var(--accent-primary);">
+              <div class="shift-section-title">
+                <span>🤝 Xác nhận nhận bàn giao két &amp; tự động mở ca mới (${escapeHtml(user.staffName)})</span>
+              </div>
+              <div id="shift-confirm-error" class="form-error"></div>
+              <div class="shift-form-grid">
+                <div class="field">
+                  <label for="shift-confirm-received">Số tiền mặt thực nhận tại két (VNĐ) *</label>
+                  <input id="shift-confirm-received" class="input" type="text" inputmode="numeric" value="${escapeHtml(formatNumberInput(pendingShift.countedCash))}" data-shift-counted-ref="${pendingShift.countedCash}" />
+                </div>
+                <div class="field">
+                  <label for="shift-confirm-next-label">Tên ca mới (tùy chọn)</label>
+                  <input id="shift-confirm-next-label" class="input" type="text" placeholder="VD: Ca chiều, Ca đêm..." />
+                </div>
+                <div class="field shift-form-full">
+                  <div id="shift-confirm-diff-preview" class="shift-diff-preview ${diffClass}">
+                    Khớp số người giao đếm (${escapeHtml(formatVND(pendingShift.countedCash))}). Xác nhận sẽ tự mở ca mới với số đầu ca = ${escapeHtml(formatVND(pendingShift.countedCash))}${pendingShift.discrepancy !== 0 ? " và GIỮ NGUYÊN chênh lệch ca trước cho Quản lý xử lý." : "."}
+                  </div>
+                </div>
+                <div class="field shift-form-full">
+                  <label for="shift-confirm-note">Ghi chú nhận bàn giao (bắt buộc nếu đếm lại khác số người giao)</label>
+                  <input id="shift-confirm-note" class="input" type="text" placeholder="VD: Đã kiểm đếm đủ tiền lẻ và tiền chẵn tại két..." />
+                </div>
+              </div>
+              <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
+                <button type="button" class="btn btn-primary" id="btn-shift-confirm-submit" data-shift-id="${escapeHtml(pendingShift.id)}">✓ Xác nhận nhận tiền &amp; mở ca mới</button>
+              </div>
+            </div>
+          ` : `
+            <div class="shift-banner info" style="margin-bottom:0;">
+              Đang chờ lễ tân ca kế tiếp đăng nhập bằng tài khoản của họ để xác nhận nhận <strong>${escapeHtml(formatVND(pendingShift.countedCash))}</strong>.
+            </div>
+          `}
+        </div>
+      `;
+      return;
+    }
+
+    // CASE 2: Active Open Shift on cash_frontdesk
+    if (openShift) {
+      const prevCloseDraft = uiState.shiftCloseOpen ? {
+        counted: $("shift-close-counted") ? $("shift-close-counted").value : "",
+        explanation: $("shift-close-explanation") ? $("shift-close-explanation").value : "",
+        targetStaff: $("shift-close-target-staff") ? $("shift-close-target-staff").value : "",
+        note: $("shift-close-note") ? $("shift-close-note").value : ""
+      } : null;
+      const stale = uiState.shiftStaleConflict;
+      const closeExpected = stale ? stale.liveExpectedCash : openShift.expectedCash;
+      const staleBannerHtml = stale
+        ? `<div id="shift-stale-banner" class="shift-banner danger">
+            <div style="font-weight:800;margin-bottom:6px;">⚠️ ${escapeHtml(stale.message)}</div>
+            ${(stale.newTransactions || []).length > 0 ? `
+              <ul style="margin:4px 0 8px 18px;padding:0;font-size:12.5px;">
+                ${stale.newTransactions.map((nt) => `<li><strong>${escapeHtml(nt.voucherCode)}</strong> (${escapeHtml(nt.txTypeLabel)}): <strong>${escapeHtml(formatSignedVND(nt.signedCashImpact))}</strong> — ${escapeHtml(nt.guestName || nt.supplierName || nt.note || "")}</li>`).join("")}
+              </ul>
+            ` : ""}
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+              <span>Số dự kiến tại két mới nhất: <strong>${escapeHtml(formatVND(stale.liveExpectedCash))}</strong> (${stale.liveTxCount} chứng từ)</span>
+              <button type="button" class="btn btn-sm btn-primary" id="btn-shift-accept-stale">✓ Cập nhật số mới &amp; tiếp tục kết ca</button>
+            </div>
+          </div>`
+        : "";
+
+      container.innerHTML = `
+        ${legacyReminderHtml}
+        ${openShift.openingBasisType === "unestablished" ? `
+          <div class="shift-banner warn">
+            <strong>⚠️ Chưa xác lập số đầu ca:</strong> Quỹ tiền mặt tại quầy chưa có số dư đầu kỳ đã xác minh hoặc biên bản kiểm đếm mở đầu. Số đầu ca đang tạm tính <strong>0 đ</strong> — quản lý nên khai báo số dư đầu kỳ hoặc lập biên bản kiểm đếm tại Sổ quỹ.
+          </div>
+        ` : ""}
+        ${staleBannerHtml}
+
+        <div class="shift-hero-card">
+          <div class="shift-hero-head">
+            <div>
+              <div class="shift-code-title">
+                <span>${escapeHtml(openShift.shiftCode)}</span>
+                ${openShift.shiftLabel ? `<span style="font-weight:600;color:var(--text-secondary);">• ${escapeHtml(openShift.shiftLabel)}</span>` : ""}
+                <span class="shift-status-pill open">Đang trong ca</span>
+                ${openShift.isOvernight ? '<span class="shift-status-pill overnight">Ca qua đêm</span>' : ""}
+                ${openShift.openingBasisType === "unestablished" ? '<span class="shift-status-pill pending_handover">Chưa xác lập số đầu ca</span>' : ""}
+              </div>
+              <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">Quỹ: <strong>${escapeHtml(openShift.fundName)}</strong> • Thao tác giao ca chỉ xác nhận người giữ két, không tạo phiếu thu/chi mới.</div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button type="button" class="btn btn-primary btn-sm" id="btn-shift-toggle-close">
+                ${uiState.shiftCloseOpen ? "Ẩn khung kết ca" : "Đếm tiền & Kết ca"}
+              </button>
+            </div>
+          </div>
+
+          <div class="shift-meta-grid">
+            <div>Người giữ ca: <strong>${escapeHtml(openShift.outgoingStaffName)}</strong></div>
+            <div>Người giao ca trước: <strong>${escapeHtml(openShift.handedOverBy || "Đầu kỳ")}</strong></div>
+            <div>Thời điểm mở ca: <strong>${escapeHtml(openShift.openedAtVN)}</strong></div>
+            <div>Số chứng từ tiền mặt: <strong>${openShift.txCount} phiếu</strong></div>
+            <div style="grid-column:1/-1;">Căn cứ đầu ca: <strong>${escapeHtml(openShift.openingBasisRef)}</strong></div>
+          </div>
+
+          <div class="shift-kpi-grid">
+            <div class="shift-kpi-box">
+              <div class="shift-kpi-label">Số đầu ca</div>
+              <div class="shift-kpi-val" id="shift-live-opening">${openShift.openingBasisType === "unestablished" ? "0 đ (Chưa xác lập)" : escapeHtml(formatVND(openShift.openingCash))}</div>
+            </div>
+            <div class="shift-kpi-box">
+              <div class="shift-kpi-label">Tiền mặt vào</div>
+              <div class="shift-kpi-val" style="color:#15803d;" id="shift-live-in">+${escapeHtml(formatVND(openShift.cashInTotal))}</div>
+            </div>
+            <div class="shift-kpi-box">
+              <div class="shift-kpi-label">Tiền mặt ra</div>
+              <div class="shift-kpi-val" style="color:#dc2626;" id="shift-live-out">-${escapeHtml(formatVND(openShift.cashOutTotal))}</div>
+            </div>
+            <div class="shift-kpi-box highlight">
+              <div class="shift-kpi-label">Dự kiến tại két</div>
+              <div class="shift-kpi-val" id="shift-live-expected">${escapeHtml(formatVND(openShift.expectedCash))}</div>
+              <div class="shift-kpi-sub">Không gồm ${escapeHtml(formatVND(openShift.bankRefTotal))} CK ngân hàng</div>
+            </div>
+          </div>
+
+          ${uiState.shiftCloseOpen ? `
+            <div class="shift-section-card" id="shift-close-form-card" style="border-color:var(--accent-primary);margin-bottom:0;">
+              <div class="shift-section-title">
+                <span>🧮 Kiểm đếm két &amp; Kết ca bàn giao (${escapeHtml(openShift.shiftCode)})</span>
+                <span style="font-size:12px;color:var(--text-secondary);">Số theo sổ hiện tại: <strong id="shift-close-expected-ref">${escapeHtml(formatVND(closeExpected))}</strong></span>
+              </div>
+              <div id="shift-close-error" class="form-error"></div>
+              <div class="shift-form-grid">
+                <div class="field">
+                  <label for="shift-close-counted">Số tiền mặt thực đếm tại két (VNĐ) *</label>
+                  <input id="shift-close-counted" class="input" type="text" inputmode="numeric" placeholder="Nhập số tiền thực đếm..." data-shift-expected-ref="${closeExpected}" />
+                </div>
+                <div class="field">
+                  <label for="shift-close-target-staff">Người nhận ca kế tiếp (tùy chọn)</label>
+                  <input id="shift-close-target-staff" class="input" type="text" placeholder="VD: Lễ tân Ca Chiều..." />
+                </div>
+                <div class="field shift-form-full">
+                  <div id="shift-close-diff-preview" class="shift-diff-preview">
+                    Nhập số tiền thực đếm để xem chênh lệch = Thực đếm − Dự kiến tại két (${escapeHtml(formatVND(closeExpected))}).
+                  </div>
+                </div>
+                <div class="field shift-form-full" id="shift-close-explanation-wrap" style="display:none;">
+                  <label for="shift-close-explanation">Giải trình chênh lệch (bắt buộc khi Thừa / Thiếu) *</label>
+                  <input id="shift-close-explanation" class="input" type="text" placeholder="Ghi rõ nguyên nhân thừa/thiếu để gửi Quản lý xem xét..." />
+                </div>
+                <div class="field shift-form-full">
+                  <label for="shift-close-note">Ghi chú bàn giao ca</label>
+                  <input id="shift-close-note" class="input" type="text" placeholder="VD: Bàn giao đủ tiền lẻ, chìa khóa tủ két..." />
+                </div>
+              </div>
+              <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap;">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-shift-cancel-close">Hủy</button>
+                <button type="button" class="btn btn-primary" id="btn-shift-close-submit" data-shift-id="${escapeHtml(openShift.id)}">✓ Kết ca &amp; bàn giao két</button>
+              </div>
+            </div>
+          ` : ""}
+        </div>
+
+        <div class="shift-section-card">
+          <div class="shift-section-title">
+            <span>💵 Phát sinh tiền mặt tại quầy trong ca (${openShift.cashTransactions.length} chứng từ)</span>
+            <span style="font-size:11.5px;color:var(--text-secondary);">Bấm từng dòng để mở đơn phòng / hóa đơn gốc</span>
+          </div>
+          <div class="shift-table-wrap">
+            <table class="fin-tx-table">
+              <thead>
+                <tr>
+                  <th>Mã CT</th>
+                  <th>Thời điểm</th>
+                  <th>Loại</th>
+                  <th>Đơn / NCC / Chuyển quỹ</th>
+                  <th class="num">Tiền mặt két</th>
+                  <th>Người ghi</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${renderShiftVoucherRowsHtml(openShift.cashTransactions, "Chưa có giao dịch tiền mặt tại quầy nào trong ca này.")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="shift-section-card">
+          <div class="shift-section-title">
+            <span>🏦 Khách chuyển khoản ngân hàng trong ca — chỉ để tra cứu (${openShift.bankRefTransactions.length} giao dịch • ${escapeHtml(formatVND(openShift.bankRefTotal))})</span>
+            <span class="shift-status-pill confirmed">KHÔNG cộng vào tiền mặt bàn giao</span>
+          </div>
+          <div class="shift-table-wrap">
+            <table class="fin-tx-table">
+              <thead>
+                <tr>
+                  <th>Mã CT</th>
+                  <th>Thời điểm</th>
+                  <th>Loại</th>
+                  <th>Đơn / Khách hàng</th>
+                  <th class="num">Số tiền CK</th>
+                  <th>Người ghi</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${renderShiftVoucherRowsHtml(openShift.bankRefTransactions, "Chưa có giao dịch khách chuyển khoản ngân hàng trong ca.")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+      if (prevCloseDraft) {
+        if ($("shift-close-counted")) $("shift-close-counted").value = prevCloseDraft.counted;
+        if ($("shift-close-explanation")) $("shift-close-explanation").value = prevCloseDraft.explanation;
+        if ($("shift-close-target-staff")) $("shift-close-target-staff").value = prevCloseDraft.targetStaff;
+        if ($("shift-close-note")) $("shift-close-note").value = prevCloseDraft.note;
+        updateCloseDiffPreview();
+      }
+      return;
+    }
+
+    // CASE 3: No open shift and no pending handover -> Open Shift card
+    container.innerHTML = `
+      ${legacyReminderHtml}
+      ${!basis.established ? `
+        <div class="shift-banner warn">
+          <strong>⚠️ Chưa xác lập số đầu ca:</strong> Hiện chưa có biên bản bàn giao ca trước, số dư đầu kỳ đã xác minh hoặc biên bản kiểm đếm mở đầu cho quỹ Tiền mặt tại quầy. Bạn vẫn có thể mở ca với nhãn <strong>"Chưa xác lập số đầu ca"</strong> để theo dõi phát sinh, hoặc nhờ Quản lý nhập số dư đầu kỳ trong Sổ quỹ trước.
+        </div>
+      ` : ""}
+      <div class="shift-hero-card">
+        <div class="shift-hero-head">
+          <div>
+            <div class="shift-code-title">
+              <span>Nhận ca lễ tân mới</span>
+              ${!basis.established ? '<span class="shift-status-pill pending_handover">Chưa xác lập số đầu ca</span>' : '<span class="shift-status-pill open">Đủ căn cứ mở ca</span>'}
+            </div>
+            <div style="font-size:12.5px;color:var(--text-secondary);margin-top:3px;">
+              Mở ca để ghi nhận người đang giữ két Tiền mặt tại quầy. Thao tác mở ca không tạo phiếu thu/chi mới.
+            </div>
+          </div>
+        </div>
+
+        <div class="shift-meta-grid">
+          <div>Quỹ tại quầy: <strong>Tiền mặt tại quầy</strong></div>
+          <div>Người nhận ca: <strong>${escapeHtml(user.staffName)}</strong></div>
+          <div>Người bàn giao / căn cứ: <strong>${escapeHtml(basis.handedOverBy || "Chưa xác lập")}</strong></div>
+          <div>Số tiền mặt đầu ca: <strong id="shift-open-basis-amount">${basis.established ? escapeHtml(formatVND(basis.openingCash)) : "Chưa xác lập số đầu ca (0 đ)"}</strong></div>
+          <div style="grid-column:1/-1;">Căn cứ số đầu ca: <strong>${escapeHtml(basis.openingBasisRef)}</strong></div>
+        </div>
+
+        <div id="shift-open-error" class="form-error"></div>
+        <div class="shift-form-grid">
+          <div class="field">
+            <label for="shift-open-label">Tên ca làm việc (tùy chọn)</label>
+            <input id="shift-open-label" class="input" type="text" placeholder="VD: Ca sáng (06:00–14:00), Ca đêm (22:00–06:00)..." />
+          </div>
+          <div class="field">
+            <label for="shift-open-note">Ghi chú nhận ca</label>
+            <input id="shift-open-note" class="input" type="text" placeholder="VD: Nhận đủ tiền lẻ trong két..." />
+          </div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
+          <button type="button" class="btn btn-primary" id="btn-shift-open-submit">✓ Nhận ca &amp; bắt đầu theo dõi két</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderShiftHistory(report) {
+    const listEl = $("shifts-history-list");
+    if (!listEl) return;
+
+    // Populate staff filter dropdown cleanly while preserving selection
+    const staffSelect = $("shifts-filter-staff");
+    if (staffSelect) {
+      const prevVal = staffSelect.value || "all";
+      staffSelect.innerHTML = `<option value="all">Tất cả nhân viên</option>` + (report.staffList || [])
+        .map((st) => `<option value="${escapeHtml(st)}">${escapeHtml(st)}</option>`).join("");
+      staffSelect.value = report.staffList.includes(prevVal) ? prevVal : "all";
+    }
+
+    const rows = report.rows || [];
+    if (rows.length === 0) {
+      listEl.innerHTML = `<div class="fin-empty">Chưa có ca bàn giao nào phù hợp bộ lọc.</div>`;
+      return;
+    }
+
+    const isManager = can("finance:shift_manage");
+    listEl.innerHTML = rows.map((s) => {
+      const cardCls = s.status === "pending_handover"
+        ? "pinned-pending"
+        : s.discrepancyStatus === "pending_review"
+          ? "pinned-discrepancy"
+          : s.status === "open"
+            ? "status-open"
+            : "";
+      const diffColor = s.discrepancy === 0 ? "#15803d" : "#dc2626";
+      return `
+        <div class="shift-history-card ${cardCls}" data-shift-card-id="${escapeHtml(s.id)}">
+          <div class="shift-history-head">
+            <div>
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                <strong>${escapeHtml(s.shiftCode)}</strong>
+                ${s.shiftLabel ? `<span style="color:var(--text-secondary);font-size:12px;">(${escapeHtml(s.shiftLabel)})</span>` : ""}
+                <span class="shift-status-pill ${escapeHtml(s.status)}">${escapeHtml(s.statusLabel)}</span>
+                ${s.isOvernight ? '<span class="shift-status-pill overnight">Ca qua đêm</span>' : ""}
+                ${s.discrepancyStatus === "pending_review" ? '<span class="shift-status-pill discrepancy">Chênh lệch cần xử lý</span>' : ""}
+                ${s.discrepancyStatus === "resolved" ? '<span class="shift-status-pill resolved">Đã xử lý chênh lệch</span>' : ""}
+              </div>
+              <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">
+                Giao ca: <strong>${escapeHtml(s.outgoingStaffName)}</strong> → Nhận ca: <strong>${escapeHtml(s.incomingStaffName || s.targetIncomingStaffName || "Chưa xác nhận")}</strong>
+                • Mở: ${escapeHtml(s.openedAtVN)}${s.closedAt ? ` • Kết: ${escapeHtml(s.closedAtVN)}` : ""}
+              </div>
+            </div>
+            <div class="shift-history-actions">
+              <button type="button" class="btn btn-secondary btn-sm" data-shift-open-minutes="${escapeHtml(s.id)}">Biên bản (${s.txCount} CT)</button>
+              ${isManager && s.discrepancyStatus === "pending_review" ? `<button type="button" class="btn btn-primary btn-sm" data-shift-open-minutes="${escapeHtml(s.id)}">Xử lý chênh lệch</button>` : ""}
+            </div>
+          </div>
+          <div class="shift-history-nums">
+            <div><span style="color:var(--text-secondary);display:block;font-size:11px;">Đầu ca</span><strong>${s.openingBasisType === "unestablished" ? "Chưa xác lập (0 đ)" : escapeHtml(formatVND(s.openingCash))}</strong></div>
+            <div><span style="color:var(--text-secondary);display:block;font-size:11px;">Vào / Ra tiền mặt</span><strong>+${escapeHtml(formatVND(s.cashInTotal))} / -${escapeHtml(formatVND(s.cashOutTotal))}</strong></div>
+            <div><span style="color:var(--text-secondary);display:block;font-size:11px;">Dự kiến tại két</span><strong>${escapeHtml(formatVND(s.expectedCash))}</strong></div>
+            <div><span style="color:var(--text-secondary);display:block;font-size:11px;">Thực đếm giao</span><strong>${s.countedCash !== null ? escapeHtml(formatVND(s.countedCash)) : "—"}</strong></div>
+            <div><span style="color:var(--text-secondary);display:block;font-size:11px;">Chênh lệch giao ca</span><strong style="color:${diffColor};">${s.countedCash !== null ? `${escapeHtml(s.discrepancyLabel)} (${escapeHtml(formatSignedVND(s.discrepancy))})` : "—"}</strong></div>
+            <div><span style="color:var(--text-secondary);display:block;font-size:11px;">Thực nhận ca sau</span><strong>${s.receivedCash !== null ? escapeHtml(formatVND(s.receivedCash)) : "—"}</strong>${s.handoverCountDiff ? ` <span style="color:#dc2626;font-size:11px;">(${escapeHtml(formatSignedVND(s.handoverCountDiff))})</span>` : ""}</div>
+          </div>
+          ${s.discrepancyExplanation ? `<div style="font-size:12px;color:#991b1b;"><strong>Giải trình:</strong> ${escapeHtml(s.discrepancyExplanation)}</div>` : ""}
+          ${s.resolutionNote ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:3px;"><strong>Kết luận Quản lý (${escapeHtml(s.resolvedBy)}):</strong> ${escapeHtml(s.resolutionNote)}</div>` : ""}
+        </div>
+      `;
+    }).join("");
+  }
+
+  function renderShifts() {
+    const modal = $("shifts-modal");
+    if (!modal || !modal.classList.contains("open")) return;
+    if (!can("finance:shift_read")) return;
+
+    const fState = getFinanceState();
+    const bookings = getBookings();
+    const filters = getShiftsFilters();
+    const report = computeShiftsReport(fState, bookings, filters);
+
+    // Header actions RBAC
+    const btnTransfer = $("btn-shifts-transfer");
+    if (btnTransfer) btnTransfer.style.display = can("finance:transfer") ? "" : "none";
+    const btnExport = $("btn-shifts-export-csv");
+    if (btnExport) btnExport.style.display = can("finance:export") ? "" : "none";
+
+    // Tab states
+    const deskTab = $("tab-shift-desk");
+    const histTab = $("tab-shift-history");
+    const deskPanel = $("shifts-panel-desk");
+    const histPanel = $("shifts-panel-history");
+    const isHistory = uiState.shiftsTab === "history";
+    if (deskTab) {
+      deskTab.classList.toggle("active", !isHistory);
+      deskTab.setAttribute("aria-selected", String(!isHistory));
+    }
+    if (histTab) {
+      histTab.classList.toggle("active", isHistory);
+      histTab.setAttribute("aria-selected", String(isHistory));
+    }
+    if (deskPanel) deskPanel.style.display = isHistory ? "none" : "";
+    if (histPanel) histPanel.style.display = isHistory ? "" : "none";
+
+    const alertCount = report.pendingHandoverCount + report.pendingDiscrepancyCount;
+    const histBadge = $("shifts-history-badge");
+    if (histBadge) {
+      if (alertCount > 0) {
+        histBadge.textContent = String(alertCount);
+        histBadge.style.display = "";
+      } else {
+        histBadge.style.display = "none";
+      }
+    }
+
+    syncPendingBars();
+    renderShiftDesk(report);
+    renderShiftHistory(report);
+    if (uiState.shiftMinutesId) renderShiftMinutes();
+  }
+
+  function renderShiftMinutes() {
+    const modal = $("shift-minutes-modal");
+    const body = $("shift-minutes-body");
+    if (!modal || !modal.classList.contains("open") || !body || !uiState.shiftMinutesId) return;
+
+    const fState = getFinanceState();
+    const shift = (fState.cashShifts || []).find((s) => s.id === uiState.shiftMinutesId);
+    if (!shift) {
+      body.innerHTML = `<div class="fin-empty">Không tìm thấy biên bản ca này.</div>`;
+      return;
+    }
+    const summary = computeShiftLiveSummary(shift, fState, getBookings());
+    if ($("shift-minutes-title")) {
+      $("shift-minutes-title").textContent = `Biên bản bàn giao ca ${summary.shiftCode}`;
+    }
+    if ($("shift-minutes-subtitle")) {
+      $("shift-minutes-subtitle").textContent = `${summary.fundName} • ${summary.statusLabel}${summary.isOvernight ? " • Ca qua đêm" : ""}`;
+    }
+
+    const canResolve = can("finance:shift_manage") && summary.status !== "open" && (summary.discrepancyStatus === "pending_review" || summary.hasDiscrepancy);
+    const defaultAdjAmt = summary.receivedCash !== null
+      ? Core.roundVND(summary.receivedCash - summary.expectedCash)
+      : summary.discrepancy;
+
+    body.innerHTML = `
+      <div class="shift-meta-grid">
+        <div>Người giao ca: <strong>${escapeHtml(summary.outgoingStaffName)}</strong></div>
+        <div>Người nhận ca: <strong>${escapeHtml(summary.incomingStaffName || summary.targetIncomingStaffName || "Chưa xác nhận")}</strong></div>
+        <div>Giờ mở ca: <strong>${escapeHtml(summary.openedAtVN)}</strong></div>
+        <div>Giờ kết ca: <strong>${escapeHtml(summary.closedAtVN)}</strong></div>
+        <div>Giờ xác nhận nhận: <strong>${escapeHtml(summary.confirmedAtVN)}</strong></div>
+        <div>Căn cứ đầu ca: <strong>${escapeHtml(summary.openingBasisRef)}</strong></div>
+      </div>
+
+      <div class="shift-kpi-grid">
+        <div class="shift-kpi-box">
+          <div class="shift-kpi-label">Số đầu ca</div>
+          <div class="shift-kpi-val">${escapeHtml(formatVND(summary.openingCash))}</div>
+        </div>
+        <div class="shift-kpi-box">
+          <div class="shift-kpi-label">Dự kiến tại két</div>
+          <div class="shift-kpi-val">${escapeHtml(formatVND(summary.expectedCash))}</div>
+          <div class="shift-kpi-sub">+${escapeHtml(formatVND(summary.cashInTotal))} / -${escapeHtml(formatVND(summary.cashOutTotal))}</div>
+        </div>
+        <div class="shift-kpi-box">
+          <div class="shift-kpi-label">Thực đếm giao ca</div>
+          <div class="shift-kpi-val">${summary.countedCash !== null ? escapeHtml(formatVND(summary.countedCash)) : "—"}</div>
+          <div class="shift-kpi-sub" style="color:${summary.discrepancy === 0 ? "#15803d" : "#dc2626"};font-weight:700;">
+            ${summary.countedCash !== null ? `${escapeHtml(summary.discrepancyLabel)} (${escapeHtml(formatSignedVND(summary.discrepancy))})` : "Chưa kết ca"}
+          </div>
+        </div>
+        <div class="shift-kpi-box">
+          <div class="shift-kpi-label">Thực nhận ca sau</div>
+          <div class="shift-kpi-val">${summary.receivedCash !== null ? escapeHtml(formatVND(summary.receivedCash)) : "—"}</div>
+          ${summary.handoverCountDiff ? `<div class="shift-kpi-sub" style="color:#dc2626;font-weight:700;">Lệch đếm lại: ${escapeHtml(formatSignedVND(summary.handoverCountDiff))}</div>` : ""}
+        </div>
+      </div>
+
+      ${summary.hasDiscrepancy ? `
+        <div class="shift-banner ${summary.discrepancyStatus === "resolved" ? "info" : "danger"}">
+          <div><strong>Chênh lệch giao ca:</strong> ${escapeHtml(summary.discrepancyLabel)} (${escapeHtml(formatSignedVND(summary.discrepancy))}) • Trạng thái: <strong>${summary.discrepancyStatus === "resolved" ? "Đã xử lý" : "Cần quản lý xử lý"}</strong></div>
+          ${summary.discrepancyExplanation ? `<div style="margin-top:4px;"><strong>Giải trình người giao:</strong> ${escapeHtml(summary.discrepancyExplanation)}</div>` : ""}
+          ${summary.confirmNote ? `<div style="margin-top:4px;"><strong>Ghi chú người nhận:</strong> ${escapeHtml(summary.confirmNote)}</div>` : ""}
+        </div>
+      ` : ""}
+
+      <div class="shift-section-card">
+        <div class="shift-section-title"><span>1. Chứng từ tiền mặt tính trong ca (${summary.cashTransactions.length} phiếu)</span></div>
+        <div class="shift-table-wrap">
+          <table class="fin-tx-table">
+            <thead>
+              <tr><th>Mã CT</th><th>Thời điểm</th><th>Loại</th><th>Đơn / NCC / Chuyển quỹ</th><th class="num">Tiền mặt két</th><th>Người ghi</th></tr>
+            </thead>
+            <tbody>
+              ${renderShiftVoucherRowsHtml(summary.cashTransactions, "Không có phát sinh tiền mặt trong ca.")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="shift-section-card">
+        <div class="shift-section-title">
+          <span>2. Khách chuyển khoản ngân hàng tham khảo (${summary.bankRefTransactions.length} phiếu • ${escapeHtml(formatVND(summary.bankRefTotal))})</span>
+          <span class="shift-status-pill confirmed">KHÔNG cộng vào tiền mặt két</span>
+        </div>
+        <div class="shift-table-wrap">
+          <table class="fin-tx-table">
+            <thead>
+              <tr><th>Mã CT</th><th>Thời điểm</th><th>Loại</th><th>Đơn / Khách hàng</th><th class="num">Số tiền CK</th><th>Người ghi</th></tr>
+            </thead>
+            <tbody>
+              ${renderShiftVoucherRowsHtml(summary.bankRefTransactions, "Không có giao dịch chuyển khoản ngân hàng trong ca.")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      ${(summary.adjustmentHistory || []).length > 0 ? `
+        <div class="shift-section-card">
+          <div class="shift-section-title"><span>3. Lịch sử xử lý &amp; điều chỉnh sau kết ca (không ghi đè số liệu giao ca đã ký)</span></div>
+          <ul style="margin:4px 0 0 18px;padding:0;font-size:12.5px;">
+            ${summary.adjustmentHistory.map((a) => `
+              <li style="margin-bottom:4px;">
+                <strong>${escapeHtml(formatDateTimeVN(a.ts))}</strong> — ${escapeHtml(a.operator)}: ${escapeHtml(a.reason)}
+                ${a.voucherCode ? ` • <span class="fin-voucher-code">${escapeHtml(a.voucherCode)}</span> (${escapeHtml(formatSignedVND(a.adjustmentAmount))})` : " • (Ghi nhận biên bản, không tạo phiếu điều chỉnh)"}
+              </li>
+            `).join("")}
+          </ul>
+        </div>
+      ` : ""}
+
+      ${canResolve ? `
+        <div class="shift-section-card" style="border-color:var(--accent-primary);">
+          <div class="shift-section-title"><span>🛡️ Xử lý chênh lệch sau kết ca (Quản lý — bảo toàn nguyên trạng số đã ký)</span></div>
+          <div id="shift-resolve-error" class="form-error"></div>
+          <div class="shift-form-grid">
+            <div class="field shift-form-full">
+              <label for="shift-resolve-note">Kết luận / Lý do xử lý của Quản lý *</label>
+              <input id="shift-resolve-note" class="input" type="text" placeholder="VD: Đã kiểm tra camera, xác nhận thiếu 50.000đ do trả nhầm tiền thừa..." />
+            </div>
+            <div class="field shift-form-full">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;">
+                <input type="checkbox" id="shift-resolve-create-adj" />
+                <span>Đồng thời lập phiếu điều chỉnh sổ quỹ (DC-...) theo số chênh lệch</span>
+              </label>
+            </div>
+            <div class="field" id="shift-resolve-adj-wrap" style="display:none;">
+              <label for="shift-resolve-adj-amount">Số tiền phiếu điều chỉnh (VNĐ, âm = giảm quỹ)</label>
+              <input id="shift-resolve-adj-amount" class="input" type="text" value="${escapeHtml(String(defaultAdjAmt))}" />
+            </div>
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;">
+            <button type="button" class="btn btn-primary btn-sm" id="btn-shift-resolve-submit" data-shift-id="${escapeHtml(summary.id)}">✓ Xác nhận xử lý chênh lệch</button>
+          </div>
+        </div>
+      ` : ""}
+    `;
+  }
+
+  function updateCloseDiffPreview() {
+    const inp = $("shift-close-counted");
+    const preview = $("shift-close-diff-preview");
+    const expWrap = $("shift-close-explanation-wrap");
+    if (!inp || !preview) return;
+    const expected = parseSignedVND(inp.dataset.shiftExpectedRef || "0");
+    const raw = inp.value.trim();
+    if (!raw) {
+      preview.className = "shift-diff-preview";
+      preview.textContent = `Nhập số tiền thực đếm để xem chênh lệch = Thực đếm − Dự kiến tại két (${formatVND(expected)}).`;
+      if (expWrap) expWrap.style.display = "none";
+      return;
+    }
+    const counted = parseSignedVND(raw);
+    const diff = Core.roundVND(counted - expected);
+    if (diff === 0) {
+      preview.className = "shift-diff-preview matched";
+      preview.textContent = `✓ Khớp tuyệt đối (Chênh lệch: 0 đ) — Dự kiến ${formatVND(expected)} = Thực đếm ${formatVND(counted)}.`;
+      if (expWrap) expWrap.style.display = "none";
+    } else if (diff < 0) {
+      preview.className = "shift-diff-preview short";
+      preview.textContent = `⚠️ Thiếu ${formatVND(Math.abs(diff))} (${formatSignedVND(diff)}) — Cần nhập giải trình. Ca kế tiếp sẽ nhận số thực đếm ${formatVND(counted)}.`;
+      if (expWrap) expWrap.style.display = "";
+    } else {
+      preview.className = "shift-diff-preview over";
+      preview.textContent = `⚠️ Thừa ${formatVND(diff)} (${formatSignedVND(diff)}) — Cần nhập giải trình. Ca kế tiếp sẽ nhận số thực đếm ${formatVND(counted)}.`;
+      if (expWrap) expWrap.style.display = "";
+    }
+  }
+
+  function updateConfirmDiffPreview() {
+    const inp = $("shift-confirm-received");
+    const preview = $("shift-confirm-diff-preview");
+    if (!inp || !preview) return;
+    const countedRef = parseSignedVND(inp.dataset.shiftCountedRef || "0");
+    const raw = inp.value.trim();
+    if (!raw) return;
+    const received = parseSignedVND(raw);
+    const diff = Core.roundVND(received - countedRef);
+    if (diff === 0) {
+      preview.className = "shift-diff-preview matched";
+      preview.textContent = `✓ Khớp số người giao đếm (${formatVND(received)}). Xác nhận sẽ tự mở ca mới với số đầu ca = ${formatVND(received)}.`;
+    } else {
+      preview.className = "shift-diff-preview short";
+      preview.textContent = `⚠️ Đếm lại khác số người giao (${formatSignedVND(diff)}: giao ${formatVND(countedRef)} vs nhận ${formatVND(received)}). Hệ thống sẽ lưu cả 2 số và gửi Quản lý xác minh — bắt buộc ghi chú bên dưới!`;
+    }
+  }
+
+  async function handleOpenShiftSubmit() {
+    const errEl = $("shift-open-error");
+    const setErr = (m) => { if (errEl) { errEl.textContent = m; errEl.classList.add("open"); } else showToast(m, "error"); };
+    const shiftLabel = ($("shift-open-label") && $("shift-open-label").value.trim()) || "";
+    const note = ($("shift-open-note") && $("shift-open-note").value.trim()) || "";
+    const res = await store.openCashShift({
+      fundId: "cash_frontdesk",
+      shiftLabel,
+      note,
+      idempotencyKey: makeIdempotencyKey("shift_open")
+    });
+    if (res && res.ok) {
+      showToast(`Đã nhận ca ${res.shift ? res.shift.shiftCode : ""}.`, "success");
+      notifyHostUI();
+      renderShifts();
+      return;
+    }
+    syncPendingBars();
+    setErr((res && res.error) || "Không thể mở ca lễ tân.");
+  }
+
+  async function handleCloseShiftSubmit(shiftId) {
+    const errEl = $("shift-close-error");
+    const setErr = (m) => { if (errEl) { errEl.textContent = m; errEl.classList.add("open"); } else showToast(m, "error"); };
+    const rawCounted = ($("shift-close-counted") && $("shift-close-counted").value.trim()) || "";
+    if (!rawCounted) return setErr("Vui lòng nhập số tiền mặt thực đếm tại két.");
+    const countedCash = parseSignedVND(rawCounted);
+    if (countedCash < 0) return setErr("Số tiền thực đếm không được âm.");
+    const explanation = ($("shift-close-explanation") && $("shift-close-explanation").value.trim()) || "";
+    const targetIncomingStaffName = ($("shift-close-target-staff") && $("shift-close-target-staff").value.trim()) || "";
+    const closeNote = ($("shift-close-note") && $("shift-close-note").value.trim()) || "";
+
+    const wm = uiState.shiftCloseWatermark && uiState.shiftCloseWatermark.shiftId === shiftId
+      ? uiState.shiftCloseWatermark
+      : null;
+
+    const payload = {
+      countedCash,
+      discrepancyExplanation: explanation,
+      targetIncomingStaffName,
+      closeNote,
+      idempotencyKey: makeIdempotencyKey("shift_close")
+    };
+    if (wm) {
+      payload.expectedTxCount = wm.expectedTxCount;
+      payload.expectedLastTxId = wm.expectedLastTxId;
+      payload.expectedCash = wm.expectedCash;
+      payload.knownTxIds = wm.knownTxIds;
+    }
+
+    const res = await store.closeCashShift(shiftId, payload);
+    if (res && res.ok) {
+      uiState.shiftCloseOpen = false;
+      uiState.shiftCloseWatermark = null;
+      uiState.shiftStaleConflict = null;
+      showToast(`Đã kết ca ${res.shift ? res.shift.shiftCode : ""} — chuyển sang Chờ nhận bàn giao.`, "success");
+      notifyHostUI();
+      renderShifts();
+      return;
+    }
+    if (res && res.code === "STALE_SHIFT_TRANSACTIONS") {
+      uiState.shiftStaleConflict = {
+        message: res.error || "Có chứng từ tiền mặt mới phát sinh trong lúc đếm tiền.",
+        newTransactions: res.newTransactions || [],
+        liveExpectedCash: res.liveExpectedCash,
+        liveTxCount: res.liveTxCount,
+        liveLastTxId: res.liveLastTxId,
+        liveSummary: res.liveSummary || null
+      };
+      renderShifts();
+      showToast("Có chứng từ mới phát sinh trong lúc đếm tiền — vui lòng xác nhận lại số dự kiến mới!", "error");
+      return;
+    }
+    if (res && res.code === "SHIFT_ALREADY_CLOSED") {
+      uiState.shiftCloseOpen = false;
+      uiState.shiftCloseWatermark = null;
+      uiState.shiftStaleConflict = null;
+      notifyHostUI();
+      renderShifts();
+      showToast(res.error || "Ca này đã được kết trước đó trên thiết bị khác.", "info");
+      return;
+    }
+    syncPendingBars();
+    setErr((res && res.error) || "Không thể kết ca.");
+  }
+
+  async function handleConfirmShiftSubmit(shiftId) {
+    const errEl = $("shift-confirm-error");
+    const setErr = (m) => { if (errEl) { errEl.textContent = m; errEl.classList.add("open"); } else showToast(m, "error"); };
+    const rawReceived = ($("shift-confirm-received") && $("shift-confirm-received").value.trim()) || "";
+    if (!rawReceived) return setErr("Vui lòng nhập số tiền mặt thực nhận tại két.");
+    const receivedCash = parseSignedVND(rawReceived);
+    const confirmNote = ($("shift-confirm-note") && $("shift-confirm-note").value.trim()) || "";
+    const nextShiftLabel = ($("shift-confirm-next-label") && $("shift-confirm-next-label").value.trim()) || "";
+
+    const res = await store.confirmCashShift(shiftId, {
+      receivedCash,
+      confirmNote,
+      nextShiftLabel,
+      idempotencyKey: makeIdempotencyKey("shift_confirm")
+    });
+    if (res && res.ok) {
+      showToast(`Đã xác nhận nhận bàn giao ${formatVND(receivedCash)}${res.nextShift ? ` & mở ca ${res.nextShift.shiftCode}` : ""}.`, "success");
+      notifyHostUI();
+      renderShifts();
+      return;
+    }
+    syncPendingBars();
+    setErr((res && res.error) || "Không thể xác nhận nhận bàn giao.");
+  }
+
+  async function handleResolveShiftSubmit(shiftId) {
+    const errEl = $("shift-resolve-error");
+    const setErr = (m) => { if (errEl) { errEl.textContent = m; errEl.classList.add("open"); } else showToast(m, "error"); };
+    const resolutionNote = ($("shift-resolve-note") && $("shift-resolve-note").value.trim()) || "";
+    if (!resolutionNote) return setErr("Vui lòng nhập kết luận / lý do xử lý.");
+    const createAdjustment = Boolean($("shift-resolve-create-adj") && $("shift-resolve-create-adj").checked);
+    const adjustmentAmount = createAdjustment && $("shift-resolve-adj-amount")
+      ? parseSignedVND($("shift-resolve-adj-amount").value)
+      : undefined;
+
+    const res = await store.resolveCashShiftDiscrepancy(shiftId, {
+      resolutionNote,
+      createAdjustment,
+      adjustmentAmount,
+      idempotencyKey: makeIdempotencyKey("shift_resolve")
+    });
+    if (res && res.ok) {
+      showToast(res.adjustmentTx
+        ? `Đã xử lý chênh lệch & lập phiếu điều chỉnh ${res.adjustmentTx.voucherCode}.`
+        : "Đã ghi nhận kết luận xử lý chênh lệch.", "success");
+      notifyHostUI();
+      renderShifts();
+      return;
+    }
+    setErr((res && res.error) || "Không thể xử lý chênh lệch.");
+  }
+
+  async function handleExportShiftsCsv() {
+    if (!can("finance:export")) {
+      showToast("Chỉ Quản lý / Tổng quản lý được xuất CSV lịch sử giao ca.", "error");
+      return;
+    }
+    const filters = getShiftsFilters();
+    const status = typeof store.getStatus === "function" ? store.getStatus() : {};
+    if (status.mode === "server") {
+      const qs = new URLSearchParams({
+        fromDate: filters.dateFrom,
+        toDate: filters.dateTo,
+        fundId: filters.fundId,
+        status: filters.status,
+        staff: filters.staff,
+        search: filters.search
+      });
+      window.location.href = `/api/finance/export/shifts?${qs.toString()}`;
+      showToast("Đang tải file CSV Giao ca lễ tân...", "success");
+      return;
+    }
+    const report = computeShiftsReport(getFinanceState(), getBookings(), filters);
+    triggerDownloadCsv(`giao-ca-le-tan-${getVietnamTodayISO()}.csv`, generateShiftsCsvContent(report));
+    showToast("Đã xuất file CSV Giao ca lễ tân.", "success");
+  }
+
+  function handlePrintShiftMinutes() {
+    if (!uiState.shiftMinutesId) return;
+    const fState = getFinanceState();
+    const shift = (fState.cashShifts || []).find((s) => s.id === uiState.shiftMinutesId);
+    if (!shift) return;
+    const summary = computeShiftLiveSummary(shift, fState, getBookings());
+    const html = generateShiftHandoverHtml(summary);
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const win = window.open(url, "_blank", "noopener");
+    if (!win) {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `bien-ban-giao-ca-${summary.shiftCode}.html`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  /* ============================================================================
      6. SIDEBAR BADGES & GLOBAL EVENT DELEGATION
      ============================================================================ */
 
@@ -2623,6 +3570,22 @@
           arPill.style.display = "";
         } else {
           arPill.style.display = "none";
+        }
+      }
+    }
+
+    const shiftsPill = $("shifts-badge-pill");
+    if (shiftsPill) {
+      if (!can("finance:shift_read")) {
+        shiftsPill.style.display = "none";
+      } else {
+        const shReport = computeShiftsReport(getFinanceState(), getBookings(), {});
+        const attentionCount = shReport.pendingHandoverCount + (can("finance:shift_manage") ? shReport.pendingDiscrepancyCount : 0);
+        if (attentionCount > 0) {
+          shiftsPill.textContent = String(attentionCount);
+          shiftsPill.style.display = "";
+        } else {
+          shiftsPill.style.display = "none";
         }
       }
     }
@@ -2658,6 +3621,9 @@
     }
     if ($("payables-modal") && $("payables-modal").classList.contains("open")) {
       renderPayables();
+    }
+    if ($("shifts-modal") && $("shifts-modal").classList.contains("open")) {
+      renderShifts();
     }
     if ($("monthly-receipts-modal") && $("monthly-receipts-modal").classList.contains("open")) {
       renderMonthlyReceipts();
@@ -2730,17 +3696,45 @@
       const el = $(id);
       if (el) el.addEventListener("click", closeMonthlyReceipts);
     });
+    if ($("btn-close-shifts")) $("btn-close-shifts").addEventListener("click", closeShifts);
+    if ($("btn-close-shift-minutes")) $("btn-close-shift-minutes").addEventListener("click", closeShiftMinutes);
+    if ($("btn-print-shift-minutes")) $("btn-print-shift-minutes").addEventListener("click", handlePrintShiftMinutes);
+    if ($("btn-shifts-export-csv")) $("btn-shifts-export-csv").addEventListener("click", handleExportShiftsCsv);
+    if ($("btn-shifts-transfer")) {
+      $("btn-shifts-transfer").addEventListener("click", () => {
+        closeShifts();
+        openCashbook();
+        uiState.cbDrawer = "transfer";
+        renderCashbook();
+      });
+    }
 
-    [$("receivables-modal"), $("cashbook-modal"), $("payables-modal"), $("monthly-receipts-modal")].forEach((backdrop) => {
+    [$("receivables-modal"), $("cashbook-modal"), $("payables-modal"), $("shifts-modal"), $("monthly-receipts-modal")].forEach((backdrop) => {
       if (!backdrop) return;
       backdrop.addEventListener("click", (e) => {
         if (e.target === backdrop) {
-          backdrop.classList.remove("open");
-          if (root.PMSPcApi && typeof root.PMSPcApi.syncActiveNav === "function") {
-            root.PMSPcApi.syncActiveNav();
+          if (backdrop.id === "shifts-modal") closeShifts();
+          else {
+            backdrop.classList.remove("open");
+            if (root.PMSPcApi && typeof root.PMSPcApi.syncActiveNav === "function") {
+              root.PMSPcApi.syncActiveNav();
+            }
           }
         }
       });
+    });
+    if ($("shift-minutes-modal")) {
+      $("shift-minutes-modal").addEventListener("click", (e) => {
+        if (e.target === $("shift-minutes-modal")) closeShiftMinutes();
+      });
+    }
+
+    // Shift Handover tabs & filters
+    if ($("tab-shift-desk")) $("tab-shift-desk").addEventListener("click", () => { uiState.shiftsTab = "desk"; renderShifts(); });
+    if ($("tab-shift-history")) $("tab-shift-history").addEventListener("click", () => { uiState.shiftsTab = "history"; renderShifts(); });
+    ["shifts-filter-from", "shifts-filter-to", "shifts-filter-staff", "shifts-filter-fund", "shifts-filter-status", "shifts-filter-search"].forEach((id) => {
+      const el = $(id);
+      if (el) el.addEventListener(id === "shifts-filter-search" ? "input" : "change", renderShifts);
     });
 
     // Receivables filters & tabs
@@ -2797,9 +3791,19 @@
       if (e.target && e.target.matches("[data-ap-line-amt]")) {
         updateApFormTotalPreview();
       }
+      if (e.target && e.target.id === "shift-close-counted") {
+        updateCloseDiffPreview();
+      }
+      if (e.target && e.target.id === "shift-confirm-received") {
+        updateConfirmDiffPreview();
+      }
     });
 
     document.addEventListener("change", (e) => {
+      if (e.target && e.target.id === "shift-resolve-create-adj") {
+        const wrap = $("shift-resolve-adj-wrap");
+        if (wrap) wrap.style.display = e.target.checked ? "" : "none";
+      }
       if (e.target && e.target.id === "fin-pay-method") {
         const fundSel = $("fin-pay-fund");
         if (fundSel) fundSel.value = getPaymentMethodMeta(e.target.value).defaultFundId;
@@ -2847,7 +3851,7 @@
 
     // Global delegated clicks for dynamic Finance UI buttons
     document.addEventListener("click", async (e) => {
-      const btn = e.target.closest("button, [data-ar-toggle], [data-ap-toggle]");
+      const btn = e.target.closest("button, [data-ar-toggle], [data-ap-toggle], [data-shift-jump-booking], [data-shift-jump-invoice], [data-shift-jump-voucher]");
       if (!btn) return;
 
       // Retry / dismiss pending unconfirmed intents
@@ -3327,6 +4331,100 @@
         } catch {
           showToast("Không thể mở tệp chứng từ đính kèm.", "error");
         }
+        return;
+      }
+
+      // Phase 3: Front Desk Cash Shift Handover dynamic actions
+      if (btn.dataset.shiftJumpBooking) {
+        jumpToBooking(btn.dataset.shiftJumpBooking);
+        return;
+      }
+      if (btn.dataset.shiftJumpInvoice) {
+        const invId = btn.dataset.shiftJumpInvoice;
+        if (can("finance:payables_read")) {
+          closeShifts();
+          openPayables({ focusInvoiceId: invId });
+        } else {
+          showToast(`Chứng từ gốc: ${btn.dataset.shiftVoucherLabel || invId}`, "info");
+        }
+        return;
+      }
+      if (btn.dataset.shiftJumpVoucher) {
+        if (can("finance:cashbook_read")) {
+          closeShifts();
+          openCashbook();
+        } else {
+          showToast(`Chứng từ gốc: ${btn.dataset.shiftVoucherLabel || btn.dataset.shiftJumpVoucher}`, "info");
+        }
+        return;
+      }
+      if (btn.dataset.shiftOpenMinutes) {
+        openShiftMinutes(btn.dataset.shiftOpenMinutes);
+        return;
+      }
+      if (btn.id === "btn-shift-open-submit") {
+        await handleOpenShiftSubmit();
+        return;
+      }
+      if (btn.id === "btn-shift-toggle-close") {
+        uiState.shiftCloseOpen = !uiState.shiftCloseOpen;
+        if (uiState.shiftCloseOpen) {
+          const rpt = computeShiftsReport(getFinanceState(), getBookings(), {});
+          if (rpt.activeOpenShift) {
+            uiState.shiftCloseWatermark = {
+              shiftId: rpt.activeOpenShift.id,
+              expectedTxCount: rpt.activeOpenShift.txCount,
+              expectedLastTxId: rpt.activeOpenShift.lastTxId,
+              expectedCash: rpt.activeOpenShift.expectedCash,
+              knownTxIds: rpt.activeOpenShift.cashTransactions.map((t) => t.id)
+            };
+          }
+          uiState.shiftStaleConflict = null;
+        } else {
+          uiState.shiftCloseWatermark = null;
+          uiState.shiftStaleConflict = null;
+        }
+        renderShifts();
+        return;
+      }
+      if (btn.id === "btn-shift-cancel-close") {
+        uiState.shiftCloseOpen = false;
+        uiState.shiftCloseWatermark = null;
+        uiState.shiftStaleConflict = null;
+        renderShifts();
+        return;
+      }
+      if (btn.id === "btn-shift-accept-stale") {
+        const rpt = computeShiftsReport(getFinanceState(), getBookings(), {});
+        if (rpt.activeOpenShift) {
+          uiState.shiftCloseWatermark = {
+            shiftId: rpt.activeOpenShift.id,
+            expectedTxCount: rpt.activeOpenShift.txCount,
+            expectedLastTxId: rpt.activeOpenShift.lastTxId,
+            expectedCash: rpt.activeOpenShift.expectedCash,
+            knownTxIds: rpt.activeOpenShift.cashTransactions.map((t) => t.id)
+          };
+        }
+        uiState.shiftStaleConflict = null;
+        uiState.shiftCloseOpen = true;
+        renderShifts();
+        showToast("Đã cập nhật số dự kiến mới nhất — vui lòng kiểm tra lại và bấm Kết ca.", "info");
+        return;
+      }
+      if (btn.id === "btn-shift-close-submit") {
+        const sid = btn.dataset.shiftId;
+        if (sid) await handleCloseShiftSubmit(sid);
+        return;
+      }
+      if (btn.id === "btn-shift-confirm-submit") {
+        const sid = btn.dataset.shiftId;
+        if (sid) await handleConfirmShiftSubmit(sid);
+        return;
+      }
+      if (btn.id === "btn-shift-resolve-submit") {
+        const sid = btn.dataset.shiftId;
+        if (sid) await handleResolveShiftSubmit(sid);
+        return;
       }
     });
 
@@ -3359,6 +4457,10 @@
     closeCashbook,
     openPayables,
     closePayables,
+    openShifts,
+    closeShifts,
+    openShiftMinutes,
+    closeShiftMinutes,
     openMonthlyReceipts,
     closeMonthlyReceipts,
     renderBookingFinancePanel,
