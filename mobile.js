@@ -1343,6 +1343,9 @@
     const [selYearStr, selMonthStr] = String(dateISO || getTodayISO()).split("-");
     const selYear = Number(selYearStr) || new Date().getFullYear();
     const selMonth = (Number(selMonthStr) || (new Date().getMonth() + 1)) - 1;
+    const fLoad = typeof client.getFinanceLoadState === "function" ? client.getFinanceLoadState() : { status: "loaded", loaded: true };
+    const finLoaded = !fLoad || fLoad.loaded;
+    const finLoadText = fLoad && fLoad.status === "error" ? "Không tải được sổ" : "Đang tải sổ...";
     const fState = typeof client.getFinanceState === "function" ? client.getFinanceState() : null;
     const finKpi = computeCalendarFinanceKPIs(allBookings, fState, selYear, selMonth);
     mState.lastFinYear = selYear;
@@ -1400,12 +1403,12 @@
           <div class="m-kpi-two-col">
             <div class="m-kpi-cell is-clickable" id="m-kpi-paid-card" role="button" tabindex="0">
               <span class="m-kpi-cell-label">Tiền thực thu</span>
-              <span id="m-kpi-month-paid" class="m-kpi-cell-val ok">${formatVND(finKpi.monthlyNetReceived)}</span>
-              ${finKpi.monthlyRefunds > 0 ? `<span class="m-kpi-cell-sub">Đã trừ hoàn ${formatVND(finKpi.monthlyRefunds)}</span>` : ""}
+              <span id="m-kpi-month-paid" class="m-kpi-cell-val ok">${finLoaded ? formatVND(finKpi.monthlyNetReceived) : escapeHtml(finLoadText)}</span>
+              ${finLoaded && finKpi.monthlyRefunds > 0 ? `<span class="m-kpi-cell-sub">Đã trừ hoàn ${formatVND(finKpi.monthlyRefunds)}</span>` : ""}
             </div>
             <div class="m-kpi-cell is-clickable" id="m-kpi-debt-card" role="button" tabindex="0">
               <span class="m-kpi-cell-label">${escapeHtml(arLbl)}</span>
-              <span id="m-kpi-month-debt" class="m-kpi-cell-val ${finKpi.arAsOfTotal > 0 ? "warn" : "ok"}">${formatVND(finKpi.arAsOfTotal)}</span>
+              <span id="m-kpi-month-debt" class="m-kpi-cell-val ${finLoaded && finKpi.arAsOfTotal > 0 ? "warn" : "ok"}">${finLoaded ? formatVND(finKpi.arAsOfTotal) : escapeHtml(finLoadText)}</span>
             </div>
           </div>
         </div>
@@ -3439,65 +3442,53 @@
       URL.revokeObjectURL(url);
       showMobileToast("Đã xuất file Excel (CSV)");
     });
-    $("m-menu-backup-json").addEventListener("click", () => {
+    $("m-menu-backup-json").addEventListener("click", async () => {
       if (!mCan("admin:backup")) return showMobileToast("Sao lưu JSON chỉ dành cho Quản lý.");
-      const payload = {
-        exportedAt: new Date().toISOString(),
-        version: 3,
-        hotel: "Dongvan Ville du H'mong Hotel",
-        bookings: getBookings(),
-        auditLogs: client.getAuditLogs(),
-        operatingCosts: typeof client.getOperatingCosts === "function" ? client.getOperatingCosts() : undefined
-      };
+      let payload = null;
+      if (typeof client.exportUnifiedBackup === "function") {
+        const expRes = await client.exportUnifiedBackup({ source: "mobile" });
+        if (!expRes || !expRes.ok || !expRes.backup) {
+          return showMobileToast((expRes && expRes.error) || "Không thể xuất bản sao lưu đầy đủ.");
+        }
+        payload = expRes.backup;
+      } else {
+        payload = window.PMSCore.buildUnifiedBackupPayload(
+          {
+            bookings: getBookings(),
+            auditLogs: client.getAuditLogs(),
+            operatingCosts: typeof client.getOperatingCosts === "function" ? client.getOperatingCosts() : undefined,
+            financeState: typeof client.getFinanceState === "function" ? client.getFinanceState() : undefined,
+            housekeepingTasks: typeof client.getHousekeepingTasks === "function" ? client.getHousekeepingTasks() : [],
+            maintenanceIssues: typeof client.getMaintenanceIssues === "function" ? client.getMaintenanceIssues() : []
+          },
+          { source: "mobile" }
+        );
+      }
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement("a"); a.href = url; a.download = `backup-dongvan-hotel-${getTodayISO()}.json`; a.click();
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `backup-dongvan-hotel-v${payload.version || 5}-${getTodayISO()}.json`;
+      a.click();
       URL.revokeObjectURL(url);
-      showMobileToast("Đã tải file sao lưu JSON (gồm lịch phòng & chi phí)");
+      const txCount = (payload.financeState && Array.isArray(payload.financeState.transactions)) ? payload.financeState.transactions.length : 0;
+      showMobileToast(`Đã tải sao lưu JSON v${payload.version || 5} (${(payload.bookings || []).length} đơn, ${txCount} chứng từ tài chính)`);
     });
     $("m-input-restore-json").addEventListener("change", (e) => {
       if (!mCan("admin:backup")) { e.target.value = ""; return showMobileToast("Khôi phục JSON chỉ dành cho Quản lý."); }
       const file = e.target.files[0];
       e.target.value = "";
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = async () => {
-        let parsedCosts = null;
-        let parsedCount = null;
-        try {
-          const parsed = JSON.parse(reader.result);
-          if (parsed && typeof parsed === "object" && parsed.operatingCosts && typeof parsed.operatingCosts === "object") {
-            parsedCosts = parsed.operatingCosts;
-          }
-          if (Array.isArray(parsed)) parsedCount = parsed.length;
-          else if (parsed && Array.isArray(parsed.bookings)) parsedCount = parsed.bookings.length;
-        } catch {}
-
-        const confirmMsg = [
-          `Khôi phục dữ liệu từ file "${file.name}"?`,
-          parsedCount !== null ? `• File chứa ${parsedCount} lượt đặt phòng${parsedCosts ? " và chi phí vận hành" : ""}.` : "• Hệ thống sẽ kiểm tra cấu trúc file trước khi nạp.",
-          `• Dữ liệu hiện tại (${getBookings().length} lượt đặt phòng) sẽ được thay thế (có lưu bản hoàn tác tự động).`,
-          "",
-          "Nhấn OK để khôi phục, Hủy để giữ nguyên."
-        ].join("\n");
-        if (!window.confirm(confirmMsg)) {
-          showMobileToast("Đã hủy khôi phục — dữ liệu giữ nguyên");
-          return;
-        }
-
-        const res = await client.restoreFromImport(reader.result);
-        if (!res.ok) return alert("Không thể khôi phục:\n" + res.error);
-        let restoredCosts = false;
-        if (parsedCosts && typeof client.saveOperatingCosts === "function") {
-          const cRes = await client.saveOperatingCosts(parsedCosts);
-          if (cRes && cRes.ok) restoredCosts = true;
-        }
-        renderMobileAll();
-        showMobileToast(restoredCosts
-          ? `Đã khôi phục ${res.bookings.length} lượt đặt phòng & chi phí vận hành`
-          : `Đã khôi phục ${res.bookings.length} lượt đặt phòng`);
-      };
-      reader.readAsText(file);
+      if (window.PMSRestoreDialog && typeof window.PMSRestoreDialog.openForFile === "function") {
+        window.PMSRestoreDialog.openForFile(file, {
+          onRestored: () => {
+            renderMobileAll();
+            if (window.PMSFinanceApp) window.PMSFinanceApp.refreshOpenModals();
+          },
+          onCancel: () => showMobileToast("Đã hủy khôi phục — dữ liệu giữ nguyên"),
+          notifyToast: (msg) => showMobileToast(msg)
+        });
+      }
     });
     $("m-menu-theme").addEventListener("click", () => {
       const isDark = document.documentElement.getAttribute("data-theme") === "dark";
@@ -3551,7 +3542,13 @@
         return;
       }
       renderSyncStatus();
-      if (type === "status" || type === "version" || type === "update_pending" || type === "update_applying" || type === "auth_required") return;
+      if (type === "status") {
+        if (mRole() !== "housekeeping" && mState.activeTab === "schedule") {
+          renderScheduleView();
+        }
+        return;
+      }
+      if (type === "version" || type === "update_pending" || type === "update_applying" || type === "auth_required") return;
       if (mRole() === "housekeeping") return;
 
       // Check concurrent edit conflict if user has an open booking edit form!

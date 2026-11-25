@@ -167,14 +167,123 @@
      0. PENDING UNCONFIRMED INTENTS BAR (Offline / Dropped Response Safety)
      ============================================================================ */
 
+  function getFinanceLoadMeta() {
+    if (typeof store.getFinanceLoadState === "function") {
+      const s = store.getFinanceLoadState();
+      if (s && typeof s === "object") {
+        const status = s.status || "loaded";
+        const txCount = Number(s.txCount) || 0;
+        return {
+          status,
+          loaded: status === "loaded",
+          error: s.error || "",
+          txCount,
+          label: status === "loading"
+            ? "Đang tải sổ"
+            : (status === "error"
+              ? "Không tải được sổ"
+              : (txCount === 0 ? "Đã tải – chưa có giao dịch" : ""))
+        };
+      }
+    }
+    const f = getFinanceState();
+    const txCount = f && Array.isArray(f.transactions) ? f.transactions.length : 0;
+    return { status: "loaded", loaded: true, error: "", txCount, label: txCount === 0 ? "Đã tải – chưa có giao dịch" : "" };
+  }
+
+  function renderFinanceLoadBannerMarkup() {
+    const meta = getFinanceLoadMeta();
+    if (meta.status === "loading") {
+      return `
+        <div class="fin-load-banner is-loading" data-fin-load-state="loading">
+          <span>⏳ <strong>Đang tải sổ</strong> tài chính từ máy chủ — tạm khóa nút ghi sổ cho đến khi tải xong (nội dung đang nhập vẫn được giữ).</span>
+        </div>
+      `;
+    }
+    if (meta.status === "error") {
+      return `
+        <div class="fin-load-banner is-error" data-fin-load-state="error">
+          <span>⚠️ <strong>Không tải được sổ</strong> tài chính${meta.error ? `: ${escapeHtml(meta.error)}` : ""}. Tạm khóa ghi sổ để bảo toàn dữ liệu.</span>
+          <button class="btn btn-sm btn-primary" type="button" data-fin-reload-ledger="1">↻ Tải lại sổ</button>
+        </div>
+      `;
+    }
+    if (meta.txCount === 0) {
+      return `
+        <div class="fin-load-banner is-empty-confirmed" data-fin-load-state="loaded-empty">
+          <span>✓ <strong>Đã tải – chưa có giao dịch</strong> trên sổ tài chính (máy chủ đã xác nhận số dư 0 đ).</span>
+        </div>
+      `;
+    }
+    return "";
+  }
+
+  function syncFinanceWriteButtonsGuard() {
+    const meta = getFinanceLoadMeta();
+    const shouldLock = !meta.loaded;
+    const selectors = [
+      "#btn-cb-open-transfer",
+      "#btn-cb-open-opening",
+      "#btn-cb-open-reconcile",
+      "#btn-cb-open-adjust",
+      "#btn-cb-submit-transfer",
+      "#btn-cb-submit-opening",
+      "#btn-cb-submit-reconcile",
+      "#btn-cb-submit-adjust",
+      "#btn-fin-open-collect",
+      "#btn-fin-open-service",
+      "#btn-fin-open-adjust",
+      "#btn-fin-open-refund",
+      "#btn-fin-open-cancel",
+      "#btn-fin-submit-collect",
+      "#btn-fin-submit-service",
+      "#btn-fin-submit-adjust",
+      "#btn-fin-submit-refund",
+      "#btn-fin-submit-cancel",
+      "#btn-ar-run-legacy",
+      "#btn-ar-commit-migration",
+      "#btn-ap-new-invoice",
+      "#btn-ap-save-invoice",
+      "#btn-ap-confirm-stale-retry",
+      "#btn-shifts-transfer",
+      "#btn-shift-open-submit",
+      "#btn-shift-toggle-close",
+      "#btn-shift-close-submit",
+      "#btn-shift-confirm-submit",
+      "#btn-shift-resolve-submit",
+      "[data-ar-quick-collect]",
+      "[data-ar-submit-quick]",
+      "[data-ap-open-pay]",
+      "[data-ap-pay-submit]",
+      "[data-fin-write-btn]"
+    ];
+    selectors.forEach((sel) => {
+      document.querySelectorAll(sel).forEach((el) => {
+        if (shouldLock) {
+          if (!el.disabled) {
+            el.dataset.finLockedByLoad = "1";
+            el.disabled = true;
+          }
+          el.title = meta.status === "error"
+            ? "Không tải được sổ — bấm Tải lại sổ trước khi ghi"
+            : "Đang tải sổ — chờ tải xong trước khi ghi";
+        } else if (el.dataset.finLockedByLoad === "1") {
+          delete el.dataset.finLockedByLoad;
+          el.disabled = false;
+          el.title = "";
+        }
+      });
+    });
+  }
+
   function renderPendingIntentsMarkup() {
     const pending = typeof store.getPendingFinanceIntents === "function" ? store.getPendingFinanceIntents() : [];
     if (!pending.length) return "";
     const rowsHtml = pending.map((item) => `
       <div class="fin-pending-row">
         <div>
-          <strong>Chưa xác nhận — chờ đồng bộ:</strong> ${escapeHtml(item.label || item.idempotencyKey)}
-          <span style="opacity:0.8; font-size:11px;">(${escapeHtml(formatDateTimeVN(item.createdAt))} • mã ${escapeHtml(item.idempotencyKey.slice(-10))})</span>
+          <strong>Đang xác minh giao dịch (Chưa xác nhận — chờ đồng bộ):</strong> ${escapeHtml(item.label || item.op || item.idempotencyKey)}
+          <span style="opacity:0.8; font-size:11px;">(${escapeHtml(formatDateTimeVN(item.createdAt))} • mã ${escapeHtml(String(item.idempotencyKey || "").slice(-10))})</span>
         </div>
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
           <button class="btn btn-sm btn-primary" type="button" data-fin-retry-key="${escapeHtml(item.idempotencyKey)}">↻ Kiểm tra &amp; đồng bộ lại</button>
@@ -183,24 +292,27 @@
       </div>
     `).join("");
     return `
-      <div style="font-weight:800;">⚠️ Có ${pending.length} giao dịch chưa nhận phản hồi từ máy chủ (KHÔNG tự ghi nhận hoàn tất để tránh tạo chứng từ trùng)</div>
+      <div style="font-weight:800;">⚠️ Đang xác minh ${pending.length} giao dịch chưa nhận phản hồi từ máy chủ (CHƯA ghi nhận “Đã thu” để tránh tạo chứng từ trùng)</div>
       ${rowsHtml}
     `;
   }
 
   function syncPendingBars() {
-    const html = renderPendingIntentsMarkup();
+    const loadHtml = renderFinanceLoadBannerMarkup();
+    const pendingHtml = renderPendingIntentsMarkup();
+    const combined = [loadHtml, pendingHtml].filter(Boolean).join("");
     ["ar-pending-intents-bar", "cb-pending-intents-bar", "ap-pending-intents-bar", "shifts-pending-sync-bar"].forEach((id) => {
       const el = $(id);
       if (!el) return;
-      if (html) {
-        el.innerHTML = html;
+      if (combined) {
+        el.innerHTML = combined;
         el.style.display = "flex";
       } else {
         el.innerHTML = "";
         el.style.display = "none";
       }
     });
+    syncFinanceWriteButtonsGuard();
   }
 
   async function handleRetryPendingIntent(idemKey) {
@@ -960,6 +1072,14 @@
     if (!modal || !modal.classList.contains("open")) return;
 
     syncPendingBars();
+    const loadMeta = getFinanceLoadMeta();
+    if (!loadMeta.loaded) {
+      const strip = $("ar-summary-strip");
+      if (strip) {
+        strip.innerHTML = `<div class="fin-kpi-card" style="grid-column:1/-1;"><span class="fin-stat-lbl">Trạng thái sổ tài chính</span><span class="fin-stat-val">${escapeHtml(loadMeta.label)}</span><span class="fin-stat-sub">Chỉ hiển thị số dư sau khi máy chủ xác nhận dữ liệu hợp lệ.</span></div>`;
+      }
+      return;
+    }
     const bookings = getBookings();
     const fState = getFinanceState();
     const filters = getReceivablesFilters();
@@ -1416,6 +1536,14 @@
     if (!modal || !modal.classList.contains("open")) return;
 
     syncPendingBars();
+    const loadMeta = getFinanceLoadMeta();
+    if (!loadMeta.loaded) {
+      const fundsGrid = $("cb-funds-grid");
+      if (fundsGrid) {
+        fundsGrid.innerHTML = `<div class="fin-fund-card" style="grid-column:1/-1;"><div class="fin-fund-head"><span class="fin-fund-name">Trạng thái sổ quỹ</span></div><div class="fin-fund-balance">${escapeHtml(loadMeta.label)}</div><div class="fin-fund-meta"><span>Chỉ hiển thị số dư 0 đ khi máy chủ xác nhận sổ đã tải xong.</span></div></div>`;
+      }
+      return;
+    }
     const fState = getFinanceState();
     const bookings = getBookings();
     const filters = getCashbookFilters();
@@ -3853,6 +3981,19 @@
     document.addEventListener("click", async (e) => {
       const btn = e.target.closest("button, [data-ar-toggle], [data-ap-toggle], [data-shift-jump-booking], [data-shift-jump-invoice], [data-shift-jump-voucher]");
       if (!btn) return;
+
+      // Reload finance ledger on error banner retry button
+      if (btn.dataset.finReloadLedger) {
+        if (typeof store.pullLatest === "function") {
+          showToast("Đang tải lại sổ tài chính từ máy chủ...", "info");
+          const r = await store.pullLatest();
+          if (r && r.ok) showToast("Đã tải lại sổ tài chính thành công.", "success");
+          else showToast((r && r.error) || "Không tải được sổ tài chính.", "error");
+          notifyHostUI();
+          refreshOpenModals();
+        }
+        return;
+      }
 
       // Retry / dismiss pending unconfirmed intents
       if (btn.dataset.finRetryKey) {

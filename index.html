@@ -228,13 +228,13 @@
           <div class="kpi-group-items">
             <button type="button" id="kpi-month-paid-btn" class="kpi-metric kpi-metric-btn" title="Nhấn xem danh sách giao dịch cấu thành Tiền thực thu trong tháng (theo ngày thực nhận)">
               <span class="kpi-label">Tiền thực thu</span>
-              <span id="kpi-month-paid" class="kpi-value ok">0 đ</span>
+              <span id="kpi-month-paid" class="kpi-value ok">Đang tải sổ...</span>
               <span id="kpi-month-refund-note" class="kpi-refund-note" style="display:none;"></span>
             </button>
             <span class="kpi-sep" aria-hidden="true"></span>
             <button type="button" id="kpi-month-debt-btn" class="kpi-metric kpi-metric-btn" title="Nhấn mở danh sách Công nợ khách khớp chính xác đến ngày đã chọn">
               <span id="kpi-ar-asof-label" class="kpi-label">Công nợ đến hôm nay</span>
-              <span id="kpi-month-debt" class="kpi-value warn">0 đ</span>
+              <span id="kpi-month-debt" class="kpi-value warn">Đang tải sổ...</span>
             </button>
           </div>
         </div>
@@ -1724,6 +1724,24 @@
         </div>
       </div>
       <div class="modal-body fin-modal-body" id="shift-minutes-body"></div>
+    </div>
+  </div>
+
+  <!-- Modal Xem trước & Xác nhận Khôi phục Sao lưu JSON (v1.9.0 — dùng chung PC & Mobile) -->
+  <div id="restore-preview-modal" class="modal-backdrop fin-modal-backdrop restore-preview-backdrop" role="dialog" aria-modal="true" aria-labelledby="restore-preview-title">
+    <div class="modal-card modal-lg fin-modal-card restore-preview-card">
+      <div class="modal-header">
+        <div>
+          <h3 id="restore-preview-title" class="modal-title">Kiểm tra &amp; Xác nhận Khôi phục dữ liệu</h3>
+          <div class="modal-subtitle" id="restore-preview-subtitle">Đang phân tích file sao lưu...</div>
+        </div>
+        <button id="btn-close-restore-preview" class="btn btn-icon" type="button" aria-label="Đóng">✕</button>
+      </div>
+      <div class="modal-body fin-modal-body" id="restore-preview-body"></div>
+      <div class="modal-footer restore-preview-footer">
+        <button id="btn-cancel-restore-preview" class="btn" type="button">Hủy — Giữ nguyên dữ liệu</button>
+        <button id="btn-confirm-restore-preview" class="btn btn-primary" type="button">✓ Xác nhận khôi phục &amp; đối soát</button>
+      </div>
     </div>
   </div>
 

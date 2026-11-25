@@ -59,6 +59,8 @@
 
     let runningVersion = { appVersion: null, buildId: null };
     let pendingUpdate = null;
+    let financeLoadState = isStandaloneLocal ? "loaded" : "loading"; // "loading" | "loaded" | "error"
+    let financeLoadError = "";
 
     let stateCache = {
       bookings: [],
@@ -66,12 +68,24 @@
       autoBackups: [],
       hasRollbackBackup: false,
       operatingCosts: Core.createDefaultOperatingCostsState(),
-      financeState: Core.createDefaultFinanceState(),
+      financeState: isStandaloneLocal ? Core.createDefaultFinanceState() : null,
       housekeepingTasks: [],
       maintenanceIssues: [],
       roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
       accounts: []
     };
+
+    function getFinanceLoadState() {
+      const f = stateCache.financeState;
+      const txCount = f && Array.isArray(f.transactions) ? f.transactions.length : 0;
+      return {
+        status: financeLoadState,
+        error: financeLoadError,
+        loaded: financeLoadState === "loaded",
+        hasTransactions: txCount > 0,
+        txCount
+      };
+    }
 
     function getCurrentRole() {
       if (mode === "local") return "super_admin";
@@ -122,6 +136,8 @@
         authenticated: authState.authenticated,
         user: authState.user,
         role: getCurrentRole(),
+        financeLoadState,
+        financeLoadError,
         runningVersion: { ...runningVersion },
         pendingUpdate: pendingUpdate ? { ...pendingUpdate } : null
       };
@@ -152,6 +168,8 @@
         hasRollbackBackup: stateCache.hasRollbackBackup,
         operatingCosts: stateCache.operatingCosts,
         financeState: stateCache.financeState,
+        financeLoadState,
+        financeLoadError,
         housekeepingTasks: stateCache.housekeepingTasks,
         maintenanceIssues: stateCache.maintenanceIssues,
         roomStatuses: stateCache.roomStatuses,
@@ -252,6 +270,8 @@
       }
       if (data.financeState && typeof data.financeState === "object") {
         stateCache.financeState = Core.sanitizeFinanceState(data.financeState);
+        financeLoadState = "loaded";
+        financeLoadError = "";
         // Auto-clear any pending unconfirmed intent whose idempotencyKey is now confirmed on server!
         try {
           const rawPend = localStorage.getItem("ks_pms_pending_fin_intents_v1");
@@ -268,6 +288,15 @@
         } catch {}
       } else if (data.financeState === null) {
         stateCache.financeState = null;
+        financeLoadState = "loaded";
+        financeLoadError = "";
+      } else if (getCurrentRole() === "housekeeping") {
+        stateCache.financeState = null;
+        financeLoadState = "loaded";
+        financeLoadError = "";
+      } else {
+        financeLoadState = "error";
+        financeLoadError = "Máy chủ chưa trả về sổ tài chính hợp lệ.";
       }
       if (Array.isArray(data.housekeepingTasks)) {
         stateCache.housekeepingTasks = data.housekeepingTasks;
@@ -306,6 +335,8 @@
       }
       if (typeof localStore.getFinanceState === "function") {
         stateCache.financeState = localStore.getFinanceState();
+        financeLoadState = "loaded";
+        financeLoadError = "";
       }
       if (typeof localStore.getHousekeepingTasks === "function") {
         stateCache.housekeepingTasks = localStore.getHousekeepingTasks();
@@ -388,6 +419,11 @@
       }
 
       const runOnePull = async (currentMeta) => {
+        if (currentMeta.type === "init" || currentMeta.type === "auth_login") {
+          financeLoadState = "loading";
+          financeLoadError = "";
+          emit({ type: "status", status: getStatus() });
+        }
         try {
           const res = await fetchJson("/api/state", { timeoutMs: 8000 });
           if (res.status === 401) {
@@ -401,15 +437,19 @@
             return { ok: false, code: "AUTH_NOT_CONFIGURED", error: res.data.error };
           }
           if (!res.httpOk || !res.data || !res.data.ok) {
-            throw new Error("Server returned invalid state");
+            throw new Error((res.data && res.data.error) || "Server returned invalid state");
           }
           if (connectionStatus !== "connected") {
             connectionStatus = "connected";
           }
           applyServerState(res.data, currentMeta);
-          return { ok: true, bookings: stateCache.bookings, storeVersion };
-        } catch {
+          return { ok: true, bookings: stateCache.bookings, financeState: stateCache.financeState, financeLoadState, storeVersion };
+        } catch (err) {
           connectionStatus = navigator.onLine === false ? "offline" : "reconnecting";
+          if (financeLoadState !== "loaded" || currentMeta.type === "init" || currentMeta.type === "auth_login") {
+            financeLoadState = "error";
+            financeLoadError = (err && err.message) || "Không tải được sổ tài chính từ máy chủ.";
+          }
           emit({ type: "status", status: getStatus() });
           return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Mất kết nối tới máy chủ khách sạn." };
         }
@@ -699,12 +739,15 @@
         autoBackups: [],
         hasRollbackBackup: false,
         operatingCosts: null,
+        financeState: null,
         housekeepingTasks: [],
         maintenanceIssues: [],
         roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
         accounts: []
       };
       storeVersion = 0;
+      financeLoadState = "loading";
+      financeLoadError = "";
       authState.authenticated = false;
       authState.user = null;
       connectionStatus = "auth_required";
@@ -739,8 +782,8 @@
         }
         if (res.data.ok) {
           connectionStatus = "connected";
-          await pullLatestFromServer({ type: "local_commit" });
-          return { ...res.data, bookings: stateCache.bookings };
+          await pullLatestFromServer({ type: "local_commit", force: true });
+          return { ...res.data, bookings: stateCache.bookings, financeState: stateCache.financeState, operatingCosts: stateCache.operatingCosts };
         }
         if (res.data.code === "CONFLICT_STALE_EDIT" || res.data.code === "CONFLICT_OVERBOOKING") {
           await pullLatestFromServer({ type: "conflict_refresh" });
@@ -780,6 +823,59 @@
       const res = await Core.runWithCrossTabLock(() => localStore.deleteBooking(bookingId, opts));
       if (res.ok) syncFromLocalCache("local_commit");
       return res;
+    }
+
+    async function inspectImportPreview(rawPayload) {
+      if (mode === "server") {
+        try {
+          const res = await fetchJson("/api/import/preview", { method: "POST", body: { rawPayload }, timeoutMs: 12000 });
+          if (res.status === 401) {
+            handleAuthExpired(res.data && res.data.error);
+            return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
+          }
+          if (res.data) return res.data;
+        } catch {}
+      }
+      return Core.inspectBackupPayload(rawPayload);
+    }
+
+    async function exportUnifiedBackup(meta = {}) {
+      if (!can("admin:backup")) {
+        return { ok: false, code: "FORBIDDEN", error: "Chức năng Sao lưu dữ liệu chỉ dành cho Quản lý." };
+      }
+      if (mode === "server") {
+        try {
+          const source = encodeURIComponent(meta.source || "desktop");
+          const res = await fetchJson(`/api/backup/export?source=${source}`, { method: "GET", timeoutMs: 12000 });
+          if (res.status === 401) {
+            handleAuthExpired(res.data && res.data.error);
+            return { ok: false, code: "AUTH_REQUIRED", error: "Cần đăng nhập." };
+          }
+          if (res.httpOk && res.data && res.data.ok && res.data.backup) {
+            return { ok: true, backup: res.data.backup };
+          }
+          return (res.data && !res.data.ok)
+            ? res.data
+            : { ok: false, code: "EXPORT_FAILED", error: "Không thể tải bản sao lưu từ máy chủ." };
+        } catch {
+          return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Không kết nối được tới máy chủ để xuất sao lưu." };
+        }
+      }
+      const backup = Core.buildUnifiedBackupPayload(
+        {
+          bookings: stateCache.bookings,
+          operatingCosts: stateCache.operatingCosts,
+          financeState: stateCache.financeState,
+          housekeepingTasks: stateCache.housekeepingTasks,
+          maintenanceIssues: stateCache.maintenanceIssues,
+          auditLogs: stateCache.auditLogs
+        },
+        {
+          ...meta,
+          exportedBy: (authState.user && authState.user.staffName) || ""
+        }
+      );
+      return { ok: true, backup };
     }
 
     async function restoreFromImport(rawPayload) {
@@ -1325,6 +1421,16 @@
         });
       }
 
+      if (mode === "server" && financeLoadState !== "loaded") {
+        return {
+          ok: false,
+          code: "FINANCE_NOT_LOADED",
+          error: financeLoadState === "error"
+            ? "Không tải được sổ tài chính từ máy chủ — tạm khóa ghi sổ cho tới khi tải lại thành công."
+            : "Đang tải sổ tài chính — vui lòng chờ tải xong trước khi ghi sổ."
+        };
+      }
+
       // Persist pending unconfirmed intent BEFORE sending over network (Section III.4)
       upsertPendingFinanceIntent({
         idempotencyKey,
@@ -1352,9 +1458,10 @@
             ok: false,
             offline: true,
             unconfirmed: true,
+            verifying: true,
             idempotencyKey,
             code: "UNCONFIRMED_RESPONSE",
-            error: "Chưa xác nhận được phản hồi từ máy chủ — giao dịch đang ở trạng thái Chờ đồng bộ. Bấm Kiểm tra lại sau khi có mạng để tránh thu trùng."
+            error: "Đang xác minh giao dịch — chưa nhận được phản hồi xác nhận từ máy chủ. Bấm Kiểm tra lại sau khi có mạng để tránh thu trùng."
           };
         }
         if (res.data.ok) {
@@ -2201,6 +2308,7 @@
       getOperatingCosts: () => stateCache.operatingCosts,
       saveOperatingCosts,
       getFinanceState: () => stateCache.financeState,
+      getFinanceLoadState,
       getPendingFinanceIntents: readPendingFinanceIntents,
       dismissPendingFinanceIntent: removePendingFinanceIntent,
       lookupFinanceByIdempotency,
@@ -2248,6 +2356,8 @@
       pullLatest: () => pullLatestFromServer({ type: "manual_refresh" }),
       saveBooking,
       deleteBooking,
+      inspectImportPreview,
+      exportUnifiedBackup,
       restoreFromImport,
       rollbackLastChange,
       restoreFromAutoBackup,

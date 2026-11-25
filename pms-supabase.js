@@ -50,11 +50,16 @@
     let lastSyncedAt = null;
     let storeVersion = 0;
     let lastOperatingCostsUpdatedAt = "";
+    let lastFinanceUpdatedAt = "";
+    let lastFinanceLedgerVersion = -1;
     let lastHousekeepingUpdatedAt = "";
     let lastIssuesUpdatedAt = "";
     let lastAccountsUpdatedAt = "";
+    let financeLoadState = "loading"; // "loading" | "loaded" | "error"
+    let financeLoadError = "";
     let staffAuthAvailable = null; // null = unknown, true = pgcrypto RPCs installed, false = legacy Supabase Auth only
     let publicAccountsCache = null; // real active accounts fetched from pms_public_accounts()
+    const PENDING_FINANCE_KEY = "dongvan_pms_pending_finance_cloud_v1";
 
     let session = null; // { authMode: "staff_session", sessionToken, expires_at, accountId, username, staffName, role } OR legacy { access_token, refresh_token, expires_at, ... }
     let refreshInFlight = null;
@@ -122,7 +127,7 @@
       autoBackups: [],
       hasRollbackBackup: false,
       operatingCosts: Core.createDefaultOperatingCostsState(),
-      financeState: Core.createDefaultFinanceState(),
+      financeState: null, // Strictly null until server confirms authoritative load!
       housekeepingTasks: [],
       maintenanceIssues: [],
       roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
@@ -261,6 +266,20 @@
       };
     }
 
+    function getFinanceLoadState() {
+      const f = stateCache.financeState;
+      const txCount = f && Array.isArray(f.transactions) ? f.transactions.length : 0;
+      return {
+        status: financeLoadState,
+        error: financeLoadError,
+        loaded: financeLoadState === "loaded",
+        hasTransactions: txCount > 0,
+        txCount,
+        updatedAt: lastFinanceUpdatedAt,
+        ledgerVersion: lastFinanceLedgerVersion
+      };
+    }
+
     function getStatus() {
       const authNow = getAuthState();
       return {
@@ -275,6 +294,8 @@
         authenticated: isSessionActive(),
         user: authNow.user,
         role: getCurrentRole(),
+        financeLoadState,
+        financeLoadError,
         runningVersion: { ...runningVersion },
         pendingUpdate: pendingUpdate ? { ...pendingUpdate } : null
       };
@@ -288,6 +309,9 @@
         autoBackups: isHk ? [] : stateCache.autoBackups,
         hasRollbackBackup: isHk ? false : stateCache.hasRollbackBackup,
         operatingCosts: can("costs:read") ? stateCache.operatingCosts : null,
+        financeState: getFinanceStateForCurrentRole(),
+        financeLoadState,
+        financeLoadError,
         housekeepingTasks: stateCache.housekeepingTasks,
         maintenanceIssues: stateCache.maintenanceIssues,
         roomStatuses: stateCache.roomStatuses,
@@ -541,7 +565,9 @@
         }
         if (!res.httpOk) {
           return {
+            ...(res.data && typeof res.data === "object" ? res.data : {}),
             ok: false,
+            status: res.status,
             code: (res.data && res.data.code) || "SERVER_ERROR",
             error: (res.data && (res.data.error || res.data.message)) || `Lỗi máy chủ Supabase (${res.status}).`
           };
@@ -594,6 +620,33 @@
       } else if (data.operatingCosts === null) {
         stateCache.operatingCosts = can("costs:read") ? Core.createDefaultOperatingCostsState() : null;
       }
+
+      // v1.9.0: Authoritative financeState application with explicit 3-state tracking ("loading" | "loaded" | "error")
+      const curRole = getCurrentRole();
+      if (curRole === "housekeeping") {
+        stateCache.financeState = null;
+        financeLoadState = "loaded";
+        financeLoadError = "";
+      } else if (Object.prototype.hasOwnProperty.call(data, "financeState")) {
+        if (data.financeState && typeof data.financeState === "object") {
+          stateCache.financeState = Core.sanitizeFinanceState(data.financeState);
+          lastFinanceUpdatedAt = stateCache.financeState.updatedAt || lastFinanceUpdatedAt;
+          lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || 0;
+          financeLoadState = "loaded";
+          financeLoadError = "";
+        } else if (data.financeState === null && data.financeLoaded === true) {
+          stateCache.financeState = null;
+          financeLoadState = "loaded";
+          financeLoadError = "";
+        } else {
+          financeLoadState = "error";
+          financeLoadError = "Máy chủ chưa trả về sổ tài chính hợp lệ.";
+        }
+      } else {
+        financeLoadState = "error";
+        financeLoadError = "Máy chủ chưa trả về sổ tài chính (cần cập nhật supabase/schema.sql bản v1.9.0).";
+      }
+
       if (Array.isArray(data.housekeepingTasks)) {
         stateCache.housekeepingTasks = data.housekeepingTasks.map((t) => Core.sanitizeHousekeepingTask(t)).filter(Boolean);
       }
@@ -662,6 +715,10 @@
 
     function prepareBroadcastPayload(delta) {
       const copy = { ...delta };
+      // SECURITY (v1.9.0): NEVER broadcast raw financeState blobs to peers!
+      if (Object.prototype.hasOwnProperty.call(copy, "financeState")) {
+        delete copy.financeState;
+      }
       // Keep Realtime broadcast frame compact (<32KB); if a huge base64 PDF is attached, strip dataUrl
       // so peers paint the booking cell in <80ms and fetch the full PDF cleanly in the background.
       if (copy.booking && copy.booking.confirmationPdf && copy.booking.confirmationPdf.dataUrl) {
@@ -721,6 +778,17 @@
     function applyIncomingPeerDelta(delta) {
       if (!delta || typeof delta !== "object") return;
       if (delta.senderId && delta.senderId === clientId) return;
+
+      // v1.9.0: Lightweight finance change notification -> each peer pulls ONLY its own role-filtered view from server!
+      if (delta.action === "FINANCE_CHANGED" || delta.action === "FINANCE_UPDATE") {
+        if (getCurrentRole() === "housekeeping") return;
+        pullLatestFromCloud({
+          type: "remote_change",
+          remoteEvent: { action: "FINANCE_CHANGED", actor: delta.actor || "", ts: delta.ts || new Date().toISOString() },
+          force: true
+        });
+        return;
+      }
 
       if (delta.action === "COSTS_UPDATE" && delta.operatingCosts) {
         if (!can("costs:read")) return;
@@ -837,8 +905,18 @@
       }
 
       const runOnePull = async (currentMeta) => {
+        if (currentMeta.type === "init" || currentMeta.type === "auth_login") {
+          financeLoadState = "loading";
+          financeLoadError = "";
+          emit({ type: "status", status: getStatus() });
+        }
         const res = await callRpc("pms_get_state", {});
         if (!res || !res.ok) {
+          if (financeLoadState !== "loaded" || currentMeta.type === "init" || currentMeta.type === "auth_login") {
+            financeLoadState = "error";
+            financeLoadError = (res && res.error) || "Không tải được sổ tài chính từ máy chủ.";
+            emit({ type: "status", status: getStatus() });
+          }
           return res || { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Không thể tải dữ liệu." };
         }
         // In legacy Supabase Auth JWT mode (non-staff_session), also fetch extended meta directly
@@ -846,7 +924,7 @@
           try {
             const token = await ensureValidAccessToken(false);
             if (token) {
-              const cRes = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=in.(operating_costs_v1,housekeeping_v1,issues_v1,staff_accounts_v1)&select=key,value,updated_at`, {
+              const cRes = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?key=in.(operating_costs_v1,finance_ledger_v1,housekeeping_v1,issues_v1,staff_accounts_v1)&select=key,value,updated_at`, {
                 method: "GET",
                 headers: { "Authorization": `Bearer ${token}` },
                 timeoutMs: 6000
@@ -858,6 +936,9 @@
                   if (key === "operating_costs_v1") {
                     stateCache.operatingCosts = Core.sanitizeOperatingCostsState(row.value);
                     lastOperatingCostsUpdatedAt = (row.value && row.value.updatedAt) || row.updated_at || stateCache.operatingCosts.updatedAt || "";
+                  } else if (key === "finance_ledger_v1" && !Object.prototype.hasOwnProperty.call(res, "financeState")) {
+                    res.financeState = row.value;
+                    res.financeLoaded = true;
                   } else if (key === "housekeeping_v1" && Array.isArray(row.value.tasks)) {
                     stateCache.housekeepingTasks = row.value.tasks.map((t) => Core.sanitizeHousekeepingTask(t)).filter(Boolean);
                   } else if (key === "issues_v1" && Array.isArray(row.value.issues)) {
@@ -866,6 +947,10 @@
                     applyAccountsUpdate(row.value.accounts, (row.value && row.value.updatedAt) || row.updated_at || "");
                   }
                 }
+                if (!Object.prototype.hasOwnProperty.call(res, "financeState")) {
+                  res.financeState = Core.createDefaultFinanceState();
+                  res.financeLoaded = true;
+                }
                 stateCache.roomStatuses = Core.computeAllRoomOperationalStatuses(stateCache.housekeepingTasks, stateCache.maintenanceIssues, Core.getTodayISO());
               }
             }
@@ -873,7 +958,10 @@
         }
         connectionStatus = "connected";
         applyCloudState(res, currentMeta);
-        return { ok: true, bookings: stateCache.bookings, storeVersion };
+        if (financeLoadState === "loaded" && readPendingFinanceIntents().length > 0 && !currentMeta._skipIntentReconcile) {
+          reconcilePendingFinanceIntents().catch(() => {});
+        }
+        return { ok: true, bookings: stateCache.bookings, financeState: getFinanceStateForCurrentRole(), financeLoadState, storeVersion };
       };
 
       inFlightPull = (async () => {
@@ -903,10 +991,18 @@
           if (!syncRes || !syncRes.ok) return false;
           const remoteVer = typeof syncRes.storeVersion === "number" ? syncRes.storeVersion : null;
           const remoteCostsTs = syncRes.operatingCostsUpdatedAt || "";
+          const remoteFinTs = syncRes.financeUpdatedAt || "";
+          const remoteFinVer = typeof syncRes.financeLedgerVersion === "number" ? syncRes.financeLedgerVersion : -1;
           const remoteHkTs = syncRes.housekeepingUpdatedAt || "";
           const remoteIssTs = syncRes.issuesUpdatedAt || "";
           const remoteAccTs = syncRes.accountsUpdatedAt || "";
+          const financeChanged = getCurrentRole() !== "housekeeping" && (
+            financeLoadState !== "loaded"
+            || (remoteFinTs && remoteFinTs !== lastFinanceUpdatedAt)
+            || (remoteFinVer >= 0 && remoteFinVer > lastFinanceLedgerVersion)
+          );
           const needsPull = (remoteVer !== null && remoteVer > storeVersion)
+            || financeChanged
             || (can("costs:read") && remoteCostsTs && remoteCostsTs !== lastOperatingCostsUpdatedAt)
             || (remoteHkTs && remoteHkTs !== lastHousekeepingUpdatedAt)
             || (remoteIssTs && remoteIssTs !== lastIssuesUpdatedAt)
@@ -1280,7 +1376,11 @@
         if (!isSessionActive()) return;
         connectionStatus = "reconnecting";
         emit({ type: "status", status: getStatus() });
-        checkRemoteVersionAndSync("RECONNECT_SYNC");
+        if (financeLoadState !== "loaded" || readPendingFinanceIntents().length > 0) {
+          pullLatestFromCloud({ type: "remote_change", force: true }).catch(() => {});
+        } else {
+          checkRemoteVersionAndSync("RECONNECT_SYNC");
+        }
         connectRealtime();
       });
 
@@ -1476,6 +1576,7 @@
         autoBackups: [],
         hasRollbackBackup: false,
         operatingCosts: Core.createDefaultOperatingCostsState(),
+        financeState: null,
         housekeepingTasks: [],
         maintenanceIssues: [],
         roomStatuses: Core.computeAllRoomOperationalStatuses([], [], Core.getTodayISO()),
@@ -1483,6 +1584,10 @@
       };
       storeVersion = 0;
       lastOperatingCostsUpdatedAt = "";
+      lastFinanceUpdatedAt = "";
+      lastFinanceLedgerVersion = -1;
+      financeLoadState = "loading";
+      financeLoadError = "";
       lastHousekeepingUpdatedAt = "";
       lastIssuesUpdatedAt = "";
       lastAccountsUpdatedAt = "";
@@ -1560,22 +1665,142 @@
       return { ...rpcRes, bookings: stateCache.bookings };
     }
 
-    async function restoreFromImport(rawPayload) {
-      const validated = Core.validateAndSanitizeImport(rawPayload);
-      if (!validated.ok) {
-        return { ok: false, code: "INVALID_IMPORT", error: validated.error, details: validated.details };
+    async function inspectImportPreview(rawPayload) {
+      const inspected = Core.inspectBackupPayload(rawPayload);
+      if (!inspected.ok) {
+        return { ok: false, code: inspected.code || "INVALID_IMPORT", error: inspected.error, details: inspected.details };
       }
-      Core.normalizeDormSlots(validated.bookings);
-      const rpcRes = await callRpc("pms_replace_all", {
-        p_bookings: validated.bookings,
-        p_action: "RESTORE",
-        p_summary: `Khôi phục ${validated.bookings.length} lượt đặt phòng từ file JSON.`,
+      return {
+        ok: true,
+        version: inspected.version,
+        schema: inspected.schema,
+        exportedAt: inspected.exportedAt,
+        source: inspected.source,
+        hotel: inspected.hotel,
+        hasBookings: inspected.hasBookings,
+        hasFinanceState: inspected.hasFinanceState,
+        hasOperatingCosts: inspected.hasOperatingCosts,
+        hasHousekeepingTasks: inspected.hasHousekeepingTasks,
+        hasMaintenanceIssues: inspected.hasMaintenanceIssues,
+        hasAuditLogs: inspected.hasAuditLogs,
+        isLegacyWithoutFinance: inspected.isLegacyWithoutFinance,
+        presentSections: inspected.presentSections,
+        missingSections: inspected.missingSections,
+        warnings: inspected.warnings,
+        summary: inspected.summary,
+        mediaInventory: inspected.mediaInventory
+      };
+    }
+
+    async function exportUnifiedBackup(meta = {}) {
+      if (!can("admin:backup")) {
+        return { ok: false, code: "FORBIDDEN", error: "Chức năng sao lưu chỉ dành cho Quản lý." };
+      }
+      if (financeLoadState !== "loaded") {
+        const pulled = await pullLatestFromCloud({ type: "manual_refresh", force: true });
+        if (!pulled.ok || financeLoadState !== "loaded") {
+          return { ok: false, code: "FINANCE_NOT_LOADED", error: "Chưa tải xong sổ tài chính từ máy chủ — không thể xuất bản sao lưu đầy đủ." };
+        }
+      }
+      const backup = Core.buildUnifiedBackupPayload(
+        {
+          bookings: stateCache.bookings,
+          operatingCosts: stateCache.operatingCosts,
+          financeState: stateCache.financeState,
+          housekeepingTasks: stateCache.housekeepingTasks,
+          maintenanceIssues: stateCache.maintenanceIssues,
+          auditLogs: stateCache.auditLogs
+        },
+        {
+          ...meta,
+          exportedBy: (session && session.staffName) || ""
+        }
+      );
+      return { ok: true, backup };
+    }
+
+    async function restoreFromImport(rawPayload) {
+      if (!can("admin:restore")) {
+        return { ok: false, code: "FORBIDDEN", error: "Chức năng khôi phục dữ liệu chỉ dành cho Quản lý." };
+      }
+      const inspected = Core.inspectBackupPayload(rawPayload);
+      if (!inspected.ok) {
+        return { ok: false, code: inspected.code || "INVALID_IMPORT", error: inspected.error, details: inspected.details };
+      }
+      const preExisting = {
+        bookings: stateCache.bookings.slice(),
+        financeState: stateCache.financeState ? Core.sanitizeFinanceState(stateCache.financeState) : null,
+        operatingCosts: stateCache.operatingCosts
+      };
+
+      // Construct atomic RPC payload containing ONLY explicitly present sections (omitted v3 sections stay untouched on server!)
+      const backupForRpc = {
+        version: inspected.version,
+        bookings: inspected.sanitized.bookings
+      };
+      if (inspected.hasFinanceState && inspected.sanitized.financeState) {
+        backupForRpc.financeState = inspected.sanitized.financeState;
+      }
+      if (inspected.hasOperatingCosts && inspected.sanitized.operatingCosts) {
+        backupForRpc.operatingCosts = inspected.sanitized.operatingCosts;
+      }
+      if (inspected.hasHousekeepingTasks && inspected.sanitized.housekeepingTasks) {
+        backupForRpc.housekeepingTasks = inspected.sanitized.housekeepingTasks;
+      }
+      if (inspected.hasMaintenanceIssues && inspected.sanitized.maintenanceIssues) {
+        backupForRpc.maintenanceIssues = inspected.sanitized.maintenanceIssues;
+      }
+
+      const rpcRes = await callRpc("pms_restore_full_backup", {
+        p_backup: backupForRpc,
         p_actor_name: (session && session.staffName) || ""
       });
-      if (!rpcRes || !rpcRes.ok) return rpcRes || { ok: false, code: "SERVER_ERROR", error: "Khôi phục thất bại." };
-      applyMutationCommit(rpcRes, { action: "RESTORE", bulkReplace: true });
-      pullLatestFromCloud({ type: "local_commit" }); // refresh backup snapshots asynchronously
-      return { ...rpcRes, bookings: stateCache.bookings };
+      if (!rpcRes || !rpcRes.ok) {
+        return rpcRes || { ok: false, code: "SERVER_ERROR", error: "Khôi phục dữ liệu thất bại." };
+      }
+
+      // Read back persisted state directly from authoritative server BEFORE declaring success
+      const readBack = await pullLatestFromCloud({ type: "local_commit", force: true });
+      if (!readBack || !readBack.ok) {
+        return {
+          ok: false,
+          code: "READBACK_FAILED",
+          error: "Máy chủ đã nhận lệnh khôi phục nhưng chưa đọc lại được để đối soát số dư. Vui lòng tải lại trang kiểm tra."
+        };
+      }
+      const actualState = {
+        bookings: stateCache.bookings,
+        financeState: stateCache.financeState,
+        operatingCosts: stateCache.operatingCosts,
+        housekeepingTasks: stateCache.housekeepingTasks,
+        maintenanceIssues: stateCache.maintenanceIssues
+      };
+      const verification = Core.verifyRestoredState(inspected, actualState, preExisting);
+      if (!verification.ok) {
+        return {
+          ok: false,
+          code: "VERIFY_MISMATCH",
+          error: "Đối soát sau khôi phục phát hiện sai lệch: " + verification.diffs.map((d) => `${d.label} (lệch ${d.diff})`).join("; "),
+          verification
+        };
+      }
+
+      broadcastDeltaToPeers({ senderId: clientId, storeVersion, action: "RESTORE", bulkReplace: true, actor: (session && session.staffName) || "", ts: lastSyncedAt });
+      broadcastDeltaToPeers({ senderId: clientId, storeVersion, action: "FINANCE_CHANGED", ledgerVersion: lastFinanceLedgerVersion, actor: (session && session.staffName) || "", ts: lastSyncedAt });
+
+      return {
+        ...rpcRes,
+        ok: true,
+        bookings: stateCache.bookings,
+        financeState: getFinanceStateForCurrentRole(),
+        operatingCosts: stateCache.operatingCosts,
+        housekeepingTasks: stateCache.housekeepingTasks,
+        maintenanceIssues: stateCache.maintenanceIssues,
+        restoredSections: inspected.presentSections.slice(),
+        preservedSections: inspected.missingSections.slice(),
+        mediaInventory: inspected.mediaInventory,
+        verification
+      };
     }
 
     async function rollbackLastChange() {
@@ -1583,9 +1808,15 @@
         p_actor_name: (session && session.staffName) || ""
       });
       if (!rpcRes || !rpcRes.ok) return rpcRes || { ok: false, code: "SERVER_ERROR", error: "Hoàn tác thất bại." };
-      applyMutationCommit(rpcRes, { action: "ROLLBACK", bulkReplace: true });
-      pullLatestFromCloud({ type: "local_commit" });
-      return { ...rpcRes, bookings: stateCache.bookings };
+      await pullLatestFromCloud({ type: "local_commit", force: true });
+      broadcastDeltaToPeers({ senderId: clientId, storeVersion, action: "ROLLBACK", bulkReplace: true, actor: (session && session.staffName) || "", ts: lastSyncedAt });
+      broadcastDeltaToPeers({ senderId: clientId, storeVersion, action: "FINANCE_CHANGED", ledgerVersion: lastFinanceLedgerVersion, actor: (session && session.staffName) || "", ts: lastSyncedAt });
+      return {
+        ...rpcRes,
+        bookings: stateCache.bookings,
+        financeState: getFinanceStateForCurrentRole(),
+        operatingCosts: stateCache.operatingCosts
+      };
     }
 
     async function restoreFromAutoBackup(snapshotId) {
@@ -2058,53 +2289,308 @@
       return saved.ok ? { ok: true, deleted: target, accounts: saved.accounts } : saved;
     }
 
-    async function persistFinanceToCloud(nextFinance) {
-      const clean = Core.sanitizeFinanceState(nextFinance);
-      clean.updatedAt = new Date().toISOString();
-      if (isStaffSession()) {
-        const rpcRes = await callRpc("pms_save_meta", { p_key: "finance_ledger_v1", p_value: clean });
-        if (!rpcRes || !rpcRes.ok) {
-          return rpcRes || { ok: false, error: "Không thể lưu sổ quỹ lên Supabase." };
-        }
-      } else {
-        const res = await rawFetchJson(`${baseUrl}/rest/v1/pms_meta?on_conflict=key`, {
-          method: "POST",
-          headers: { Prefer: "resolution=merge-duplicates" },
-          body: { key: "finance_ledger_v1", value: clean, updated_at: clean.updatedAt }
-        });
-        if (!res.httpOk) return { ok: false, error: "Không thể lưu sổ quỹ lên Supabase." };
+    /* -------------------- Persistent Pending Finance Intents (Survives Reload/Offline) -------------------- */
+
+    function readPendingFinanceIntents() {
+      try {
+        const raw = root.localStorage.getItem(PENDING_FINANCE_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.filter((x) => x && x.idempotencyKey) : [];
+      } catch {
+        return [];
       }
-      stateCache.financeState = clean;
-      lastSyncedAt = clean.updatedAt;
-      emit({ type: "local_commit", state: getSnapshot(), status: getStatus() });
-      broadcastDeltaToPeers({ senderId: clientId, storeVersion, action: "FINANCE_UPDATE", financeState: clean, ts: clean.updatedAt });
-      return { ok: true, financeState: clean };
     }
 
-    async function cloudFinanceOp(mutatorFn) {
-      if (navigator.onLine === false) {
-        return { ok: false, offline: true, unconfirmed: true, error: "Đang mất kết nối mạng — giao dịch chưa được xác nhận." };
+    function writePendingFinanceIntents(list) {
+      const clean = (Array.isArray(list) ? list : []).slice(0, 50);
+      try {
+        root.localStorage.setItem(PENDING_FINANCE_KEY, JSON.stringify(clean));
+      } catch {}
+      return clean;
+    }
+
+    function upsertPendingFinanceIntent(intent) {
+      if (!intent || !intent.idempotencyKey) return [];
+      const cur = readPendingFinanceIntents();
+      const idx = cur.findIndex((x) => x.idempotencyKey === intent.idempotencyKey);
+      if (idx >= 0) cur[idx] = { ...cur[idx], ...intent };
+      else cur.unshift(intent);
+      const next = writePendingFinanceIntents(cur);
+      emit({ type: "pending_finance_intents", pendingIntents: next, status: getStatus() });
+      return next;
+    }
+
+    function removePendingFinanceIntent(key) {
+      const cur = readPendingFinanceIntents();
+      const next = cur.filter((x) => x.idempotencyKey !== key);
+      writePendingFinanceIntents(next);
+      emit({ type: "pending_finance_intents", pendingIntents: next, status: getStatus() });
+      return next;
+    }
+
+    function applyFinanceRpcResult(rpcRes, actionName) {
+      if (!rpcRes || typeof rpcRes !== "object") return;
+      if (rpcRes.financeState && typeof rpcRes.financeState === "object") {
+        stateCache.financeState = Core.sanitizeFinanceState(rpcRes.financeState);
+        lastFinanceUpdatedAt = stateCache.financeState.updatedAt || new Date().toISOString();
+        lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || lastFinanceLedgerVersion;
+        financeLoadState = "loaded";
+        financeLoadError = "";
       }
-      const fState = Core.sanitizeFinanceState(stateCache.financeState);
-      const out = mutatorFn(fState, stateCache.bookings);
-      if (!out || !out.ok) return out || { ok: false, error: "Thao tác tài chính thất bại." };
-      if (out.dryRun || out.idempotentReplay) return out;
-      const saved = await persistFinanceToCloud(out.nextFinanceState);
-      if (!saved.ok) return saved;
-      return { ...out, financeState: saved.financeState, bookings: stateCache.bookings };
+      if (Array.isArray(rpcRes.bookings)) {
+        Core.normalizeDormSlots(rpcRes.bookings);
+        stateCache.bookings = rpcRes.bookings;
+      }
+      if (typeof rpcRes.storeVersion === "number" && rpcRes.storeVersion > storeVersion) {
+        storeVersion = rpcRes.storeVersion;
+      }
+      lastSyncedAt = new Date().toISOString();
+      connectionStatus = "connected";
+      emit({
+        type: "local_commit",
+        remoteEvent: null,
+        state: getSnapshot(),
+        status: getStatus()
+      });
+      // SECURITY (v1.9.0): Lightweight notification ONLY — zero financeState blob in peer broadcast!
+      if (!rpcRes.idempotentHit) {
+        broadcastDeltaToPeers({
+          senderId: clientId,
+          storeVersion,
+          action: "FINANCE_CHANGED",
+          subAction: actionName || "FINANCE_OP",
+          ledgerVersion: lastFinanceLedgerVersion,
+          actor: (session && session.staffName) || "",
+          ts: lastSyncedAt
+        });
+      }
+    }
+
+    async function callAuthoritativeFinanceRpc(rpcName, rpcParams, opts = {}) {
+      if (financeLoadState !== "loaded" && !opts.allowBeforeLoaded) {
+        return {
+          ok: false,
+          code: "FINANCE_NOT_LOADED",
+          error: financeLoadState === "error"
+            ? "Không tải được sổ tài chính từ máy chủ — tạm khóa ghi sổ. Vui lòng thử tải lại sổ."
+            : "Đang tải sổ tài chính từ máy chủ — vui lòng chờ tải xong trước khi ghi sổ."
+        };
+      }
+      if (navigator.onLine === false) {
+        return {
+          ok: false,
+          offline: true,
+          unconfirmed: true,
+          code: "NETWORK_OFFLINE",
+          error: "Đang mất kết nối mạng — giao dịch CHƯA được xác nhận. Nội dung đang nhập được giữ nguyên."
+        };
+      }
+
+      const idemKey = opts.idempotencyKey ? Core.sanitizeText(opts.idempotencyKey, 120) : "";
+      const intentKind = opts.intentKind || "tx"; // "tx" | "shift"
+      let intentRecord = null;
+      if (idemKey) {
+        intentRecord = {
+          idempotencyKey: idemKey,
+          kind: intentKind,
+          op: opts.op || rpcName,
+          rpcName,
+          rpcParams,
+          label: opts.label || "Giao dịch tài chính",
+          amount: Number(opts.amount) || 0,
+          status: "verifying",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        upsertPendingFinanceIntent(intentRecord);
+      }
+
+      const rpcRes = await callRpc(rpcName, rpcParams);
+      if (rpcRes && rpcRes.ok) {
+        if (idemKey) removePendingFinanceIntent(idemKey);
+        applyFinanceRpcResult(rpcRes, opts.op || rpcName);
+        return {
+          ...rpcRes,
+          financeState: getFinanceStateForCurrentRole(),
+          bookings: stateCache.bookings
+        };
+      }
+
+      // Deterministic server rejection (400/403/404/409) — NOT ambiguous, clear pending intent & sync fresh state if returned
+      if (rpcRes && !rpcRes.offline && rpcRes.status && rpcRes.status >= 400 && rpcRes.status < 500) {
+        if (idemKey) removePendingFinanceIntent(idemKey);
+        if (rpcRes.financeState && typeof rpcRes.financeState === "object") {
+          stateCache.financeState = Core.sanitizeFinanceState(rpcRes.financeState);
+          lastFinanceUpdatedAt = stateCache.financeState.updatedAt || lastFinanceUpdatedAt;
+          lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || lastFinanceLedgerVersion;
+          emit({ type: "remote_change", state: getSnapshot(), status: getStatus() });
+        }
+        return rpcRes;
+      }
+
+      // Network drop / timeout / 5xx — server may or may not have committed!
+      // KEEP intent persisted in localStorage and mark as "Đang xác minh giao dịch" — NEVER claim "Đã thu"!
+      if (idemKey && intentRecord) {
+        upsertPendingFinanceIntent({
+          ...intentRecord,
+          status: "unconfirmed_network",
+          lastError: (rpcRes && rpcRes.error) || "Mất phản hồi từ máy chủ",
+          updatedAt: new Date().toISOString()
+        });
+      }
+      return {
+        ...(rpcRes || {}),
+        ok: false,
+        offline: true,
+        unconfirmed: true,
+        verifying: true,
+        code: "VERIFYING_TRANSACTION",
+        idempotencyKey: idemKey,
+        error: "Đang xác minh giao dịch — mất phản hồi từ máy chủ trước khi nhận xác nhận. Hệ thống sẽ tự kiểm tra theo mã giao dịch khi có mạng để tránh ghi trùng."
+      };
+    }
+
+    async function lookupFinanceByIdempotency(key) {
+      const cleanKey = Core.sanitizeText(key, 120);
+      if (!cleanKey) return { ok: true, found: false, transaction: null };
+      const res = await callRpc("pms_finance_lookup_idempotency", { p_key: cleanKey, p_kind: "tx" });
+      if (res && res.ok) {
+        if (res.financeState && typeof res.financeState === "object") {
+          stateCache.financeState = Core.sanitizeFinanceState(res.financeState);
+          lastFinanceUpdatedAt = stateCache.financeState.updatedAt || lastFinanceUpdatedAt;
+          lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || lastFinanceLedgerVersion;
+          financeLoadState = "loaded";
+          financeLoadError = "";
+        }
+        return { ok: true, found: Boolean(res.found && res.transaction), transaction: res.transaction || null };
+      }
+      return { ok: false, offline: Boolean(res && res.offline), found: false, error: (res && res.error) || "Không thể tra cứu mã giao dịch." };
+    }
+
+    async function lookupShiftByIdempotency(key) {
+      const cleanKey = Core.sanitizeText(key, 120);
+      if (!cleanKey) return { ok: true, found: false, shift: null };
+      const res = await callRpc("pms_finance_lookup_idempotency", { p_key: cleanKey, p_kind: "shift" });
+      if (res && res.ok) {
+        if (res.financeState && typeof res.financeState === "object") {
+          stateCache.financeState = Core.sanitizeFinanceState(res.financeState);
+          lastFinanceUpdatedAt = stateCache.financeState.updatedAt || lastFinanceUpdatedAt;
+          lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || lastFinanceLedgerVersion;
+          financeLoadState = "loaded";
+          financeLoadError = "";
+        }
+        return { ok: true, found: Boolean(res.found && res.shift), shift: res.shift || null };
+      }
+      return { ok: false, offline: Boolean(res && res.offline), found: false, error: (res && res.error) || "Không thể tra cứu mã giao ca." };
+    }
+
+    async function reconcilePendingFinanceIntents() {
+      const intents = readPendingFinanceIntents();
+      if (!intents.length || !isSessionActive() || navigator.onLine === false) {
+        return { ok: true, resolved: [], remaining: intents };
+      }
+      const resolved = [];
+      const remaining = [];
+      for (const intent of intents) {
+        const lookup = intent.kind === "shift"
+          ? await lookupShiftByIdempotency(intent.idempotencyKey)
+          : await lookupFinanceByIdempotency(intent.idempotencyKey);
+        if (!lookup.ok) {
+          remaining.push(intent);
+          continue;
+        }
+        if (lookup.found) {
+          resolved.push({
+            idempotencyKey: intent.idempotencyKey,
+            status: "committed_on_server",
+            transaction: lookup.transaction || null,
+            shift: lookup.shift || null
+          });
+        } else {
+          remaining.push({ ...intent, status: "ready_to_retry", updatedAt: new Date().toISOString() });
+        }
+      }
+      writePendingFinanceIntents(remaining);
+      if (resolved.length > 0) {
+        await pullLatestFromCloud({ type: "remote_change", force: true, _skipIntentReconcile: true });
+      }
+      emit({ type: "pending_finance_intents", pendingIntents: remaining, resolved, status: getStatus() });
+      return { ok: true, resolved, remaining };
+    }
+
+    async function retryPendingFinanceIntent(idempotencyKey) {
+      const cleanKey = Core.sanitizeText(idempotencyKey, 120);
+      const intent = readPendingFinanceIntents().find((x) => x.idempotencyKey === cleanKey);
+      if (!intent) return { ok: false, code: "NOT_FOUND", error: "Không tìm thấy lệnh chờ tương ứng." };
+      // ALWAYS check server by idempotencyKey FIRST before resending!
+      const lookup = intent.kind === "shift"
+        ? await lookupShiftByIdempotency(cleanKey)
+        : await lookupFinanceByIdempotency(cleanKey);
+      if (!lookup.ok) {
+        return { ok: false, offline: true, unconfirmed: true, error: lookup.error || "Chưa thể xác minh giao dịch trên máy chủ." };
+      }
+      if (lookup.found) {
+        removePendingFinanceIntent(cleanKey);
+        await pullLatestFromCloud({ type: "local_commit", force: true, _skipIntentReconcile: true });
+        return {
+          ok: true,
+          idempotentHit: true,
+          alreadyCommitted: true,
+          transaction: lookup.transaction || null,
+          shift: lookup.shift || null,
+          financeState: getFinanceStateForCurrentRole(),
+          bookings: stateCache.bookings
+        };
+      }
+      // Confirmed NOT on server yet -> safe to resend with the EXACT SAME idempotencyKey!
+      return callAuthoritativeFinanceRpc(intent.rpcName, intent.rpcParams, {
+        idempotencyKey: cleanKey,
+        intentKind: intent.kind,
+        op: intent.op,
+        label: intent.label,
+        amount: intent.amount
+      });
     }
 
     function getFinanceStateForCurrentRole() {
       const r = getCurrentRole();
       if (r === "housekeeping") return null;
+      if (!stateCache.financeState) return null;
       const full = Core.sanitizeFinanceState(stateCache.financeState);
       if (r === "reception") {
+        // Mirror server/db.js & supabase/schema.sql exact rules:
+        // Reception sees guest payments/refunds/legacy AND ALL cash_frontdesk counter transactions/openings/checks + active/own cashShifts!
+        const actorUser = String((session && session.username) || "").trim().toLowerCase();
+        const actorName = String((session && session.staffName) || "").trim().toLowerCase();
+        const cashShiftsAll = (full.cashShifts || []).filter((s) => s && s.fundId === "cash_frontdesk");
+        const latestConfirmed = cashShiftsAll
+          .filter((s) => s.status === "confirmed")
+          .sort((a, b) => String(b.confirmedAt || b.closedAt || b.openedAt).localeCompare(String(a.confirmedAt || a.closedAt || a.openedAt)))[0] || null;
+        const visibleShifts = cashShiftsAll.filter((s) => (
+          s.status === "open"
+          || s.status === "pending_handover"
+          || (latestConfirmed && s.id === latestConfirmed.id)
+          || (actorUser && (String(s.outgoingUsername || "").toLowerCase() === actorUser || String(s.incomingUsername || "").toLowerCase() === actorUser))
+          || (actorName && (String(s.outgoingStaffName || "").toLowerCase() === actorName || String(s.incomingStaffName || "").toLowerCase() === actorName || String(s.targetIncomingStaffName || "").toLowerCase() === actorName))
+        ));
         return {
           ...full,
-          transactions: full.transactions.filter((t) => t.txType === "customer_payment" || t.txType === "customer_refund" || t.txType === "legacy_payment"),
-          openingBalances: [],
-          reconciliationChecks: [],
-          syncLogs: []
+          transactions: full.transactions.filter((t) => (
+            t.txType === "customer_payment"
+            || t.txType === "customer_refund"
+            || t.txType === "legacy_payment"
+            || t.txType === "legacy_opening"
+            || t.fundId === "cash_frontdesk"
+            || t.fromFundId === "cash_frontdesk"
+            || t.toFundId === "cash_frontdesk"
+          )),
+          supplierInvoices: [],
+          cashShifts: visibleShifts,
+          openingBalances: (full.openingBalances || []).filter((o) => o && o.fundId === "cash_frontdesk"),
+          reconciliationChecks: (full.reconciliationChecks || []).filter((c) => c && c.fundId === "cash_frontdesk"),
+          syncLogs: [],
+          migrationHistory: []
         };
       }
       return full;
@@ -2116,6 +2602,7 @@
         ok: consistency.ok && connectionStatus === "connected",
         backend: "supabase",
         realtimeConnected: wsJoined,
+        financeLoadState,
         storageReadable: connectionStatus === "connected",
         storageWritable: connectionStatus === "connected",
         storageCorrupted: false,
@@ -2154,354 +2641,152 @@
       getOperatingCosts: () => (can("costs:read") ? stateCache.operatingCosts : null),
       saveOperatingCosts,
       getFinanceState: getFinanceStateForCurrentRole,
-      getPendingFinanceIntents: () => [],
-      dismissPendingFinanceIntent: () => [],
-      lookupFinanceByIdempotency: async (key) => {
-        const f = Core.sanitizeFinanceState(stateCache.financeState);
-        const found = f.transactions.find((t) => t.idempotencyKey === key) || null;
-        return { ok: true, found: Boolean(found), transaction: found };
-      },
-      reconcilePendingFinanceIntents: async () => ({ ok: true, resolved: [], remaining: [] }),
-      retryPendingFinanceIntent: async () => ({ ok: false, error: "Không có lệnh chờ." }),
-      recordFinanceTransaction: (payload = {}) => cloudFinanceOp((fState) => {
+      getFinanceLoadState,
+      getPendingFinanceIntents: readPendingFinanceIntents,
+      dismissPendingFinanceIntent: removePendingFinanceIntent,
+      lookupFinanceByIdempotency,
+      lookupShiftByIdempotency,
+      reconcilePendingFinanceIntents,
+      retryPendingFinanceIntent,
+      recordFinanceTransaction: (payload = {}) => {
         const txType = Core.FINANCE_TX_TYPES[payload.txType] ? payload.txType : "customer_payment";
-        if (txType === "customer_refund" && !can("finance:approve_refund")) return { ok: false, code: "FORBIDDEN", error: "Hoàn tiền cần quyền Quản lý." };
-        if (txType === "balance_adjustment" && !can("finance:approve_adjustment")) return { ok: false, code: "FORBIDDEN", error: "Điều chỉnh quỹ cần quyền Quản lý." };
-        const idem = payload.idempotencyKey || `ftx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-        const dup = fState.transactions.find((t) => t.idempotencyKey === idem);
-        if (dup) return { ok: true, idempotentReplay: true, transaction: dup, nextFinanceState: fState };
-        const seq = (fState.voucherSeq || fState.transactions.length) + 1;
-        const ts = Core.normalizeFinanceTimestamp(payload.receivedAt || payload.receivedDate);
-        const meta = Core.FINANCE_TX_TYPES[txType];
-        const tx = Core.sanitizeFinanceTransaction({
-          ...payload,
-          id: `ftx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-          voucherCode: `${meta.prefix}-${ts.receivedDate.slice(0, 7).replace("-", "")}-${String(seq).padStart(4, "0")}`,
-          receivedDate: ts.receivedDate,
-          receivedAt: ts.receivedAt,
-          operator: (session && session.staffName) || payload.operator || "Nhân viên",
-          idempotencyKey: idem,
-          recordedAt: new Date().toISOString()
-        }, seq);
-        return { ok: true, idempotentReplay: false, transaction: tx, nextFinanceState: { ...fState, ledgerVersion: (fState.ledgerVersion || 0) + 1, voucherSeq: seq, transactions: [...fState.transactions, tx] } };
-      }),
-      transferBetweenFunds: (payload = {}) => cloudFinanceOp((fState) => {
-        if (!can("finance:transfer")) return { ok: false, code: "FORBIDDEN", error: "Chuyển quỹ chỉ dành cho Quản lý." };
-        const idem = payload.idempotencyKey || `ftx_trf_${Date.now().toString(36)}`;
-        const dup = fState.transactions.find((t) => t.idempotencyKey === idem);
-        if (dup) return { ok: true, idempotentReplay: true, transaction: dup, nextFinanceState: fState };
-        const seq = (fState.voucherSeq || fState.transactions.length) + 1;
-        const ts = Core.normalizeFinanceTimestamp(payload.receivedAt || payload.receivedDate);
-        const tx = Core.sanitizeFinanceTransaction({
-          ...payload, txType: "fund_transfer", entityType: "fund", fundId: payload.fromFundId,
-          id: `ftx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-          voucherCode: `CK-${ts.receivedDate.slice(0, 7).replace("-", "")}-${String(seq).padStart(4, "0")}`,
-          receivedDate: ts.receivedDate, receivedAt: ts.receivedAt,
-          operator: (session && session.staffName) || "Quản lý", idempotencyKey: idem, recordedAt: new Date().toISOString()
-        }, seq);
-        return { ok: true, idempotentReplay: false, transaction: tx, nextFinanceState: { ...fState, ledgerVersion: (fState.ledgerVersion || 0) + 1, voucherSeq: seq, transactions: [...fState.transactions, tx] } };
-      }),
-      setFundOpeningBalance: (payload = {}) => cloudFinanceOp((fState) => {
-        if (!can("finance:opening_balance")) return { ok: false, code: "FORBIDDEN", error: "Khai báo số dư đầu kỳ chỉ dành cho Quản lý." };
-        const entry = { id: `ob_${payload.fundId}_${payload.asOfDate || Core.getVietnamTodayISO()}`, fundId: payload.fundId, amount: Core.parseSignedVND(payload.amount), asOfDate: Core.normalizeFinanceDateISO(payload.asOfDate) || Core.getVietnamTodayISO(), voucherRef: Core.sanitizeText(payload.voucherRef, 80), note: Core.sanitizeText(payload.note, 300), recordedBy: (session && session.staffName) || "Quản lý", recordedAt: new Date().toISOString() };
-        return { ok: true, openingBalance: entry, nextFinanceState: { ...fState, openingBalances: [...(fState.openingBalances || []).filter((o) => o.id !== entry.id), entry] } };
-      }),
-      reconcileFinanceTransaction: (txId, payload = {}) => cloudFinanceOp((fState) => {
-        if (!can("finance:reconcile")) return { ok: false, code: "FORBIDDEN", error: "Đối chiếu chỉ dành cho Quản lý." };
-        const evidence = Core.sanitizeText(payload.reconcileEvidence !== undefined ? payload.reconcileEvidence : payload.reconcileNote, 300);
-        const nextTx = fState.transactions.map((t) => {
-          if (t.id !== txId) return t;
-          const isOpening = t.isLegacyMigrated && payload.legacyResolution === "included_in_opening";
-          const isToFund = t.isLegacyMigrated && (payload.legacyResolution === "record_to_fund" || (payload.fundId && payload.receivedDate && !isOpening));
-          return {
-            ...t,
-            reconciled: payload.reconciled !== undefined ? Boolean(payload.reconciled) : true,
-            fundId: isOpening ? "unassigned_legacy" : (isToFund ? payload.fundId : t.fundId),
-            receivedDate: isToFund ? payload.receivedDate : t.receivedDate,
-            legacyStatus: isOpening ? "reconciled_in_opening" : (isToFund ? "reconciled" : t.legacyStatus),
-            legacyResolution: isOpening ? "included_in_opening" : (isToFund ? "record_to_fund" : (t.legacyResolution || "")),
-            reconciledBy: (session && session.staffName) || "Quản lý",
-            reconciledAt: new Date().toISOString(),
-            reconcileNote: Core.sanitizeText(payload.reconcileNote || t.reconcileNote, 300),
-            reconcileEvidence: evidence || t.reconcileEvidence || ""
-          };
-        });
-        return { ok: true, nextFinanceState: { ...fState, transactions: nextTx } };
-      }),
-      saveFundReconciliationCheck: (payload = {}) => cloudFinanceOp((fState, bookings) => {
-        if (!can("finance:reconcile")) return { ok: false, code: "FORBIDDEN", error: "Đối chiếu chỉ dành cho Quản lý." };
-        const asOfDate = Core.normalizeFinanceDateISO(payload.asOfDate) || Core.getVietnamTodayISO();
-        const cb = Core.computeCashbookReport(fState, bookings, { toDate: asOfDate });
-        const fRep = cb.funds.find((f) => f.id === payload.fundId);
-        const bookBal = fRep ? fRep.closingBalance : 0;
-        const actBal = Core.parseSignedVND(payload.actualBalance);
-        const check = { id: `rec_${payload.fundId}_${Date.now().toString(36)}`, fundId: payload.fundId, asOfDate, actualBalance: actBal, bookBalanceAtCheck: bookBal, discrepancy: Core.roundVND(actBal - bookBal), note: Core.sanitizeText(payload.note, 300), checkedBy: (session && session.staffName) || "Quản lý", checkedAt: new Date().toISOString() };
-        return { ok: true, check, nextFinanceState: { ...fState, reconciliationChecks: [...(fState.reconciliationChecks || []), check] } };
-      }),
-      cancelBookingWithDeposit: async (bookingId, payload = {}) => {
-        const target = stateCache.bookings.find((b) => b.id === bookingId);
-        if (!target) return { ok: false, error: "Không tìm thấy đặt phòng." };
-        return saveBooking({ ...target, status: "cancelled", cancelReason: payload.reason || "Khách hủy", depositDisposition: payload.depositDisposition || "pending", retainedDepositAmount: payload.retainedDepositAmount || 0, allowOverpaid: true, ledgerManaged: true }, { expectedRevision: target.revision });
+        if (txType === "customer_refund" && !can("finance:approve_refund")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Hoàn tiền cần quyền Quản lý." });
+        }
+        if (txType === "balance_adjustment" && !can("finance:approve_adjustment")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Điều chỉnh quỹ cần quyền Quản lý." });
+        }
+        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120)
+          || `ftx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        const cleanPayload = { ...payload, txType, idempotencyKey: idemKey };
+        return callAuthoritativeFinanceRpc(
+          "pms_finance_record_tx",
+          { p_payload: cleanPayload, p_idempotency_key: idemKey },
+          {
+            idempotencyKey: idemKey,
+            intentKind: "tx",
+            op: txType,
+            label: txType === "customer_refund" ? "Hoàn tiền khách" : (txType === "balance_adjustment" ? "Điều chỉnh quỹ" : "Thu tiền khách"),
+            amount: Core.parseSignedVND(payload.amount)
+          }
+        );
       },
-      updateBookingCharges: async (bookingId, payload = {}) => {
-        const target = stateCache.bookings.find((b) => b.id === bookingId);
-        if (!target) return { ok: false, error: "Không tìm thấy đặt phòng." };
-        return saveBooking({ ...target, roomAmount: payload.roomAmount !== undefined ? payload.roomAmount : Core.getBookingChargesBreakdown(target).roomAmount, services: payload.services !== undefined ? payload.services : (target.services || []), adjustments: payload.adjustments !== undefined ? payload.adjustments : (target.adjustments || []), allowOverpaid: true, ledgerManaged: true }, { expectedRevision: target.revision });
+      transferBetweenFunds: (payload = {}) => {
+        if (!can("finance:transfer")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Chuyển quỹ chỉ dành cho Quản lý." });
+        }
+        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120)
+          || `ftx_trf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        const cleanPayload = { ...payload, idempotencyKey: idemKey };
+        return callAuthoritativeFinanceRpc(
+          "pms_finance_transfer",
+          { p_payload: cleanPayload, p_idempotency_key: idemKey },
+          { idempotencyKey: idemKey, intentKind: "tx", op: "fund_transfer", label: "Chuyển quỹ", amount: Core.parseVND(payload.amount) }
+        );
       },
-      migrateLegacyPayments: (opts = {}) => cloudFinanceOp((fState, bookings) => {
-        if (!can("admin:backup")) return { ok: false, code: "FORBIDDEN", error: "Chuyển đổi dữ liệu chỉ dành cho Quản lý." };
-        const plan = Core.buildLegacyMigrationPlan(bookings, fState, (session && session.staffName) || "Quản lý");
-        return { ok: true, dryRun: Boolean(opts.dryRun), ...plan, nextFinanceState: plan.nextFinanceState };
-      }),
-      saveSupplierInvoice: (payload = {}) => cloudFinanceOp((fState) => {
-        if (!can("finance:payables_write")) return { ok: false, code: "FORBIDDEN", error: "Quản lý hóa đơn NCC chỉ dành cho Quản lý." };
-        const list = Array.isArray(fState.supplierInvoices) ? fState.supplierInvoices : [];
-        const existing = payload.id ? list.find((i) => i.id === payload.id) : null;
-        const inv = Core.sanitizeSupplierInvoice({ ...(existing || {}), ...payload, id: existing ? existing.id : (payload.id || `sinv_${Date.now().toString(36)}`), createdBy: existing ? existing.createdBy : ((session && session.staffName) || "Quản lý"), updatedAt: new Date().toISOString() }, list.length);
-        if (!inv || !inv.lines.length) return { ok: false, error: "Thông tin hóa đơn không hợp lệ." };
-        const nextList = existing ? list.map((i) => (i.id === inv.id ? inv : i)) : [inv, ...list];
-        return { ok: true, invoice: inv, nextFinanceState: { ...fState, supplierInvoices: nextList } };
-      }),
-      deleteSupplierInvoice: (invoiceId) => cloudFinanceOp((fState) => {
-        if (!can("finance:payables_write")) return { ok: false, code: "FORBIDDEN", error: "Chỉ Quản lý được xóa hóa đơn NCC." };
-        const hasPays = (fState.transactions || []).some((t) => t.txType === "supplier_payment" && t.invoiceId === invoiceId);
-        if (hasPays) return { ok: false, code: "INVOICE_HAS_PAYMENTS", error: "Hóa đơn đã có phiếu chi — không thể xóa." };
-        return { ok: true, deletedId: invoiceId, nextFinanceState: { ...fState, supplierInvoices: (fState.supplierInvoices || []).filter((i) => i.id !== invoiceId) } };
-      }),
-      paySupplierInvoice: (invoiceId, payload = {}) => cloudFinanceOp((fState) => {
-        if (!can("finance:payables_pay")) return { ok: false, code: "FORBIDDEN", error: "Thanh toán hóa đơn NCC chỉ dành cho Quản lý." };
-        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120) || `ftx_spay_${Date.now().toString(36)}`;
-        const dup = fState.transactions.find((t) => t.idempotencyKey === idemKey);
-        if (dup) return { ok: true, idempotentReplay: true, transaction: dup, nextFinanceState: fState };
-        const inv = (fState.supplierInvoices || []).find((i) => i.id === invoiceId);
-        if (!inv) return { ok: false, error: "Không tìm thấy hóa đơn nhà cung cấp." };
-        const paidSoFar = fState.transactions.filter((t) => t.txType === "supplier_payment" && t.invoiceId === invoiceId).reduce((s, t) => s + Core.parseVND(t.amount), 0);
-        const rem = Math.max(0, Core.roundVND(inv.totalAmount - paidSoFar));
-        const amt = Core.parseVND(payload.amount);
-        if (rem <= 0) return { ok: false, code: "INVOICE_ALREADY_PAID", currentRemaining: 0, error: "Hóa đơn đã thanh toán hết." };
-        if (payload.expectedRemaining !== undefined && Core.parseVND(payload.expectedRemaining) !== rem) {
-          return { ok: false, code: "STALE_INVOICE_BALANCE", currentRemaining: rem, error: "Số dư hóa đơn vừa thay đổi." };
+      setFundOpeningBalance: (payload = {}) => {
+        if (!can("finance:opening_balance")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Khai báo số dư đầu kỳ chỉ dành cho Quản lý." });
         }
-        if (amt <= 0 || amt > rem) return { ok: false, code: "EXCEEDS_REMAINING", currentRemaining: rem, error: "Số tiền chi vượt quá số còn phải trả." };
-        const auxSeq = (fState.voucherSeq || fState.transactions.length) + 1;
-        const ts = Core.normalizeFinanceTimestamp(payload.receivedAt || payload.receivedDate);
-        const tx = Core.sanitizeFinanceTransaction({ ...payload, txType: "supplier_payment", entityType: "supplier_invoice", invoiceId: inv.id, invoiceVoucherNo: inv.voucherNo, supplierName: inv.supplierName, id: `ftx_${Date.now().toString(36)}`, voucherCode: `PC-${ts.receivedDate.slice(0, 7).replace("-", "")}-${String(auxSeq).padStart(4, "0")}`, receivedDate: ts.receivedDate, receivedAt: ts.receivedAt, operator: (session && session.staffName) || "Quản lý", approvedBy: (session && session.staffName) || "Quản lý", idempotencyKey: idemKey, recordedAt: new Date().toISOString() }, auxSeq);
-        return { ok: true, idempotentReplay: false, transaction: tx, invoice: inv, nextFinanceState: { ...fState, voucherSeq: auxSeq, transactions: [...fState.transactions, tx] } };
-      }),
-      lookupShiftByIdempotency: async (key) => {
-        const cleanKey = Core.sanitizeText(key, 120);
-        const fState = stateCache.financeState || Core.createDefaultFinanceState();
-        const found = (fState.cashShifts || []).find((s) => (
-          s.openIdempotencyKey === cleanKey || s.closeIdempotencyKey === cleanKey || s.confirmIdempotencyKey === cleanKey
-        )) || null;
-        return { ok: true, found: Boolean(found), shift: found };
+        return callAuthoritativeFinanceRpc("pms_finance_set_opening_balance", { p_payload: payload }, { op: "opening_balance" });
       },
-      openCashShift: (payload = {}) => cloudFinanceOp((fState) => {
-        if (!can("finance:shift_write")) return { ok: false, code: "FORBIDDEN", error: "Bạn không có quyền mở ca lễ tân." };
-        const shifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
-        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120) || `shift_open_${Date.now().toString(36)}`;
-        const dup = shifts.find((s) => s.openIdempotencyKey === idemKey);
-        if (dup) return { ok: true, idempotentReplay: true, shift: dup, nextFinanceState: fState };
-        const fundId = payload.fundId || "cash_frontdesk";
-        const openSh = shifts.find((s) => s.fundId === fundId && s.status === "open");
-        if (openSh) return { ok: false, code: "SHIFT_ALREADY_OPEN", shift: openSh, error: `Đang có ca ${openSh.shiftCode} mở.` };
-        const pendSh = shifts.find((s) => s.fundId === fundId && s.status === "pending_handover");
-        if (pendSh) return { ok: false, code: "PENDING_HANDOVER_EXISTS", shift: pendSh, error: `Ca ${pendSh.shiftCode} đang chờ nhận bàn giao.` };
-        const basis = Core.getShiftOpeningBasis(fState, fundId);
-        const nowISO = new Date().toISOString();
-        const vnDate = Core.getVietnamTodayISO();
-        const code = `CA-${vnDate.replace(/-/g, "")}-${String(shifts.filter((s) => s.shiftDate === vnDate).length + 1).padStart(2, "0")}`;
-        const staffName = (session && session.staffName) || "Lễ tân";
-        const username = (session && session.username) || "";
-        const shift = Core.sanitizeCashShift({
-          id: `shift_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-          shiftCode: code,
-          fundId,
-          shiftDate: vnDate,
-          shiftLabel: payload.shiftLabel || "",
-          status: "open",
-          previousShiftId: basis.previousShiftId,
-          previousShiftCode: basis.previousShiftCode,
-          txWindowStart: basis.openingBasisType === "previous_shift" && basis.txWindowStart ? basis.txWindowStart : nowISO,
-          openingBasisType: basis.openingBasisType,
-          openingBasisRef: basis.openingBasisRef,
-          openingCash: basis.openingCash,
-          expectedCash: basis.openingCash,
-          handedOverBy: basis.handedOverBy,
-          outgoingStaffName: staffName,
-          outgoingUsername: username,
-          openedAt: nowISO,
-          openedBy: staffName,
-          openNote: payload.note || "",
-          openIdempotencyKey: idemKey
-        });
-        return { ok: true, idempotentReplay: false, shift, openingBasis: basis, nextFinanceState: { ...fState, cashShifts: [shift, ...shifts] } };
-      }),
-      closeCashShift: (shiftId, payload = {}) => cloudFinanceOp((fState, bookings) => {
-        if (!can("finance:shift_write")) return { ok: false, code: "FORBIDDEN", error: "Bạn không có quyền kết ca." };
-        const shifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
-        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120) || `shift_close_${shiftId}_${Date.now().toString(36)}`;
-        const dup = shifts.find((s) => s.closeIdempotencyKey === idemKey);
-        if (dup) return { ok: true, idempotentReplay: true, shift: dup, nextFinanceState: fState };
-        const idx = shifts.findIndex((s) => s.id === shiftId);
-        if (idx < 0) return { ok: false, error: "Không tìm thấy ca cần kết." };
-        const shift = shifts[idx];
-        if (shift.status !== "open") return { ok: false, code: "SHIFT_ALREADY_CLOSED", shift, error: `Ca ${shift.shiftCode} đã kết trước đó.` };
-        const live = Core.computeShiftLiveSummary(shift, fState, bookings);
-        if (payload.expectedTxCount !== undefined && Number(payload.expectedTxCount) !== live.txCount) {
-          return { ok: false, code: "STALE_SHIFT_TRANSACTIONS", liveSummary: live, liveExpectedCash: live.expectedCash, liveTxCount: live.txCount, liveLastTxId: live.lastTxId, error: "Có chứng từ tiền mặt mới trong lúc đếm tiền." };
+      reconcileFinanceTransaction: (txId, payload = {}) => {
+        if (!can("finance:reconcile")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Đối chiếu chỉ dành cho Quản lý." });
         }
-        const countedCash = Core.parseSignedVND(payload.countedCash);
-        const discrepancy = Core.roundVND(countedCash - live.expectedCash);
-        const explanation = Core.sanitizeText(payload.discrepancyExplanation || payload.explanation, 500);
-        if (discrepancy !== 0 && !explanation) return { ok: false, code: "EXPLANATION_REQUIRED", error: "Có chênh lệch — vui lòng nhập giải trình." };
-        const nowISO = new Date().toISOString();
-        const staffName = (session && session.staffName) || shift.outgoingStaffName;
-        const updated = Core.sanitizeCashShift({
-          ...shift,
-          status: "pending_handover",
-          closedAt: nowISO,
-          closedBy: staffName,
-          closeIdempotencyKey: idemKey,
-          cashInTotal: live.cashInTotal,
-          cashOutTotal: live.cashOutTotal,
-          bankRefTotal: live.bankRefTotal,
-          expectedCash: live.expectedCash,
-          countedCash,
-          discrepancy,
-          discrepancyExplanation: explanation,
-          discrepancyStatus: discrepancy !== 0 ? "pending_review" : "none",
-          closeNote: payload.closeNote || "",
-          targetIncomingStaffName: payload.targetIncomingStaffName || "",
-          lastTxId: live.lastTxId,
-          lastTxRecordedAt: live.lastTxRecordedAt,
-          includedTxIds: live.cashTransactions.map((t) => t.id),
-          bankRefTxIds: live.bankRefTransactions.map((t) => t.id),
-          includedTxSnapshot: live.cashTransactions,
-          updatedAt: nowISO
-        });
-        const nextShifts = shifts.slice();
-        nextShifts[idx] = updated;
-        return { ok: true, idempotentReplay: false, shift: updated, nextFinanceState: { ...fState, cashShifts: nextShifts } };
-      }),
-      confirmCashShift: (shiftId, payload = {}) => cloudFinanceOp((fState) => {
-        if (!can("finance:shift_write")) return { ok: false, code: "FORBIDDEN", error: "Bạn không có quyền xác nhận nhận bàn giao." };
-        const shifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
-        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120) || `shift_confirm_${shiftId}_${Date.now().toString(36)}`;
-        const dup = shifts.find((s) => s.confirmIdempotencyKey === idemKey);
-        if (dup) return { ok: true, idempotentReplay: true, shift: dup, nextFinanceState: fState };
-        const idx = shifts.findIndex((s) => s.id === shiftId);
-        if (idx < 0) return { ok: false, error: "Không tìm thấy biên bản giao ca." };
-        const shift = shifts[idx];
-        if (shift.status !== "pending_handover") return { ok: false, code: "SHIFT_NOT_PENDING_HANDOVER", error: "Ca này không ở trạng thái chờ nhận." };
-        const staffName = (session && session.staffName) || "Lễ tân ca sau";
-        const username = (session && session.username) || "";
-        if (getCurrentRole() === "reception" && staffName.toLowerCase() === String(shift.outgoingStaffName || "").toLowerCase()) {
-          return { ok: false, code: "SELF_CONFIRM_FORBIDDEN", error: "Người nhận ca phải xác nhận bằng tài khoản của chính mình." };
+        return callAuthoritativeFinanceRpc("pms_finance_reconcile_tx", { p_tx_id: txId, p_payload: payload }, { op: "reconcile_tx" });
+      },
+      saveFundReconciliationCheck: (payload = {}) => {
+        if (!can("finance:reconcile")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Đối chiếu chỉ dành cho Quản lý." });
         }
-        const receivedCash = Core.parseSignedVND(payload.receivedCash);
-        const handoverCountDiff = Core.roundVND(receivedCash - shift.countedCash);
-        const confirmNote = Core.sanitizeText(payload.confirmNote || payload.note, 500);
-        if (handoverCountDiff !== 0 && !confirmNote) return { ok: false, code: "CONFIRM_NOTE_REQUIRED", error: "Số thực nhận khác số giao — vui lòng ghi chú." };
-        const nowISO = new Date().toISOString();
-        const vnDate = Core.getVietnamTodayISO();
-        const nextShift = Core.sanitizeCashShift({
-          id: `shift_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-          shiftCode: `CA-${vnDate.replace(/-/g, "")}-${String(shifts.filter((s) => s.shiftDate === vnDate).length + 1).padStart(2, "0")}`,
-          fundId: shift.fundId,
-          shiftDate: vnDate,
-          status: "open",
-          previousShiftId: shift.id,
-          previousShiftCode: shift.shiftCode,
-          txWindowStart: shift.closedAt || nowISO,
-          openingBasisType: "previous_shift",
-          openingBasisRef: `Từ ca trước ${shift.shiftCode} (${shift.outgoingStaffName} bàn giao • thực nhận ${Core.formatVND(receivedCash)})`,
-          openingCash: receivedCash,
-          expectedCash: receivedCash,
-          handedOverBy: shift.outgoingStaffName,
-          outgoingStaffName: staffName,
-          outgoingUsername: username,
-          openedAt: nowISO,
-          openedBy: staffName,
-          openIdempotencyKey: `${idemKey}_next`
-        });
-        const confirmed = Core.sanitizeCashShift({
-          ...shift,
-          status: "confirmed",
-          incomingStaffName: staffName,
-          incomingUsername: username,
-          receivedCash,
-          handoverCountDiff,
-          confirmedAt: nowISO,
-          confirmNote,
-          confirmIdempotencyKey: idemKey,
-          nextShiftId: nextShift.id,
-          discrepancyStatus: (shift.discrepancy !== 0 || handoverCountDiff !== 0) ? "pending_review" : shift.discrepancyStatus,
-          updatedAt: nowISO
-        });
-        const nextShifts = shifts.slice();
-        nextShifts[idx] = confirmed;
-        nextShifts.unshift(nextShift);
-        return { ok: true, idempotentReplay: false, shift: confirmed, nextShift, nextFinanceState: { ...fState, cashShifts: nextShifts } };
-      }),
-      resolveCashShiftDiscrepancy: (shiftId, payload = {}) => cloudFinanceOp((fState) => {
-        if (!can("finance:shift_manage")) return { ok: false, code: "FORBIDDEN", error: "Chỉ Quản lý được xử lý chênh lệch ca." };
-        const shifts = Array.isArray(fState.cashShifts) ? fState.cashShifts : [];
-        const idx = shifts.findIndex((s) => s.id === shiftId);
-        if (idx < 0) return { ok: false, error: "Không tìm thấy biên bản ca." };
-        const shift = shifts[idx];
-        const note = Core.sanitizeText(payload.resolutionNote || payload.reason, 500);
-        if (!note) return { ok: false, error: "Vui lòng nhập lý do xử lý." };
-        const staffName = (session && session.staffName) || "Quản lý";
-        const nowISO = new Date().toISOString();
-        let nextTxs = fState.transactions || [];
-        let auxSeq = fState.voucherSeq || nextTxs.length;
-        let adjustmentTx = null;
-        if (payload.createAdjustment) {
-          auxSeq += 1;
-          const adjAmount = payload.adjustmentAmount !== undefined && payload.adjustmentAmount !== "" ? Core.parseSignedVND(payload.adjustmentAmount) : (shift.receivedCash !== null ? Core.roundVND(shift.receivedCash - shift.expectedCash) : shift.discrepancy);
-          const ts = Core.normalizeFinanceTimestamp(nowISO);
-          adjustmentTx = Core.sanitizeFinanceTransaction({
-            id: `ftx_${Date.now().toString(36)}`,
-            voucherCode: `DC-${ts.receivedDate.slice(0, 7).replace("-", "")}-${String(auxSeq).padStart(4, "0")}`,
-            txType: "balance_adjustment",
-            entityType: "fund",
-            amount: adjAmount,
-            receivedDate: ts.receivedDate,
-            receivedAt: ts.receivedAt,
-            recordedAt: nowISO,
-            paymentMethod: "cash",
-            fundId: shift.fundId,
-            operator: staffName,
-            approvedBy: staffName,
-            reason: `Xử lý chênh lệch ca ${shift.shiftCode}: ${note}`,
-            shiftId: shift.id,
-            reconciled: true
-          }, auxSeq);
-          nextTxs = [...nextTxs, adjustmentTx];
+        return callAuthoritativeFinanceRpc("pms_finance_save_reconcile_check", { p_payload: payload }, { op: "reconcile_check" });
+      },
+      cancelBookingWithDeposit: (bookingId, payload = {}) => {
+        return callAuthoritativeFinanceRpc("pms_finance_cancel_booking_deposit", { p_booking_id: bookingId, p_payload: payload }, { op: "cancel_booking_deposit" });
+      },
+      updateBookingCharges: (bookingId, payload = {}) => {
+        return callAuthoritativeFinanceRpc("pms_finance_update_booking_charges", { p_booking_id: bookingId, p_payload: payload }, { op: "update_booking_charges" });
+      },
+      migrateLegacyPayments: (opts = {}) => {
+        if (!can("finance:reconcile")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Chuyển đổi dữ liệu chỉ dành cho Quản lý." });
         }
-        const updated = Core.sanitizeCashShift({
-          ...shift,
-          discrepancyStatus: "resolved",
-          resolvedBy: staffName,
-          resolvedAt: nowISO,
-          resolutionNote: note,
-          adjustmentHistory: [...(shift.adjustmentHistory || []), {
-            id: `sadj_${Date.now().toString(36)}`,
-            ts: nowISO,
-            operator: staffName,
-            action: adjustmentTx ? "adjustment_voucher" : "resolve_without_voucher",
-            adjustmentAmount: adjustmentTx ? adjustmentTx.amount : 0,
-            voucherId: adjustmentTx ? adjustmentTx.id : "",
-            voucherCode: adjustmentTx ? adjustmentTx.voucherCode : "",
-            reason: note
-          }],
-          updatedAt: nowISO
-        });
-        const nextShifts = shifts.slice();
-        nextShifts[idx] = updated;
-        return { ok: true, shift: updated, adjustmentTx, nextFinanceState: { ...fState, voucherSeq: auxSeq, transactions: nextTxs, cashShifts: nextShifts } };
-      }),
+        return callAuthoritativeFinanceRpc("pms_finance_migrate_legacy", { p_dry_run: Boolean(opts.dryRun) }, { op: "migrate_legacy" });
+      },
+      saveSupplierInvoice: (payload = {}) => {
+        if (!can("finance:payables_write")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Quản lý hóa đơn NCC chỉ dành cho Quản lý." });
+        }
+        return callAuthoritativeFinanceRpc("pms_finance_save_supplier_invoice", { p_payload: payload }, { op: "save_supplier_invoice" });
+      },
+      deleteSupplierInvoice: (invoiceId) => {
+        if (!can("finance:payables_write")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Chỉ Quản lý được xóa hóa đơn NCC." });
+        }
+        return callAuthoritativeFinanceRpc("pms_finance_delete_supplier_invoice", { p_invoice_id: invoiceId }, { op: "delete_supplier_invoice" });
+      },
+      paySupplierInvoice: (invoiceId, payload = {}) => {
+        if (!can("finance:payables_pay")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Thanh toán hóa đơn NCC chỉ dành cho Quản lý." });
+        }
+        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120)
+          || `ftx_spay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        const cleanPayload = { ...payload, idempotencyKey: idemKey };
+        return callAuthoritativeFinanceRpc(
+          "pms_finance_pay_supplier_invoice",
+          { p_invoice_id: invoiceId, p_payload: cleanPayload, p_idempotency_key: idemKey },
+          { idempotencyKey: idemKey, intentKind: "tx", op: "supplier_payment", label: "Chi trả nhà cung cấp", amount: Core.parseVND(payload.amount) }
+        );
+      },
+      openCashShift: (payload = {}) => {
+        if (!can("finance:shift_write")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Bạn không có quyền mở ca lễ tân." });
+        }
+        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120)
+          || `shift_open_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        return callAuthoritativeFinanceRpc(
+          "pms_finance_shift_open",
+          { p_payload: { ...payload, idempotencyKey: idemKey }, p_idempotency_key: idemKey },
+          { idempotencyKey: idemKey, intentKind: "shift", op: "shift_open", label: "Mở ca giao nhận tiền mặt" }
+        );
+      },
+      closeCashShift: (shiftId, payload = {}) => {
+        if (!can("finance:shift_write")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Bạn không có quyền kết ca." });
+        }
+        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120)
+          || `shift_close_${shiftId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        return callAuthoritativeFinanceRpc(
+          "pms_finance_shift_close",
+          { p_shift_id: shiftId, p_payload: { ...payload, idempotencyKey: idemKey }, p_idempotency_key: idemKey },
+          { idempotencyKey: idemKey, intentKind: "shift", op: "shift_close", label: "Kết ca & bàn giao két" }
+        );
+      },
+      confirmCashShift: (shiftId, payload = {}) => {
+        if (!can("finance:shift_write")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Bạn không có quyền xác nhận nhận bàn giao." });
+        }
+        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120)
+          || `shift_confirm_${shiftId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        return callAuthoritativeFinanceRpc(
+          "pms_finance_shift_confirm",
+          { p_shift_id: shiftId, p_payload: { ...payload, idempotencyKey: idemKey }, p_idempotency_key: idemKey },
+          { idempotencyKey: idemKey, intentKind: "shift", op: "shift_confirm", label: "Xác nhận nhận ca" }
+        );
+      },
+      resolveCashShiftDiscrepancy: (shiftId, payload = {}) => {
+        if (!can("finance:shift_manage")) {
+          return Promise.resolve({ ok: false, code: "FORBIDDEN", error: "Chỉ Quản lý được xử lý chênh lệch ca." });
+        }
+        const idemKey = Core.sanitizeText(payload.idempotencyKey, 120)
+          || `shift_res_${shiftId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        return callAuthoritativeFinanceRpc(
+          "pms_finance_shift_resolve",
+          { p_shift_id: shiftId, p_payload: { ...payload, idempotencyKey: idemKey }, p_idempotency_key: idemKey },
+          { idempotencyKey: idemKey, intentKind: "shift", op: "shift_resolve", label: "Xử lý chênh lệch ca" }
+        );
+      },
       appendFinanceSyncLog: async () => ({ ok: true }),
       getHousekeepingTasks: () => stateCache.housekeepingTasks,
       getMaintenanceIssues: () => stateCache.maintenanceIssues,
@@ -2522,6 +2807,8 @@
       pullLatest: () => pullLatestFromCloud({ type: "manual_refresh", force: true }),
       saveBooking,
       deleteBooking,
+      inspectImportPreview,
+      exportUnifiedBackup,
       restoreFromImport,
       rollbackLastChange,
       restoreFromAutoBackup,

@@ -3809,8 +3809,8 @@
     }
 
     function restoreFromImport(rawPayload) {
-      const validated = validateAndSanitizeImport(rawPayload);
-      if (!validated.ok) return { ok: false, code: "INVALID_IMPORT", error: validated.error, details: validated.details };
+      const inspected = inspectBackupPayload(rawPayload);
+      if (!inspected.ok) return { ok: false, code: inspected.code || "INVALID_IMPORT", error: inspected.error, details: inspected.details };
 
       const rawState = readRawState();
       if (!rawState.ok && rawState.code === "STORAGE_READ_FAILED") {
@@ -3820,16 +3820,80 @@
         quarantineRawCorrupt(rawState.raw, "Trước khi khôi phục JSON thủ công");
       }
 
+      const preExisting = {
+        bookings: rawState.ok && rawState.exists ? rawState.list.slice() : [],
+        financeState: getFinanceState(),
+        operatingCosts: getOperatingCosts(),
+        housekeepingTasks: getHousekeepingTasks(),
+        maintenanceIssues: getMaintenanceIssues()
+      };
+
       const previousList = rawState.ok && rawState.exists ? rawState.list.slice() : null;
       const expectedSnap = rawState.ok ? { raw: rawState.raw, metaRaw: rawState.metaRaw, storeVersion: rawState.storeVersion } : null;
-      const persistRes = persistListCAS(validated.bookings, previousList, expectedSnap, (list) => list.length === validated.bookings.length);
+      const persistRes = persistListCAS(inspected.sanitized.bookings, previousList, expectedSnap, (list) => list.length === inspected.sanitized.bookings.length);
       if (!persistRes.ok) return { ok: false, code: persistRes.code, error: persistRes.error };
 
-      const summary = `Khôi phục ${validated.bookings.length} lượt đặt phòng từ file JSON.`;
-      const snapshotId = recordAutoBackup("RESTORE", summary, validated.bookings);
+      try {
+        if (inspected.hasFinanceState && inspected.sanitized.financeState) {
+          const fRes = saveFinanceState(inspected.sanitized.financeState);
+          if (!fRes.ok) throw new Error(fRes.error || "Không thể ghi sổ tài chính.");
+        }
+        if (inspected.hasOperatingCosts && inspected.sanitized.operatingCosts) {
+          const cRes = saveOperatingCosts(inspected.sanitized.operatingCosts);
+          if (!cRes.ok) throw new Error(cRes.error || "Không thể ghi chi phí vận hành.");
+        }
+        if (inspected.hasHousekeepingTasks && inspected.sanitized.housekeepingTasks) {
+          const hkRes = saveHousekeepingTasks(inspected.sanitized.housekeepingTasks);
+          if (!hkRes.ok) throw new Error(hkRes.error || "Không thể ghi danh sách buồng phòng.");
+        }
+        if (inspected.hasMaintenanceIssues && inspected.sanitized.maintenanceIssues) {
+          const issRes = saveMaintenanceIssues(inspected.sanitized.maintenanceIssues);
+          if (!issRes.ok) throw new Error(issRes.error || "Không thể ghi danh sách sự cố.");
+        }
+      } catch (err) {
+        // Rollback local storage to pre-existing snapshot
+        try {
+          if (previousList) persistListCAS(previousList, null, null);
+          saveFinanceState(preExisting.financeState);
+          saveOperatingCosts(preExisting.operatingCosts);
+          saveHousekeepingTasks(preExisting.housekeepingTasks);
+          saveMaintenanceIssues(preExisting.maintenanceIssues);
+        } catch {}
+        return {
+          ok: false,
+          code: "RESTORE_ROLLED_BACK",
+          error: `Khôi phục bị gián đoạn và đã tự hoàn tác toàn bộ dữ liệu gốc: ${err && err.message ? err.message : "lỗi ghi dữ liệu"}`
+        };
+      }
+
+      const actualState = {
+        bookings: getBookings(),
+        financeState: getFinanceState(),
+        operatingCosts: getOperatingCosts(),
+        housekeepingTasks: getHousekeepingTasks(),
+        maintenanceIssues: getMaintenanceIssues()
+      };
+      const verification = verifyRestoredState(inspected, actualState, preExisting);
+      const restoredSections = inspected.presentSections.slice();
+      const preservedSections = inspected.missingSections.slice();
+
+      const summary = `Khôi phục ${actualState.bookings.length} lượt đặt phòng${inspected.hasFinanceState ? `, ${actualState.financeState.transactions.length} chứng từ tài chính` : " (giữ nguyên sổ tài chính hiện có)"} từ file JSON v${inspected.version}.`;
+      const snapshotId = recordAutoBackup("RESTORE", summary, actualState.bookings);
       appendAudit({ action: "RESTORE", snapshotId, summary });
 
-      return { ok: true, bookings: validated.bookings, snapshotId };
+      return {
+        ok: true,
+        bookings: actualState.bookings,
+        financeState: actualState.financeState,
+        operatingCosts: actualState.operatingCosts,
+        housekeepingTasks: actualState.housekeepingTasks,
+        maintenanceIssues: actualState.maintenanceIssues,
+        restoredSections,
+        preservedSections,
+        mediaInventory: inspected.mediaInventory,
+        verification,
+        snapshotId
+      };
     }
 
     function rollbackLastChange() {
@@ -6265,7 +6329,430 @@
 </html>`;
   }
 
+  /* -------------------- Unified Versioned Backup & Atomic Restore Verification (v1.9.0) -------------------- */
+
+  const BACKUP_SCHEMA_VERSION = 5;
+  const BACKUP_SCHEMA_NAME = "dongvan-pms-backup-v5";
+
+  const BACKUP_SECRET_KEYS = new Set([
+    "staffaccounts",
+    "staff_accounts",
+    "accounts",
+    "sessions",
+    "staff_sessions",
+    "password",
+    "passwordhash",
+    "password_hash",
+    "passhash",
+    "passcode",
+    "sessiontoken",
+    "session_token",
+    "anonkey",
+    "anon_key",
+    "access_token",
+    "accesstoken",
+    "refresh_token",
+    "refreshtoken",
+    "service_role_key",
+    "servicerolekey",
+    "supabasekey",
+    "supabase_key",
+    "apikey",
+    "api_key",
+    "secret",
+    "token"
+  ]);
+
+  function stripSecretsDeep(value, depth = 0) {
+    if (depth > 14 || value === null || value === undefined) return value;
+    if (Array.isArray(value)) return value.map((item) => stripSecretsDeep(item, depth + 1));
+    if (typeof value !== "object") return value;
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+      if (BACKUP_SECRET_KEYS.has(String(k).toLowerCase())) continue;
+      out[k] = stripSecretsDeep(v, depth + 1);
+    }
+    return out;
+  }
+
+  function extractPhotoIdFromRef(ref) {
+    const s = String(ref || "").trim();
+    const m = s.match(/\/api\/photos\/([a-zA-Z0-9_-]+)/);
+    return m ? m[1] : "";
+  }
+
+  function collectBackupMediaInventory(payload, existingPhotoIds = null) {
+    const existingSet = existingPhotoIds
+      ? (existingPhotoIds instanceof Set ? existingPhotoIds : new Set(Array.isArray(existingPhotoIds) ? existingPhotoIds : []))
+      : null;
+    const items = [];
+    const pushItem = (source, label, ref, extra = {}) => {
+      if (!ref || typeof ref !== "string") return;
+      const trimmed = ref.trim();
+      if (!trimmed) return;
+      const isInline = trimmed.startsWith("data:");
+      const photoId = extractPhotoIdFromRef(trimmed);
+      let availability = isInline ? "inline_restorable" : (photoId ? "server_local_ref" : "external_url");
+      if (!isInline && photoId && existingSet) {
+        availability = existingSet.has(photoId) ? "available_on_target" : "missing_on_target";
+      }
+      items.push({
+        source,
+        label: sanitizeText(label, 120) || source,
+        kind: extra.kind || (trimmed.startsWith("data:application/pdf") ? "pdf" : "image"),
+        inline: isInline,
+        photoId: photoId || "",
+        refPreview: isInline ? `${trimmed.slice(0, 32)}... (${trimmed.length} chars)` : trimmed.slice(0, 180),
+        availability
+      });
+    };
+
+    const bookings = Array.isArray(payload && payload.bookings) ? payload.bookings : [];
+    for (const b of bookings) {
+      if (b && b.confirmationPdf && b.confirmationPdf.dataUrl) {
+        pushItem("booking_pdf", `${b.roomId || ""} - ${b.guestName || b.id} (${b.confirmationPdf.name || "PDF"})`, b.confirmationPdf.dataUrl, { kind: "pdf" });
+      }
+    }
+
+    const fState = payload && payload.financeState && typeof payload.financeState === "object" ? payload.financeState : null;
+    if (fState && Array.isArray(fState.supplierInvoices)) {
+      for (const inv of fState.supplierInvoices) {
+        if (inv && inv.attachment && inv.attachment.dataUrl) {
+          pushItem("supplier_invoice", `${inv.voucherNo || inv.id} (${inv.attachment.name || "Chứng từ NCC"})`, inv.attachment.dataUrl, {
+            kind: inv.attachment.mimeType === "application/pdf" ? "pdf" : "image"
+          });
+        }
+      }
+    }
+
+    const hkTasks = Array.isArray(payload && payload.housekeepingTasks) ? payload.housekeepingTasks : [];
+    for (const t of hkTasks) {
+      if (t && Array.isArray(t.photos)) {
+        t.photos.forEach((p, idx) => {
+          const ref = typeof p === "string" ? p : (p && (p.url || p.dataUrl || p.src));
+          if (ref) pushItem("housekeeping_photo", `Buồng phòng ${t.roomId || ""} #${idx + 1}`, ref, { kind: "image" });
+        });
+      }
+    }
+
+    const issues = Array.isArray(payload && payload.maintenanceIssues) ? payload.maintenanceIssues : [];
+    for (const iss of issues) {
+      if (iss && Array.isArray(iss.photos)) {
+        iss.photos.forEach((p, idx) => {
+          const ref = typeof p === "string" ? p : (p && (p.url || p.dataUrl || p.src));
+          if (ref) pushItem("issue_photo", `Sự cố ${iss.roomId || ""} - ${iss.title || ""} #${idx + 1}`, ref, { kind: "image" });
+        });
+      }
+    }
+
+    const inlineRestorableCount = items.filter((i) => i.inline).length;
+    const serverLocalRefs = items.filter((i) => !i.inline && i.photoId);
+    const externalUrlRefs = items.filter((i) => !i.inline && !i.photoId);
+    const availableOnTargetCount = existingSet
+      ? inlineRestorableCount + serverLocalRefs.filter((i) => i.availability === "available_on_target").length
+      : inlineRestorableCount;
+    const missingOnTargetRefs = existingSet
+      ? serverLocalRefs.filter((i) => i.availability === "missing_on_target")
+      : serverLocalRefs;
+
+    return {
+      totalCount: items.length,
+      inlineRestorableCount,
+      serverLocalRefCount: serverLocalRefs.length,
+      externalUrlCount: externalUrlRefs.length,
+      availableOnTargetCount,
+      missingOnTargetCount: missingOnTargetRefs.length,
+      missingRefs: missingOnTargetRefs.map((i) => ({ source: i.source, label: i.label, photoId: i.photoId, ref: i.refPreview })),
+      items
+    };
+  }
+
+  function buildUnifiedBackupPayload(stateInput = {}, meta = {}) {
+    const src = stateInput && typeof stateInput === "object" ? stateInput : {};
+    const bookingsRaw = Array.isArray(src.bookings) ? src.bookings : [];
+    const bookings = bookingsRaw
+      .map((b) => {
+        const res = sanitizeBookingRecord(b, null);
+        return res && res.ok ? res.record : null;
+      })
+      .filter(Boolean);
+    normalizeDormSlots(bookings);
+
+    const operatingCosts = src.operatingCosts && typeof src.operatingCosts === "object"
+      ? sanitizeOperatingCostsState(src.operatingCosts)
+      : createDefaultOperatingCostsState();
+
+    const financeState = src.financeState && typeof src.financeState === "object"
+      ? sanitizeFinanceState(src.financeState)
+      : createDefaultFinanceState();
+
+    const housekeepingTasks = (Array.isArray(src.housekeepingTasks) ? src.housekeepingTasks : [])
+      .map(sanitizeHousekeepingTask)
+      .filter(Boolean);
+
+    const maintenanceIssues = (Array.isArray(src.maintenanceIssues) ? src.maintenanceIssues : [])
+      .map(sanitizeMaintenanceIssue)
+      .filter(Boolean);
+
+    const auditLogs = (Array.isArray(src.auditLogs) ? src.auditLogs : []).slice(0, 500);
+
+    const rawPayload = {
+      schema: BACKUP_SCHEMA_NAME,
+      version: BACKUP_SCHEMA_VERSION,
+      exportedAt: new Date().toISOString(),
+      source: sanitizeText(meta.source || (meta.autoBackup ? "auto" : "desktop"), 30) || "desktop",
+      exportedBy: sanitizeText(meta.exportedBy || "", 60),
+      autoBackup: Boolean(meta.autoBackup),
+      hotel: "Dongvan Ville du H'mong Hotel",
+      bookings,
+      operatingCosts,
+      financeState,
+      housekeepingTasks,
+      maintenanceIssues,
+      auditLogs
+    };
+    const scrubbed = stripSecretsDeep(rawPayload);
+    scrubbed.mediaInventory = collectBackupMediaInventory(scrubbed);
+    return scrubbed;
+  }
+
+  function computeFinanceSnapshotMetrics(bookings, financeState) {
+    const fState = sanitizeFinanceState(financeState);
+    const txs = fState.transactions || [];
+    const byType = {
+      customer_payment: 0,
+      customer_refund: 0,
+      supplier_payment: 0,
+      fund_transfer: 0,
+      balance_adjustment: 0,
+      legacy_opening: 0
+    };
+    for (const tx of txs) {
+      if (byType[tx.txType] !== undefined) byType[tx.txType] += 1;
+      else byType[tx.txType] = 1;
+    }
+    const cb = computeCashbookReport(fState, bookings, {});
+    const ar = computeReceivablesReport(bookings, fState, {});
+    const ap = computeSupplierPayablesReport(fState, null, {});
+    const fundMap = {};
+    for (const f of (cb.funds || [])) {
+      fundMap[f.id] = f.closingBalance || 0;
+    }
+    const confirmedShifts = (fState.cashShifts || []).filter((s) => s.status === "confirmed" || s.status === "resolved");
+    return {
+      totalTransactions: txs.length,
+      voucherCodes: txs.map((t) => t.voucherCode || t.voucherNo).filter(Boolean).sort(),
+      byType,
+      supplierInvoiceCount: (fState.supplierInvoices || []).length,
+      cashShiftCount: (fState.cashShifts || []).length,
+      confirmedShiftCount: confirmedShifts.length,
+      confirmedShiftTotals: confirmedShifts
+        .map((s) => ({
+          shiftCode: s.shiftCode,
+          status: s.status,
+          expectedCash: s.expectedCash,
+          countedCash: s.countedCash,
+          receivedCash: s.receivedCash,
+          discrepancy: s.discrepancy
+        }))
+        .sort((a, b) => String(a.shiftCode).localeCompare(String(b.shiftCode))),
+      openingBalanceCount: (fState.openingBalances || []).length,
+      reconciliationCheckCount: (fState.reconciliationChecks || []).length,
+      fundBalances: {
+        cash_frontdesk: fundMap.cash_frontdesk || 0,
+        bank_main: fundMap.bank_main || 0,
+        unassigned_legacy: fundMap.unassigned_legacy || 0,
+        totalConfirmedBalance: cb.totalHotelCashHeld || 0
+      },
+      customerReceivablesTotal: ar.totalRemaining || 0,
+      customerNetPaidTotal: ar.totalNetPaid || 0,
+      supplierPayablesTotal: ap.totalRemaining || 0,
+      supplierPaidTotal: ap.totalPaid || 0
+    };
+  }
+
+  function inspectBackupPayload(rawPayload, options = {}) {
+    let parsed = rawPayload;
+    if (typeof rawPayload === "string") {
+      try {
+        parsed = JSON.parse(rawPayload);
+      } catch {
+        return { ok: false, code: "INVALID_JSON", error: "File sao lưu không phải JSON hợp lệ." };
+      }
+    }
+    if (!parsed || (typeof parsed !== "object" && !Array.isArray(parsed))) {
+      return { ok: false, code: "INVALID_FORMAT", error: "Cấu trúc file sao lưu không hợp lệ." };
+    }
+
+    const validated = validateAndSanitizeImport(parsed);
+    if (!validated.ok) {
+      return { ok: false, code: "INVALID_IMPORT", error: validated.error, details: validated.details };
+    }
+
+    const isObj = !Array.isArray(parsed) && typeof parsed === "object";
+    const version = isObj && Number.isFinite(Number(parsed.version)) ? Number(parsed.version) : 1;
+    const schema = isObj && typeof parsed.schema === "string" ? parsed.schema : `legacy-v${version}`;
+    const exportedAt = isObj && typeof parsed.exportedAt === "string" ? parsed.exportedAt : "";
+    const source = isObj && typeof parsed.source === "string" ? parsed.source : "legacy";
+    const hotel = isObj && typeof parsed.hotel === "string" ? parsed.hotel : "Dongvan Ville du H'mong Hotel";
+
+    const hasFinanceState = Boolean(isObj && Object.prototype.hasOwnProperty.call(parsed, "financeState") && parsed.financeState && typeof parsed.financeState === "object");
+    const hasOperatingCosts = Boolean(isObj && Object.prototype.hasOwnProperty.call(parsed, "operatingCosts") && parsed.operatingCosts && typeof parsed.operatingCosts === "object");
+    const hasHousekeepingTasks = Boolean(isObj && Object.prototype.hasOwnProperty.call(parsed, "housekeepingTasks") && Array.isArray(parsed.housekeepingTasks));
+    const hasMaintenanceIssues = Boolean(isObj && Object.prototype.hasOwnProperty.call(parsed, "maintenanceIssues") && Array.isArray(parsed.maintenanceIssues));
+    const hasAuditLogs = Boolean(isObj && Object.prototype.hasOwnProperty.call(parsed, "auditLogs") && Array.isArray(parsed.auditLogs));
+
+    const financeState = hasFinanceState ? sanitizeFinanceState(parsed.financeState) : null;
+    const operatingCosts = hasOperatingCosts ? sanitizeOperatingCostsState(parsed.operatingCosts) : null;
+    const housekeepingTasks = hasHousekeepingTasks
+      ? parsed.housekeepingTasks.map(sanitizeHousekeepingTask).filter(Boolean)
+      : null;
+    const maintenanceIssues = hasMaintenanceIssues
+      ? parsed.maintenanceIssues.map(sanitizeMaintenanceIssue).filter(Boolean)
+      : null;
+
+    const presentSections = ["bookings"];
+    const missingSections = [];
+    if (hasFinanceState) presentSections.push("financeState"); else missingSections.push("financeState");
+    if (hasOperatingCosts) presentSections.push("operatingCosts"); else missingSections.push("operatingCosts");
+    if (hasHousekeepingTasks) presentSections.push("housekeepingTasks"); else missingSections.push("housekeepingTasks");
+    if (hasMaintenanceIssues) presentSections.push("maintenanceIssues"); else missingSections.push("maintenanceIssues");
+
+    const warnings = [];
+    const isLegacyWithoutFinance = !hasFinanceState;
+    if (isLegacyWithoutFinance) {
+      warnings.push(
+        `File sao lưu phiên bản v${version} không có sổ tài chính (financeState). Hệ thống sẽ GIỮ NGUYÊN sổ tài chính, hóa đơn NCC và sổ giao ca hiện có — KHÔNG xóa trắng.`
+      );
+    }
+    if (!hasOperatingCosts) {
+      warnings.push("File sao lưu không có dữ liệu Chi phí vận hành (operatingCosts) — hệ thống sẽ giữ nguyên dữ liệu chi phí hiện có.");
+    }
+
+    const bookings = validated.bookings;
+    const groupSet = new Set(bookings.map((b) => normalizeGroupCode(b.groupCode)).filter(Boolean));
+    const activeBookingCount = bookings.filter((b) => !isBookingCancelled(b)).length;
+    const cancelledBookingCount = bookings.length - activeBookingCount;
+
+    const financeSummary = hasFinanceState ? computeFinanceSnapshotMetrics(bookings, financeState) : null;
+    const costsSummary = hasOperatingCosts
+      ? {
+          itemCount: (operatingCosts.items || []).length,
+          actualEntryCount: (operatingCosts.actualEntries || []).length,
+          finalizedMonthCount: Object.keys(operatingCosts.monthlyFinalized || {}).length
+        }
+      : null;
+
+    const mediaInventory = collectBackupMediaInventory(
+      { bookings, financeState, housekeepingTasks, maintenanceIssues },
+      options.existingPhotoIds || null
+    );
+    if (mediaInventory.missingOnTargetCount > 0) {
+      warnings.push(
+        `Có ${mediaInventory.missingOnTargetCount} tệp ảnh lưu cục bộ trên máy chủ cũ (/api/photos/...) không đi kèm trong file JSON (các chứng từ/PDF nhúng inline: ${mediaInventory.inlineRestorableCount} tệp vẫn khôi phục đầy đủ).`
+      );
+    }
+
+    return {
+      ok: true,
+      version,
+      schema,
+      exportedAt,
+      source,
+      hotel,
+      hasBookings: true,
+      hasFinanceState,
+      hasOperatingCosts,
+      hasHousekeepingTasks,
+      hasMaintenanceIssues,
+      hasAuditLogs,
+      isLegacyWithoutFinance,
+      presentSections,
+      missingSections,
+      warnings,
+      sanitized: {
+        bookings,
+        financeState,
+        operatingCosts,
+        housekeepingTasks,
+        maintenanceIssues
+      },
+      summary: {
+        bookingCount: bookings.length,
+        activeBookingCount,
+        cancelledBookingCount,
+        groupCount: groupSet.size,
+        finance: financeSummary,
+        operatingCosts: costsSummary,
+        housekeepingTaskCount: housekeepingTasks ? housekeepingTasks.length : null,
+        maintenanceIssueCount: maintenanceIssues ? maintenanceIssues.length : null
+      },
+      mediaInventory
+    };
+  }
+
+  function verifyRestoredState(expectedInput, actualState, preExistingState = null) {
+    const inspected = expectedInput && expectedInput.ok && expectedInput.sanitized
+      ? expectedInput
+      : inspectBackupPayload(expectedInput);
+    if (!inspected.ok) {
+      return { ok: false, allMatched: false, error: inspected.error, diffs: [] };
+    }
+    const actualBookings = Array.isArray(actualState && actualState.bookings) ? actualState.bookings : [];
+    const actualFinance = actualState && actualState.financeState ? sanitizeFinanceState(actualState.financeState) : createDefaultFinanceState();
+    const checks = [];
+    const diffs = [];
+    const addCheck = (key, label, expectedVal, actualVal) => {
+      const diff = typeof expectedVal === "number" && typeof actualVal === "number"
+        ? actualVal - expectedVal
+        : (JSON.stringify(expectedVal) === JSON.stringify(actualVal) ? 0 : 1);
+      const ok = diff === 0;
+      const entry = { key, label, expected: expectedVal, actual: actualVal, diff, ok };
+      checks.push(entry);
+      if (!ok) diffs.push(entry);
+    };
+
+    addCheck("bookingCount", "Số lượng đơn đặt phòng", inspected.summary.bookingCount, actualBookings.length);
+
+    if (inspected.hasFinanceState && inspected.summary.finance) {
+      const expF = inspected.summary.finance;
+      const actF = computeFinanceSnapshotMetrics(actualBookings, actualFinance);
+      addCheck("txCount", "Tổng số chứng từ tài chính", expF.totalTransactions, actF.totalTransactions);
+      addCheck("voucherCodes", "Danh sách mã chứng từ", expF.voucherCodes, actF.voucherCodes);
+      addCheck("fund_cash_frontdesk", "Số dư quỹ tiền mặt lễ tân", expF.fundBalances.cash_frontdesk, actF.fundBalances.cash_frontdesk);
+      addCheck("fund_bank_main", "Số dư tài khoản ngân hàng", expF.fundBalances.bank_main, actF.fundBalances.bank_main);
+      addCheck("fund_unassigned_legacy", "Dữ liệu chuyển tiếp chưa gán quỹ", expF.fundBalances.unassigned_legacy, actF.fundBalances.unassigned_legacy);
+      addCheck("fund_total_confirmed", "Tổng số dư đã xác định quỹ", expF.fundBalances.totalConfirmedBalance, actF.fundBalances.totalConfirmedBalance);
+      addCheck("customerReceivables", "Công nợ khách còn phải thu", expF.customerReceivablesTotal, actF.customerReceivablesTotal);
+      addCheck("supplierPayables", "Công nợ NCC còn phải trả", expF.supplierPayablesTotal, actF.supplierPayablesTotal);
+      addCheck("cashShiftCount", "Số phiên giao ca tiền mặt", expF.cashShiftCount, actF.cashShiftCount);
+      addCheck("confirmedShifts", "Số liệu ca đã xác nhận", expF.confirmedShiftTotals, actF.confirmedShiftTotals);
+    } else if (preExistingState && preExistingState.financeState) {
+      const preF = sanitizeFinanceState(preExistingState.financeState);
+      const preCodes = (preF.transactions || []).map((t) => t.voucherCode || t.voucherNo).filter(Boolean).sort();
+      const actCodes = (actualFinance.transactions || []).map((t) => t.voucherCode || t.voucherNo).filter(Boolean).sort();
+      addCheck("preservedFinanceTxCount", "Giữ nguyên số chứng từ hiện có (file cũ thiếu tài chính)", preF.transactions.length, actualFinance.transactions.length);
+      addCheck("preservedVoucherCodes", "Giữ nguyên mã chứng từ hiện có", preCodes, actCodes);
+    }
+
+    return {
+      ok: diffs.length === 0,
+      allMatched: diffs.length === 0,
+      checks,
+      diffs
+    };
+  }
+
   return {
+    BACKUP_SCHEMA_VERSION,
+    BACKUP_SCHEMA_NAME,
+    stripSecretsDeep,
+    collectBackupMediaInventory,
+    buildUnifiedBackupPayload,
+    computeFinanceSnapshotMetrics,
+    inspectBackupPayload,
+    verifyRestoredState,
     STORAGE_KEY,
     BACKUP_KEY,
     AUTOBACKUP_KEY,

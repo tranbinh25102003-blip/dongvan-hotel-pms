@@ -256,6 +256,7 @@
     const dormUsed = Object.keys(dormMap).length;
     const dormFree = Math.max(0, 8 - dormUsed);
 
+    const fLoad = typeof store.getFinanceLoadState === "function" ? store.getFinanceLoadState() : { status: "loaded", loaded: true };
     const fState = typeof store.getFinanceState === "function" ? store.getFinanceState() : null;
     const finKpi = computeCalendarFinanceKPIs(state.bookings, fState, state.year, state.month);
     state.lastArAsOfDate = finKpi.arAsOfDate;
@@ -264,25 +265,33 @@
     $("kpi-today-dorm").textContent = `Đặt ${dormUsed} • Còn ${dormFree}/8`;
     $("kpi-today-hk").textContent = `${mergeToday} ghép • ${ebToday} EB`;
     $("kpi-today-buffet").textContent = `${buffetGuests} khách`;
-    $("kpi-month-paid").textContent = formatVND(finKpi.monthlyNetReceived);
-    const refundNote = $("kpi-month-refund-note");
-    if (refundNote) {
-      if (finKpi.monthlyRefunds > 0) {
-        refundNote.textContent = `(đã trừ hoàn ${formatVND(finKpi.monthlyRefunds)})`;
-        refundNote.style.display = "inline-block";
-      } else {
-        refundNote.textContent = "";
-        refundNote.style.display = "none";
+    if (fLoad && !fLoad.loaded) {
+      const loadText = fLoad.status === "error" ? "Không tải được sổ" : "Đang tải sổ...";
+      $("kpi-month-paid").textContent = loadText;
+      $("kpi-month-debt").textContent = loadText;
+      const refundNote = $("kpi-month-refund-note");
+      if (refundNote) { refundNote.textContent = ""; refundNote.style.display = "none"; }
+    } else {
+      $("kpi-month-paid").textContent = formatVND(finKpi.monthlyNetReceived);
+      const refundNote = $("kpi-month-refund-note");
+      if (refundNote) {
+        if (finKpi.monthlyRefunds > 0) {
+          refundNote.textContent = `(đã trừ hoàn ${formatVND(finKpi.monthlyRefunds)})`;
+          refundNote.style.display = "inline-block";
+        } else {
+          refundNote.textContent = "";
+          refundNote.style.display = "none";
+        }
       }
+      const arLabel = $("kpi-ar-asof-label");
+      if (arLabel) {
+        const todayVN = getVietnamTodayISO();
+        arLabel.textContent = finKpi.arAsOfDate === todayVN
+          ? "Công nợ đến hôm nay"
+          : `Công nợ đến ${formatDateVN(finKpi.arAsOfDate).slice(0, 5)}`;
+      }
+      $("kpi-month-debt").textContent = formatVND(finKpi.arAsOfTotal);
     }
-    const arLabel = $("kpi-ar-asof-label");
-    if (arLabel) {
-      const todayVN = getVietnamTodayISO();
-      arLabel.textContent = finKpi.arAsOfDate === todayVN
-        ? "Công nợ đến hôm nay"
-        : `Công nợ đến ${formatDateVN(finKpi.arAsOfDate).slice(0, 5)}`;
-    }
-    $("kpi-month-debt").textContent = formatVND(finKpi.arAsOfTotal);
     $("kpi-month-debt").className = `kpi-value ${finKpi.arAsOfTotal > 0 ? "warn" : "ok"}`;
     const monthTag = $("kpi-month-tag");
     if (monthTag) {
@@ -2603,82 +2612,244 @@
     showToast("Đã xuất file Excel (CSV) an toàn");
   }
 
-  function backupJSON() {
+  async function backupJSON() {
     if (!userCan("admin:backup")) {
       showToast("Chức năng Sao lưu dữ liệu chỉ dành cho Quản lý.");
       return;
     }
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      version: 3,
-      hotel: "Dongvan Ville du H'mong Hotel",
-      bookings: state.bookings,
-      auditLogs: store.getAuditLogs(),
-      operatingCosts: getCurrentOperatingCosts()
-    };
+    let payload = null;
+    if (typeof store.exportUnifiedBackup === "function") {
+      const expRes = await store.exportUnifiedBackup({ source: "desktop" });
+      if (!expRes || !expRes.ok || !expRes.backup) {
+        showToast((expRes && expRes.error) || "Không thể xuất bản sao lưu đầy đủ.");
+        return;
+      }
+      payload = expRes.backup;
+    } else {
+      payload = buildFullBackupPayload({ source: "desktop" });
+    }
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `backup-dongvan-hotel-${getTodayISO()}.json`; a.click();
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `backup-dongvan-hotel-v${payload.version || 5}-${getTodayISO()}.json`;
+    a.click();
     URL.revokeObjectURL(url);
-    showToast("Đã tải file sao lưu JSON (gồm lịch phòng & chi phí vận hành)");
+    const txCount = (payload.financeState && Array.isArray(payload.financeState.transactions)) ? payload.financeState.transactions.length : 0;
+    showToast(`Đã tải sao lưu JSON v${payload.version || 5} (${(payload.bookings || []).length} đơn, ${txCount} chứng từ tài chính & chi phí)`);
   }
+
+  /* -------------------- Shared Restore Preview Modal (PC & Mobile) -------------------- */
+  let activeRestorePreviewState = null;
+
+  function closeRestorePreviewModal() {
+    const modal = $("restore-preview-modal");
+    if (modal) modal.classList.remove("open");
+    activeRestorePreviewState = null;
+  }
+
+  function renderRestorePreviewBody(fileName, preview) {
+    const sum = preview.summary || {};
+    const fin = sum.finance || null;
+    const costs = sum.operatingCosts || null;
+    const media = preview.mediaInventory || { totalCount: 0, inlineRestorableCount: 0, serverLocalRefCount: 0, missingOnTargetCount: 0, missingRefs: [] };
+
+    const sectionLabels = {
+      bookings: "Đặt phòng (lẻ / đoàn / dorm)",
+      financeState: "Sổ tài chính, quỹ, công nợ & giao ca",
+      operatingCosts: "Chi phí vận hành & giá vốn",
+      housekeepingTasks: "Buồng phòng (Housekeeping)",
+      maintenanceIssues: "Báo hỏng / sự cố"
+    };
+
+    const presentHtml = (preview.presentSections || [])
+      .map((s) => `<span class="restore-preview-chip ok">✓ Khôi phục: ${escapeHtml(sectionLabels[s] || s)}</span>`)
+      .join("");
+    const missingHtml = (preview.missingSections || [])
+      .map((s) => `<span class="restore-preview-chip preserve">🛡 Giữ nguyên hiện có: ${escapeHtml(sectionLabels[s] || s)}</span>`)
+      .join("");
+
+    const warningsHtml = (preview.warnings || []).length > 0
+      ? (preview.warnings || []).map((w) => `<div class="restore-preview-warning">⚠️ ${escapeHtml(w)}</div>`).join("")
+      : "";
+
+    const financeHtml = fin
+      ? `
+        <div class="restore-preview-section">
+          <h4>💰 Sổ tài chính trong file sao lưu</h4>
+          <div class="restore-preview-grid">
+            <div class="restore-preview-stat"><span class="lbl">Tổng chứng từ</span><span class="val" id="rp-tx-count">${fin.totalTransactions} phiếu</span></div>
+            <div class="restore-preview-stat"><span class="lbl">Quỹ tiền mặt lễ tân</span><span class="val" id="rp-fund-cash">${escapeHtml(formatVND(fin.fundBalances.cash_frontdesk))}</span></div>
+            <div class="restore-preview-stat"><span class="lbl">Tài khoản ngân hàng</span><span class="val" id="rp-fund-bank">${escapeHtml(formatVND(fin.fundBalances.bank_main))}</span></div>
+            <div class="restore-preview-stat"><span class="lbl">Công nợ khách (AR)</span><span class="val" id="rp-ar-total">${escapeHtml(formatVND(fin.customerReceivablesTotal))}</span></div>
+            <div class="restore-preview-stat"><span class="lbl">Công nợ NCC (AP)</span><span class="val" id="rp-ap-total">${escapeHtml(formatVND(fin.supplierPayablesTotal))}</span></div>
+            <div class="restore-preview-stat"><span class="lbl">HĐ NCC / Phiên giao ca</span><span class="val" id="rp-inv-shifts">${fin.supplierInvoiceCount} HĐ • ${fin.cashShiftCount} ca</span></div>
+          </div>
+          <div style="font-size:12px; color:var(--text-muted);">
+            Chi tiết loại phiếu: Thu khách <strong>${fin.byType.customer_payment || 0}</strong> •
+            Hoàn khách <strong>${fin.byType.customer_refund || 0}</strong> •
+            Chi NCC <strong>${fin.byType.supplier_payment || 0}</strong> •
+            Chuyển quỹ <strong>${fin.byType.fund_transfer || 0}</strong> •
+            Điều chỉnh <strong>${fin.byType.balance_adjustment || 0}</strong> •
+            Chuyển tiếp <strong>${(fin.byType.legacy_opening || 0) + (fin.byType.legacy_payment || 0)}</strong>
+          </div>
+        </div>
+      `
+      : `
+        <div class="restore-preview-section">
+          <h4>🛡 Sổ tài chính: KHÔNG có trong file này (Bản v${preview.version})</h4>
+          <p style="margin:0; color:var(--text-muted);">Hệ thống sẽ <strong>giữ nguyên 100%</strong> sổ tài chính, công nợ, hóa đơn NCC và lịch sử giao ca đang có trên máy chủ — không ghi đè rỗng.</p>
+        </div>
+      `;
+
+    const mediaHtml = `
+      <div class="restore-preview-section">
+        <h4>📎 Kiểm kê tệp đính kèm &amp; ảnh (${media.totalCount} tệp)</h4>
+        <div style="font-size:12px;">
+          • Khôi phục đầy đủ (PDF/chứng từ nhúng trong file): <strong>${media.inlineRestorableCount}</strong> tệp<br/>
+          • Ảnh tham chiếu trên máy chủ (/api/photos/...): <strong>${media.serverLocalRefCount}</strong> tệp
+          ${media.missingOnTargetCount > 0 ? ` — <strong style="color:#b45309;">${media.missingOnTargetCount} tệp chưa có trên môi trường đích</strong>` : " (không thiếu tệp nào)"}
+        </div>
+      </div>
+    `;
+
+    return `
+      ${warningsHtml}
+      <div class="restore-preview-grid">
+        <div class="restore-preview-stat">
+          <span class="lbl">Phiên bản / Nguồn</span>
+          <span class="val" id="rp-version">v${escapeHtml(String(preview.version))} (${escapeHtml(preview.source || "legacy")})</span>
+        </div>
+        <div class="restore-preview-stat">
+          <span class="lbl">Đơn đặt phòng</span>
+          <span class="val" id="rp-booking-count">${sum.bookingCount || 0} đơn (${sum.groupCount || 0} đoàn)</span>
+        </div>
+        <div class="restore-preview-stat">
+          <span class="lbl">Chi phí vận hành</span>
+          <span class="val">${costs ? `${costs.itemCount} khoản • ${costs.actualEntryCount} phiếu` : "Giữ nguyên hiện có"}</span>
+        </div>
+      </div>
+      ${financeHtml}
+      <div class="restore-preview-section">
+        <h4>📦 Phạm vi dữ liệu sẽ áp dụng (1 giao dịch nguyên tử, có tự hoàn tác nếu lỗi)</h4>
+        <div class="restore-preview-chips">${presentHtml}${missingHtml}</div>
+      </div>
+      ${mediaHtml}
+      <div style="font-size:12px; color:var(--text-muted);">
+        File: <strong>${escapeHtml(fileName || "backup.json")}</strong>${preview.exportedAt ? ` • Xuất lúc ${escapeHtml(formatTimestampVN(preview.exportedAt))}` : ""}
+      </div>
+    `;
+  }
+
+  function bindRestorePreviewModalOnce() {
+    const modal = $("restore-preview-modal");
+    if (!modal || modal.dataset.bound === "1") return;
+    modal.dataset.bound = "1";
+    const closeBtn = $("btn-close-restore-preview");
+    const cancelBtn = $("btn-cancel-restore-preview");
+    const confirmBtn = $("btn-confirm-restore-preview");
+
+    const handleCancel = () => {
+      const cb = activeRestorePreviewState && activeRestorePreviewState.onCancel;
+      closeRestorePreviewModal();
+      if (typeof cb === "function") cb();
+    };
+    if (closeBtn) closeBtn.addEventListener("click", handleCancel);
+    if (cancelBtn) cancelBtn.addEventListener("click", handleCancel);
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) handleCancel();
+    });
+
+    if (confirmBtn) {
+      confirmBtn.addEventListener("click", async () => {
+        if (!activeRestorePreviewState) return;
+        const { rawText, onRestored, notifyToast } = activeRestorePreviewState;
+        confirmBtn.disabled = true;
+        const origText = confirmBtn.textContent;
+        confirmBtn.textContent = "⏳ Đang khôi phục & đối soát số dư...";
+        try {
+          const res = await store.restoreFromImport(rawText);
+          if (!res || !res.ok) {
+            alert("Không thể khôi phục dữ liệu (dữ liệu hiện tại đã được bảo toàn):\n" + ((res && res.error) || "Lỗi không xác định"));
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = origText;
+            return;
+          }
+          closeRestorePreviewModal();
+          state.bookings = res.bookings || store.getBookings();
+          renderAll();
+          if ($("costs-modal") && $("costs-modal").classList.contains("open")) renderOperatingCostsModal();
+          if (window.PMSFinanceApp) window.PMSFinanceApp.refreshOpenModals();
+          onDataMutated("restore");
+          if (typeof onRestored === "function") onRestored(res);
+          const vOk = !res.verification || res.verification.ok;
+          const msg = `✓ Đã khôi phục ${state.bookings.length} đơn${
+            (res.restoredSections || []).includes("financeState") ? " & sổ tài chính" : " (giữ nguyên sổ tài chính hiện có)"
+          }${vOk ? " — đối soát khớp 0 đ!" : ""}`;
+          if (typeof notifyToast === "function") notifyToast(msg);
+          else showToast(msg);
+        } catch (err) {
+          alert("Lỗi khi khôi phục: " + (err && err.message ? err.message : "lỗi không xác định"));
+        } finally {
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = origText;
+        }
+      });
+    }
+  }
+
+  async function openRestorePreviewForText(rawText, fileName, opts = {}) {
+    bindRestorePreviewModalOnce();
+    const preview = typeof store.inspectImportPreview === "function"
+      ? await store.inspectImportPreview(rawText)
+      : window.PMSCore.inspectBackupPayload(rawText);
+    if (!preview || !preview.ok) {
+      alert("File sao lưu không hợp lệ:\n" + ((preview && preview.error) || "Không thể đọc cấu trúc JSON."));
+      return;
+    }
+    const modal = $("restore-preview-modal");
+    const sub = $("restore-preview-subtitle");
+    const body = $("restore-preview-body");
+    if (!modal || !body) return;
+    if (sub) {
+      sub.textContent = `File "${fileName || "backup.json"}" — Bản v${preview.version}${preview.isLegacyWithoutFinance ? " (thiếu sổ tài chính — sẽ giữ nguyên sổ hiện có)" : " (đầy đủ sổ tài chính)"}`;
+    }
+    body.innerHTML = renderRestorePreviewBody(fileName, preview);
+    activeRestorePreviewState = {
+      rawText,
+      fileName,
+      preview,
+      onRestored: opts.onRestored,
+      onCancel: opts.onCancel,
+      notifyToast: opts.notifyToast
+    };
+    modal.classList.add("open");
+  }
+
+  window.PMSRestoreDialog = {
+    openForFile(file, opts = {}) {
+      if (!file) return;
+      if (file.size > 12 * 1024 * 1024) {
+        alert("File JSON quá lớn (> 12MB). Vui lòng kiểm tra lại file sao lưu.");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => openRestorePreviewForText(reader.result, file.name, opts);
+      reader.readAsText(file);
+    },
+    openForText: openRestorePreviewForText,
+    close: closeRestorePreviewModal
+  };
 
   function restoreJSON(file) {
     if (!userCan("admin:backup")) {
       showToast("Chức năng Khôi phục dữ liệu chỉ dành cho Quản lý.");
       return;
     }
-    if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      alert("File JSON quá lớn (> 5MB). Vui lòng kiểm tra lại file sao lưu.");
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = async () => {
-      let parsedCosts = null;
-      let parsedCount = null;
-      try {
-        const parsed = JSON.parse(reader.result);
-        if (parsed && typeof parsed === "object" && parsed.operatingCosts && typeof parsed.operatingCosts === "object") {
-          parsedCosts = parsed.operatingCosts;
-        }
-        if (Array.isArray(parsed)) parsedCount = parsed.length;
-        else if (parsed && Array.isArray(parsed.bookings)) parsedCount = parsed.bookings.length;
-      } catch {}
-
-      const confirmMsg = [
-        `Khôi phục dữ liệu từ file "${file.name}"?`,
-        parsedCount !== null ? `• File chứa ${parsedCount} lượt đặt phòng${parsedCosts ? " và dữ liệu chi phí vận hành" : ""}.` : "• Hệ thống sẽ kiểm tra cấu trúc file trước khi nạp.",
-        `• Dữ liệu hiện tại (${state.bookings.length} lượt đặt phòng) sẽ được thay thế.`,
-        "• Một bản hoàn tác được lưu tự động trước khi ghi đè.",
-        "",
-        "Nhấn OK để khôi phục, Hủy để giữ nguyên dữ liệu."
-      ].join("\n");
-      if (!window.confirm(confirmMsg)) {
-        showToast("Đã hủy khôi phục — dữ liệu giữ nguyên");
-        return;
-      }
-
-      const res = await store.restoreFromImport(reader.result);
-      if (!res.ok) {
-        alert("Không thể khôi phục dữ liệu (dữ liệu hiện tại vẫn an toàn):\n" + res.error);
-        return;
-      }
-      let restoredCosts = false;
-      if (parsedCosts && typeof store.saveOperatingCosts === "function") {
-        const cRes = await store.saveOperatingCosts(parsedCosts);
-        if (cRes && cRes.ok) restoredCosts = true;
-      }
-      state.bookings = res.bookings;
-      renderAll();
-      if ($("costs-modal").classList.contains("open")) renderOperatingCostsModal();
-      if (window.PMSFinanceApp) window.PMSFinanceApp.refreshOpenModals();
-      onDataMutated("restore");
-      showToast(restoredCosts
-        ? `Đã khôi phục ${res.bookings.length} lượt đặt phòng, sổ tài chính & chi phí vận hành`
-        : `Đã khôi phục ${res.bookings.length} lượt đặt phòng & sổ tài chính (đã lưu bản hoàn tác)`);
-    };
-    reader.readAsText(file);
+    window.PMSRestoreDialog.openForFile(file, {
+      onCancel: () => showToast("Đã hủy khôi phục — dữ liệu giữ nguyên"),
+      notifyToast: (msg) => showToast(msg)
+    });
   }
 
   /* -------------------- Auto-Backup Engine & Edit History Center -------------------- */
@@ -2703,16 +2874,22 @@
 
   function buildFullBackupPayload(extra = {}) {
     const fState = typeof store.getFinanceState === "function" ? store.getFinanceState() : null;
-    return {
-      exportedAt: new Date().toISOString(),
-      version: 4,
-      hotel: "Dongvan Ville du H'mong Hotel",
-      ...extra,
-      bookings: state.bookings,
-      auditLogs: store.getAuditLogs(),
-      operatingCosts: getCurrentOperatingCosts(),
-      financeState: fState || undefined
-    };
+    const hkTasks = typeof store.getHousekeepingTasks === "function" ? store.getHousekeepingTasks() : [];
+    const issues = typeof store.getMaintenanceIssues === "function" ? store.getMaintenanceIssues() : [];
+    return window.PMSCore.buildUnifiedBackupPayload(
+      {
+        bookings: state.bookings,
+        auditLogs: store.getAuditLogs(),
+        operatingCosts: getCurrentOperatingCosts(),
+        financeState: fState,
+        housekeepingTasks: hkTasks,
+        maintenanceIssues: issues
+      },
+      {
+        source: extra.autoBackup ? "auto" : (extra.source || "desktop"),
+        autoBackup: Boolean(extra.autoBackup)
+      }
+    );
   }
 
   function updateAutoBackupUI() {
@@ -4059,7 +4236,11 @@
           syncAuthOverlay("");
           return;
         }
-        if (type === "status" || !snap) return;
+        if (type === "status") {
+          if (getUserRole() !== "housekeeping") renderKPIs();
+          return;
+        }
+        if (!snap) return;
         state.bookings = snap.bookings || [];
 
         if (type === "remote_change" && remoteEvent && remoteEvent.action === "ISSUE_CREATE") {
