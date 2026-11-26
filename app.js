@@ -1591,6 +1591,9 @@
           : "Chưa nhập định mức (hãy nhập định mức, gắn hóa đơn NCC hoặc chốt thực tế = 0 đ)";
         const vouchersHtml = r.entries.length > 0
           ? r.entries.map((v) => {
+              if (v.sourceType === "stock_control") {
+                return `<div class="costs-voucher-item"><span class="fin-pill info">Phiếu kho</span> <strong>${v.amount.toLocaleString("vi-VN")} đ</strong> · ${escapeHtml(v.note)} · ${formatDateVN(v.expenseDate)}</div>`;
+              }
               if (v.sourceType === "supplier_invoice") {
                 return `
                   <div class="costs-voucher-item">

@@ -5363,3 +5363,29 @@ tr.er-clickable:hover td { background: #eef6f1; }
   #folio-dialog footer,#folio-dialog [data-dismiss]{display:none!important}
   #folio-dialog section{overflow:visible}
 }
+
+#controls-dialog{width:min(60rem,95vw);max-height:90dvh;overflow:auto;border:1px solid #abc1b8;border-radius:12px;padding:1.15rem}
+#controls-dialog::backdrop{background:#14292375}
+#controls-dialog header,#controls-dialog nav{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}
+#controls-dialog header{justify-content:space-between}
+#controls-dialog nav button[aria-pressed=true]{background:#215449;color:white}
+#controls-dialog label{display:grid;gap:.25rem;margin:.5rem 0;min-width:0}
+#controls-dialog form{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,16rem),1fr));gap:.35rem .8rem;align-items:end}
+#controls-dialog input,#controls-dialog select,#controls-dialog textarea{max-width:100%}
+#controls-dialog .control-scroll{overflow:auto;margin:.85rem 0}
+#controls-dialog table{width:100%;border-collapse:collapse}
+#controls-dialog th,#controls-dialog td{text-align:left;border-bottom:1px solid #b4c4bf;padding:.45rem}
+
+#ops24-dialog{width:min(68rem,96vw);max-height:90dvh;overflow:auto;border:1px solid #abc1b8;border-radius:12px;padding:1rem}
+#ops24-dialog::backdrop{background:#183b316e}
+#ops24-dialog header,#ops24-dialog nav{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+#ops24-dialog header{justify-content:space-between}
+#ops24-dialog label{display:grid;gap:.25rem;margin:.45rem 0;min-width:0}
+#ops24-dialog form{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,16rem),1fr));gap:.5rem;align-items:end}
+#ops24-dialog input,#ops24-dialog textarea,#ops24-dialog select{max-width:100%}
+#ops24-dialog .ops-scroll{overflow:auto;margin:.8rem 0}
+#ops24-dialog table{width:100%;border-collapse:collapse}
+#ops24-dialog th,#ops24-dialog td{padding:.45rem;text-align:left;border-bottom:1px solid #bacbc5}
+
+.installed-pms [data-install-pms] {display:none!important}
+#install-guide {max-width:min(28rem,90vw);border:1px solid #aca695;border-radius:10px;padding:20px}

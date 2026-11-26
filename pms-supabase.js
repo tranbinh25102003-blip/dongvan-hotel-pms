@@ -786,7 +786,7 @@
           financeLoadError = "";
           emit({ type: "status", status: getStatus() });
         }
-        const res = await callRpc("pms_get_state", {});
+        const res = await callRpc("pms_control_get_state", {});
         if (!res || !res.ok) {
           if (financeLoadState !== "loaded" || currentMeta.type === "init" || currentMeta.type === "auth_login") {
             financeLoadState = "error";
@@ -1535,7 +1535,7 @@
     async function exportUnifiedBackup(meta = {}) {
       if (!can("admin:backup")) return { ok: false, status: 403, code: "FORBIDDEN", error: "Chức năng sao lưu chỉ dành cho Quản lý." };
       const owner = session && (session.sessionToken || session.access_token);
-      const snapshot = await callRpc("pms_get_state", {});
+      const snapshot = await callRpc("pms_control_get_state", {});
       if (!snapshot || !snapshot.ok) return snapshot || { ok: false, error: "Không đọc được dữ liệu máy chủ." };
       if (!session || owner !== (session.sessionToken || session.access_token) || !can("admin:backup") ||
           !snapshot.user || !Core.hasPermission(snapshot.user.role, "admin:backup")) {
@@ -1585,7 +1585,7 @@
         backupForRpc.maintenanceIssues = inspected.sanitized.maintenanceIssues;
       }
 
-      const rpcRes = await callRpc("pms_restore_full_backup", {
+      const rpcRes = await callRpc("pms_control_restore", {
         p_backup: backupForRpc,
         p_actor_name: (session && session.staffName) || ""
       });
@@ -1831,6 +1831,11 @@
       const target = stateCache.bookings.find((b) => b.id === bookingId);
       if (!target) return { ok: false, code: "NOT_FOUND", error: "Không tìm thấy đặt phòng." };
       const actor = (session && session.staffName) || "Lễ tân";
+      if(target.ops24?.stay==="inhouse"){
+        const res=await callRpc("pms_ops24_apply",{p_body:{kind:"depart",booking:target.id,day:Core.getVietnamTodayISO()},p_version:storeVersion,p_request:"depart-"+target.id});
+        if(res?.ok)await pullLatestFromCloud({type:"local_commit",force:true});
+        return res;
+      }
       const idemKey = `checkout:${target.id}`;
       const existingTask = stateCache.housekeepingTasks.find((t) => t.idempotencyKey === idemKey);
       let updatedBooking = target;
@@ -2200,7 +2205,7 @@
     function applyFinanceRpcResult(rpcRes, actionName) {
       if (!rpcRes || typeof rpcRes !== "object") return;
       if (acceptsFinanceResponse(rpcRes)) {
-        stateCache.financeState = Core.sanitizeFinanceState(rpcRes.financeState);
+        stateCache.financeState = Core.sanitizeFinanceState({...rpcRes.financeState,controlsV23:stateCache.financeState?.controlsV23});
         lastFinanceUpdatedAt = stateCache.financeState.updatedAt || new Date().toISOString();
         lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || lastFinanceLedgerVersion;
         financeLoadState = "loaded";
@@ -2296,7 +2301,7 @@
       if (rpcRes && !rpcRes.offline && rpcRes.status && rpcRes.status >= 400 && rpcRes.status < 500) {
         if (idemKey) removePendingFinanceIntent(idemKey);
         if (acceptsFinanceResponse(rpcRes)) {
-          stateCache.financeState = Core.sanitizeFinanceState(rpcRes.financeState);
+          stateCache.financeState = Core.sanitizeFinanceState({...rpcRes.financeState,controlsV23:stateCache.financeState?.controlsV23});
           lastFinanceUpdatedAt = stateCache.financeState.updatedAt || lastFinanceUpdatedAt;
           lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || lastFinanceLedgerVersion;
           emit({ type: "remote_change", state: getSnapshot(), status: getStatus() });
@@ -2332,7 +2337,7 @@
       const res = await callRpc("pms_finance_lookup_idempotency", { p_key: cleanKey, p_kind: "tx" });
       if (res && res.ok) {
         if (acceptsFinanceResponse(res)) {
-          stateCache.financeState = Core.sanitizeFinanceState(res.financeState);
+          stateCache.financeState = Core.sanitizeFinanceState({...res.financeState,controlsV23:stateCache.financeState?.controlsV23});
           lastFinanceUpdatedAt = stateCache.financeState.updatedAt || lastFinanceUpdatedAt;
           lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || lastFinanceLedgerVersion;
           financeLoadState = "loaded";
@@ -2349,7 +2354,7 @@
       const res = await callRpc("pms_finance_lookup_idempotency", { p_key: cleanKey, p_kind: "shift" });
       if (res && res.ok) {
         if (acceptsFinanceResponse(res)) {
-          stateCache.financeState = Core.sanitizeFinanceState(res.financeState);
+          stateCache.financeState = Core.sanitizeFinanceState({...res.financeState,controlsV23:stateCache.financeState?.controlsV23});
           lastFinanceUpdatedAt = stateCache.financeState.updatedAt || lastFinanceUpdatedAt;
           lastFinanceLedgerVersion = Number(stateCache.financeState.ledgerVersion) || lastFinanceLedgerVersion;
           financeLoadState = "loaded";
@@ -2460,6 +2465,7 @@
             || t.fromFundId === "cash_frontdesk"
             || t.toFundId === "cash_frontdesk"
           )),
+          controlsV23:undefined,
           supplierInvoices: [],
           cashShifts: visibleShifts,
           openingBalances: (full.openingBalances || []).filter((o) => o && o.fundId === "cash_frontdesk"),
@@ -2615,6 +2621,9 @@
       checkAppVersion,
       getVersionInfo,
       getAuthState,
+      commitControls:(items,version,preview=true)=>callRpc("pms_control_commit",{p_items:items,p_version:version,p_preview:preview}),
+      ops24Read:(day)=>callRpc("pms_ops24_state",{p_day:day}),
+      ops24Apply:(body,version,id)=>callRpc("pms_ops24_apply",{p_body:body,p_version:version,p_request:id}),
       dayClose: (day,expected=null) => callRpc("pms_day_close",{p_day:day,p_expected:expected}),
       getEnterpriseGlState: () => (can("reports:management") ? stateCache.enterpriseGlState : null),
       refreshEnterpriseGlState: () => callGlRpc("pms_gl_get_state", {}, "GL_READ"),

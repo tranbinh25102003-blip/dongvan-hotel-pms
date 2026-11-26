@@ -854,6 +854,7 @@
             <span id="m-drawer-user-role" class="m-drawer-user-role">Lễ tân</span>
           </div>
           <div class="m-drawer-foot-actions">
+            <button type="button" class="m-drawer-foot-btn" data-install-pms>Cài ứng dụng</button>
             <button id="m-drawer-theme" class="m-drawer-foot-btn" type="button">🌙 Giao diện Tối</button>
             <button id="m-drawer-logout" class="m-drawer-foot-btn danger" type="button" style="display:none;">Đăng xuất</button>
           </div>
@@ -973,6 +974,8 @@
       if (window.PMSFinanceApp) window.PMSFinanceApp.openPayables();
       return;
     }
+    if(key==="ops24"){window.DongvanOps.open();return;}
+    if(key==="finance_controls"){window.PMSControlsUI.open();return;}
     if (key === "folio" || key === "day_close") {
       window.PMSFolioUI.open(key === "folio" ? "folio" : "close"); return;
     }

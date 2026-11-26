@@ -717,6 +717,7 @@
             qty,
             unitPrice: unitPrice || amount,
             amount: Math.max(0, amount),
+            category: sanitizeText(sObj.category, 40),
             serviceDate: svcDate,
             dateISO: svcDate,
             status: svcStatus,
@@ -968,6 +969,7 @@
       disposition: depositDisposition,
       retainedDepositAmount,
       cancelDepositPolicy,
+      ...(existingRecord?.ops24 || obj.ops24 ? {ops24:existingRecord?.ops24 || obj.ops24} : {}),
       folioRouting: Object.fromEntries(Object.entries(obj.folioRouting ?? existingRecord?.folioRouting ?? {})
         .filter(([key, value]) => /^(room|services|adjustments|(receipt|service|adjustment):[a-zA-Z0-9_.:-]{1,96})$/.test(key)
           && ["guest","tour","ota"].includes(value))),
@@ -2577,7 +2579,9 @@
 
       const roomRevenue = getBookingChargesBreakdown(bk).roomAmount;
       const earnedThrough = (day) => Math.round(roomRevenue * diffNights(bk.checkin, day) / totalNights);
-      const share = earnedThrough(effEnd) - earnedThrough(effStart);
+      const share = Array.isArray(bk.ops24?.rates)
+        ? bk.ops24.rates.filter(r=>r.day>=effStart && r.day<effEnd).reduce((sum,r)=>sum+r.amount,0)
+        : earnedThrough(effEnd) - earnedThrough(effStart);
       if (bk.roomId === "DORM") proratedDormRevenue += share;
       else proratedRoomRevenue += share;
     }
@@ -2636,6 +2640,9 @@
       }
     }
 
+    const controlEngine = globalThis.PMSControlAudit || (typeof require==="function" && require("./control-audit.js"));
+    const movements = controlEngine ? controlEngine.stockCharges(financeState?.controlsV23,targetMonth) : [];
+    for(const b of bookings||[])for(const fee of b.ops24?.netFees||[])if(fee.day.slice(0,7)===targetMonth)movements.push({itemId:"ci_booking_fee",id:"ota:"+fee.id,amount:fee.fee,sourceType:"ota_net_fee",expenseDate:fee.day,accountingMonth:targetMonth,note:fee.notice,voucherNo:fee.id});
     const monthFinalizedMap = clean.monthlyFinalized[targetMonth] || {};
     const entriesByItem = new Map();
     const linkedLegacyByItem = new Map();
@@ -2681,7 +2688,7 @@
       const manualEntries = entriesByItem.get(item.id) || [];
       const invEntries = invoiceLinesByItem.get(item.id) || [];
       const linkedLegacyEntries = linkedLegacyByItem.get(item.id) || [];
-      const entries = [...invEntries, ...manualEntries].sort((a, b) => String(b.expenseDate).localeCompare(String(a.expenseDate)));
+      const entries = [...invEntries, ...manualEntries, ...movements.filter(e=>e.itemId===item.id)].sort((a, b) => String(b.expenseDate).localeCompare(String(a.expenseDate)));
       const finalizedMeta = monthFinalizedMap[item.id] || null;
       const isFinalized = Boolean(finalizedMeta && finalizedMeta.finalized);
       if (!item.active && entries.length === 0 && linkedLegacyEntries.length === 0 && !isFinalized) continue;
@@ -2700,7 +2707,7 @@
       }
 
       const estimatedAmount = rateInfo.hasRate ? Math.round(quantity * rateInfo.rate) : 0;
-      const actualAmount = entries.reduce((sum, e) => sum + parseVND(e.amount), 0);
+      const actualAmount = entries.reduce((sum,e)=>sum+(e.sourceType==="stock_control"?e.amount:parseVND(e.amount)),0);
       const supplierInvoiceAmount = invEntries.reduce((sum, e) => sum + parseVND(e.amount), 0);
       const manualActualAmount = manualEntries.reduce((sum, e) => sum + parseVND(e.amount), 0);
       const hasActualEntries = entries.length > 0;
@@ -3002,6 +3009,7 @@
       key: "reception",
       label: "Lễ tân",
       items: Object.freeze([
+        Object.freeze({key:"ops24",label:"Điều hành trong ngày",id:"btn-ops24",icon:"calendar",permission:"bookings:read",implemented:true}),
         Object.freeze({ key: "calendar", label: "Lịch phòng", id: "btn-nav-calendar", icon: "calendar", permission: "bookings:read", implemented: true }),
         Object.freeze({ key: "groups", label: "Khách đoàn", id: "btn-open-groups", badgeId: "groups-count-pill", icon: "users", permission: "bookings:read", implemented: true }),
         Object.freeze({ key: "dorm", label: "Dorm nội bộ", id: "btn-open-dorm-today", icon: "bed", permission: "bookings:read", implemented: true }),
@@ -3016,6 +3024,7 @@
         Object.freeze({ key: "cash_shifts", label: "Giao ca lễ tân", id: "btn-open-shifts", badgeId: "shifts-badge-pill", icon: "handover", permission: "finance:shift_read", implemented: true }),
         Object.freeze({ key: "cashbook", label: "Sổ quỹ & đối soát", id: "btn-open-cashbook", icon: "book", permission: "finance:cashbook_read", implemented: true }),
         Object.freeze({ key: "payables", label: "Hóa đơn NCC & công nợ trả", id: "btn-open-payables", badgeId: "ap-badge-pill", icon: "file_text", permission: "finance:payables_read", implemented: true }),
+        Object.freeze({key:"finance_controls",label:"Đối soát và kho",id:"btn-controls",icon:"wallet",permission:"reports:management",implemented:true}),
         Object.freeze({key:"folio",label:"Bảng kê phòng và đoàn",id:"btn-folio",icon:"receipt",permission:"finance:ar_read",implemented:true}),
         Object.freeze({key:"day_close",label:"Chốt sổ quỹ ngày",id:"btn-day-close",icon:"wallet",permission:"reports:management",implemented:true}),
         Object.freeze({ key: "enterprise_report", label: "Báo cáo tài chính", id: "btn-enterprise-report", icon: "chart", permission: "reports:management", implemented: true }),
@@ -4850,6 +4859,7 @@
     const migrationHistory = Array.isArray(obj.migrationHistory) ? obj.migrationHistory.slice(0, 20) : [];
 
     return {
+      ...(Array.isArray(obj.controlsV23) ? {controlsV23:obj.controlsV23} : {}),
       version: 3,
       ledgerVersion: Math.max(0, Math.trunc(Number(obj.ledgerVersion) || 0)),
       voucherSeq: Math.max(transactions.length, Math.trunc(Number(obj.voucherSeq) || 0)),
@@ -5106,8 +5116,9 @@
     const netPaid = roundVND(grossPaid - totalRefunded);
     const confirmedFundNetPaid = roundVND(confirmedFundGrossPaid - totalRefunded);
     const unassignedLegacyPaid = roundVND(unassignedLegacyMigratedPaid + unmigratedLegacyPaid);
-    const remaining = Math.max(0, roundVND(totalPayable - netPaid));
-    const overpaid = Math.max(0, roundVND(netPaid - totalPayable));
+    const otaCleared=entity.bookings.flatMap(b=>b.ops24?.netFees||[]).filter(t=>!effectiveAsOf || t.day<=effectiveAsOf).reduce((n,t)=>n+t.fee,0);
+    const remaining = Math.max(0, roundVND(totalPayable - netPaid - otaCleared));
+    const overpaid = Math.max(0, roundVND(netPaid + otaCleared - totalPayable));
     const cancelledHeldDeposit = allCancelled && effectiveRoomCount > 0 && overpaid > 0 ? overpaid : 0;
 
     // Determine effective due date from booking depositDueDate / paymentDueDate (never fabricate if legacy missing!)
@@ -5166,6 +5177,7 @@
       totalRefunded: roundVND(totalRefunded),
       netPaid,
       confirmedFundNetPaid,
+      otaCleared,
       openingIncludedLegacyPaid: roundVND(openingIncludedLegacyPaid),
       unassignedLegacyPaid,
       remaining,

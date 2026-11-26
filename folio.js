@@ -2,6 +2,7 @@
 (function (root) {
   "use strict";
   const C = root.PMSCore || require("./pms-core.js");
+  const O=root.PMSOps24 || require("./ops24.js");
   const labels = { guest: "Khách", tour: "Công ty tour", ota: "OTA thu hộ" };
   function payer(b, key) {
     const routing = b.folioRouting || {};
@@ -12,7 +13,7 @@
   }
   function party(b, role) {
     const name = role === "guest" ? b.guestName : role === "tour" ? b.tourName : b.channelKey;
-    const id = role === "guest" ? b.id : String(name || b.id).trim().toLowerCase();
+    const id = role === "guest" ? (b.ops24?.origin || b.id) : String(name || b.id).trim().toLowerCase();
     return { id: role + "/" + id, name: labels[role] + " · " + (name || b.roomId), role };
   }
   function statements(bookings, finance) {
@@ -21,14 +22,20 @@
     const groups = new Map(entities.filter(e=>e.groupCode).map(e=>[e.groupCode,e]));
     const sheets = new Map(entities.map(e=>[e.entityKey,{entity:e, rows:[], pending:[]}]));
     const receipts = new Map();
-    function append(b, key, date, memo, charge, payment, deposit, type) {
+    function append(b, key, date, memo, charge, payment, deposit, type, role) {
       const sheet = sheets.get(bookingToEntity.get(b.id).entityKey);
-      const who = party(b,payer(b,key));
+      const who = party(b,role || payer(b,key));
       const row = {b,key,date,memo,charge,payment,deposit,type,who};
       sheet.rows.push(row);
       return row;
     }
+    function charge(b,key,day,memo,amount,before,total,type) {
+      const shares=O.allocation(amount,before,total,b.ops24?.splits?.[key]);
+      if(!shares)return append(b,key,day,memo,amount,0,0,type);
+      for(const [role,n] of shares)if(n)append(b,key,day,memo,n,0,0,type,role);
+    }
     for (const b of bookings) {
+      for(const fee of b.ops24?.netFees||[])append(b,"net:"+fee.id,fee.day,"Cấn phí OTA · "+fee.notice,0,0,0,"fee","ota").cleared=fee.fee;
       if (C.isBookingCancelled(b)) {
         const pol = b.cancelDepositPolicy || {};
         if (pol.revenueRecognized && pol.retainedAmount > 0) append(b,"room",pol.recognizedDate || String(b.cancelledAt || b.checkout).slice(0,10),"Cọc giữ theo quyết định hủy",0,0,-Number(pol.retainedAmount),"retain");
@@ -36,11 +43,11 @@
       }
       const nights = C.diffNights(b.checkin,b.checkout);
       const amount = C.getBookingChargesBreakdown(b).roomAmount;
-      for (let i=0;i<nights;i++) {
-        const share = Math.round(amount*(i+1)/nights)-Math.round(amount*i/nights);
-        append(b,"room",C.addDaysISO(b.checkin,i),"Tiền phòng",share,0,0,"room");
+      let before=0;
+      for(const r of O.nightly(b,amount,nights,C.addDaysISO)){
+        charge(b,"room",r.day,"Tiền phòng",r.amount,before,amount,"room");before+=r.amount;
       }
-      for (const s of b.services || []) if(s.status !== "cancelled") append(b,"service:"+s.id,s.serviceDate || s.dateISO || b.checkin,s.name || "Dịch vụ",Number(s.amount),0,0,"service");
+      for(const s of b.services||[])if(s.status!=="cancelled")charge(b,"service:"+s.id,s.serviceDate||s.dateISO||b.checkin,s.name||"Dịch vụ",Number(s.amount),0,Number(s.amount),"service");
       for (const a of b.adjustments || []) if(a.status !== "cancelled") append(b,"adjustment:"+a.id,a.effectiveDate || b.checkin,a.reason || "Điều chỉnh",Number(a.amount),0,0,"adjustment");
     }
     const seen = new Set();
@@ -67,13 +74,13 @@
     for (const row of sheet.rows) {
       if (row.date > date) continue;
       let s = sums.get(row.who.id);
-      if (!s) { s = {who:row.who,charges:0,paid:0,deposits:0}; sums.set(row.who.id,s); }
-      s.charges+=row.charge; s.paid+=row.payment; s.deposits+=row.deposit;
+      if (!s) { s = {who:row.who,charges:0,paid:0,deposits:0,cleared:0}; sums.set(row.who.id,s); }
+      s.cleared+=row.cleared||0; s.charges+=row.charge; s.paid+=row.payment; s.deposits+=row.deposit;
     }
     for (const s of sums.values()) {
       s.applied=Math.min(Math.max(0,s.deposits),Math.max(0,s.charges));
       s.held=s.deposits-s.applied;
-      s.balance=s.charges-s.applied-s.paid;
+      s.balance=s.charges-s.applied-s.paid-s.cleared;
     }
     return sums;
   }

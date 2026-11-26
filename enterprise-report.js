@@ -618,12 +618,25 @@
       entries.push(validateJournalEntry({...draft,entityId,propertyId,approvedBy:actor},st));
     }
     const arFor = role => role==="ota" ? map.arOta : map.arCustomer;
+    function payerDebits(b,key,month){
+      const rows=[...folios.sheets.values()].find(s=>s.entity.memberIds.has(b.id))?.rows||[];
+      const sums=new Map();
+      for(const row of rows)if(row.b.id===b.id && row.key===key && (!month || row.date.startsWith(month))){
+        const id=row.who.id;sums.set(id,{who:row.who,amount:(sums.get(id)?.amount||0)+row.charge});
+      }
+      return [...sums.values()].filter(x=>x.amount>0).map(x=>({accountCode:arFor(x.who.role),partner:x.who.name,debit:x.amount}));
+    }
     // 1. Booking room/dorm revenue (prorated per month in period), active services, discounts, retained cancel deposits
     for (const bk of bookings) {
       if (!bk || !bk.id) continue;
       const isCancelled = C ? C.isBookingCancelled(bk) : bk.status === "cancelled";
       const arAcct = arFor(F.payer(bk,"room"));
 
+      for(const fee of bk.ops24?.netFees||[])if(fee.day>=p.from && fee.day<=p.to)pushIfNew({
+        sourceType:"pms_ota_net_fee",sourceEventId:fee.id,eventType:"settle_commission",postingDate:fee.day,businessDate:fee.day,
+        partnerName:F.party(bk,"ota").name,bookingId:bk.id,groupCode:bk.bookingCode||"",voucherNo:"OTA-"+fee.id,
+        note:"Cấn phí bảng kê "+fee.notice,lines:[{accountCode:map.otaCommission,debit:Math.max(fee.fee,0),credit:Math.max(-fee.fee,0)},{accountCode:map.arOta,credit:Math.max(fee.fee,0),debit:Math.max(-fee.fee,0)}]
+      });
       if (isCancelled) {
         const pol = bk.cancelDepositPolicy;
         if (pol && pol.revenueRecognized && toSafeInt(pol.retainedAmount) > 0) {
@@ -671,7 +684,7 @@
             groupCode: bk.bookingCode || "",
             note: `Doanh thu lưu trú P.${bk.roomId} (${mKey})`,
             lines: [
-              { accountCode: arAcct, debit: revAmt },
+              ...payerDebits(bk,"room",mKey),
               { accountCode: bk.roomId === "DORM" ? map.dormRevenue : map.roomRevenue, credit: revAmt }
             ]
           });
@@ -699,7 +712,7 @@
           groupCode: bk.bookingCode || "",
           note: `Dịch vụ ${sv.name || ""} — P.${bk.roomId}`,
           lines: [
-            { accountCode: arAcct, debit: amt },
+            ...payerDebits(bk,"service:"+sv.id),
             { accountCode: map.serviceRevenue, credit: amt }
           ]
         });
@@ -747,7 +760,7 @@
         const amt = toSafeInt(il.amount);
         if (amt <= 0) continue;
         sumInv = add(sumInv, amt);
-        const expCode = (map.costItemAccounts && map.costItemAccounts[il.costItemId]) || "6421";
+        const expCode = map.costItemAccounts?.[il.costItemId] || (il.costItemId==="ci_booking_fee" ? map.otaCommission : "6421");
         glLines.push({ accountCode: expCode, debit: amt, memo: il.description || inv.supplierName || "" });
       }
       if (sumInv > 0) {
@@ -942,6 +955,20 @@
         continue;
       }
       pushIfNew({...e,id:undefined,createdAt:undefined,lines:[]});
+    }
+    const controls = root.PMSControlAudit || (typeof require==="function" && require("./control-audit.js"));
+    for(const row of fin.controlsV23 || []) {
+      if(!controls.stockKind(row) || controls.opening(row) || !row.value || row.day<p.from || row.day>p.to)continue;
+      const isIntake=(row.kind==="reverse"?row.sourceKind:row.kind)==="receipt";
+      const directCost=["ci_room_amenities","ci_minibar_free","ci_breakfast","ci_laundry"].includes(row.costItemId);
+      const fallback=row.costItemId==="ci_booking_fee"?map.otaCommission:!isIntake && directCost?"6321":"6421";
+      const expense=map.costItemAccounts?.[row.costItemId] || fallback;
+      const stock=map.inventoryAccount || "1521";
+      pushIfNew({sourceType:"pms_stock_move",sourceEventId:String(row.seq),eventType:"stock_movement",
+        postingDate:row.day,businessDate:row.day,voucherNo:row.ref,
+        department:"operations",note:row.sku+" · "+row.ref,
+        lines:[{accountCode:stock,debit:Math.max(0,row.value),credit:Math.max(0,-row.value)},
+               {accountCode:expense,credit:Math.max(0,row.value),debit:Math.max(0,-row.value)}]});
     }
     return { entries, unresolvedLegacy, reconciledExternalLinks, sourceMode };
   }

@@ -79,6 +79,8 @@
             <span class="nav-label">Hóa đơn NCC &amp; công nợ trả</span>
             <span id="ap-badge-pill" class="nav-badge nav-badge-warn" style="display:none;">0</span>
           </button>
+          <button id="btn-controls" class="nav-item" type="button" data-nav-key="finance_controls"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-label">Đối soát và kho</span></button>
+          <button id="btn-ops24" class="nav-item" type="button" data-nav-key="ops24"><span class="nav-icon" aria-hidden="true">▦</span><span class="nav-label">Điều hành trong ngày</span></button>
           <button id="btn-folio" class="nav-item" type="button" data-nav-key="folio"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-label">Bảng kê phòng và đoàn</span></button>
           <button id="btn-day-close" class="nav-item" type="button" data-nav-key="day_close"><span class="nav-icon" aria-hidden="true">✓</span><span class="nav-label">Chốt sổ quỹ ngày</span></button>
           <button id="btn-open-costs" class="nav-item" type="button" data-nav-key="operating_costs" title="Chi phí vận hành &amp; giá vốn theo tháng">
@@ -106,6 +108,7 @@
       </nav>
 
       <div class="sidebar-foot">
+        <button type="button" data-install-pms>Cài ứng dụng</button>
         <span id="sidebar-version-label" class="sidebar-version">Dongvan PMS</span>
       </div>
     </aside>
@@ -1805,6 +1808,22 @@
     <div class="folio-filters"><select id="folio-select" aria-label="Đơn hoặc đoàn"></select><label>Đến ngày <input type="date"></label></div>
     <p role="status"></p><section></section><footer></footer>
   </dialog>
+  <dialog id="controls-dialog" aria-labelledby="controls-title">
+    <header><h2 id="controls-title">Đối soát và kho</h2><button type="button" data-close>Đóng</button></header>
+    <nav aria-label="Phân hệ tài chính"></nav><p role="status"></p><section></section>
+  </dialog>
+  <dialog id="ops24-dialog" aria-labelledby="ops24-title"><header><h2 id="ops24-title">Điều hành trong ngày</h2><button type="button" data-exit>Đóng</button></header><nav></nav><p role="status"></p><main></main></dialog>
+  <dialog id="install-guide" aria-labelledby="install-title">
+    <h2 id="install-title">Cài Dongvan Hotel</h2>
+    <p>Windows hoặc Android: mở menu Chrome hoặc Edge và chọn cài ứng dụng.</p>
+    <p>iPhone, iPad: mở trang trong Safari, chọn Chia sẻ → Thêm vào Màn hình chính. Bật “Mở dưới dạng ứng dụng” nếu có.</p>
+    <p>Mac dùng Safari trên macOS Sonoma trở lên: chọn Tệp → Thêm vào Dock.</p>
+    <p>Sau khi cài, mở biểu tượng Dongvan Hotel và đăng nhập bằng tài khoản nhân viên.</p>
+    <form method="dialog"><button>Đóng</button></form>
+  </dialog>
+  <script src="install-app.js"></script>
+  <script src="ops24.js"></script>
+  <script src="control-audit.js"></script>
   <script src="pms-core.js"></script>
   <script src="folio.js"></script>
   <script src="supabase-config.js"></script>
@@ -1816,5 +1835,7 @@
   <script src="enterprise-report.js"></script>
   <script src="enterprise-ui.js"></script>
   <script src="folio-ui.js"></script>
+  <script src="controls-ui.js"></script>
+  <script src="ops24-ui.js"></script>
 </body>
 </html>

@@ -103,10 +103,10 @@
         const sheet=sheets.get(selector.value);
         if(!sheet){status.textContent="Chưa có đơn đặt phòng.";return;}
         const rows=sheet.rows.filter(r=>r.date<=date.value);
-        const sums=table(["Người trả","Phát sinh","Thanh toán ròng","Cọc đã cấn","Cọc còn giữ","Dư phải thu (+) / trả thừa (−)"]);
-        for(const s of F.balances(sheet,date.value).values()) tr(sums,[s.who.name,...[s.charges,s.paid,s.applied,s.held,s.balance].map(money)]);
-        const items=table(["Ngày","Phòng","Diễn giải","Phát sinh","Thu / hoàn","Biến động cọc","Người trả"]);
-        for(const r of rows) tr(items,[r.date,r.b.roomId,r.memo,money(r.charge),money(r.payment),money(r.deposit),r.who.name]);
+        const sums=table(["Người trả","Phát sinh","Thanh toán ròng","Phí OTA đã cấn","Cọc đã cấn","Cọc còn giữ","Dư phải thu (+) / trả thừa (−)"]);
+        for(const s of F.balances(sheet,date.value).values()) tr(sums,[s.who.name,...[s.charges,s.paid,s.cleared,s.applied,s.held,s.balance].map(money)]);
+        const items=table(["Ngày","Phòng","Diễn giải","Phát sinh","Thu / hoàn","Phí OTA đã cấn","Biến động cọc","Người trả"]);
+        for(const r of rows) tr(items,[r.date,r.b.roomId,r.memo,money(r.charge),money(r.payment),money(r.cleared||0),money(r.deposit),r.who.name]);
         status.textContent="Bảng kê theo đêm lưu trú đến "+date.value+" · "+sheet.pending.length+" phiếu chuyển tiếp theo dõi riêng.";
         for(const t of sheet.pending) body.append(element("p",(t.voucherCode || t.id)+" · "+money(t.amount)+" · "+(t.legacyStatus==="reconciled_in_opening"?"Đã gồm trong đầu kỳ":"Chưa đủ ngày hoặc quỹ")));
         if(client.can("bookings:write")) {
