@@ -975,6 +975,7 @@
       return;
     }
     if(key==="ops24"){window.DongvanOps.open();return;}
+    if(key==="ta_ar"){if(window.PMSTaUI)window.PMSTaUI.open("queue");return;}
     if(key==="finance_controls"){window.PMSControlsUI.open();return;}
     if (key === "folio" || key === "day_close") {
       window.PMSFolioUI.open(key === "folio" ? "folio" : "close"); return;

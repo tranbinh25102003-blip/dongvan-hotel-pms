@@ -79,6 +79,7 @@
             <span class="nav-label">Hóa đơn NCC &amp; công nợ trả</span>
             <span id="ap-badge-pill" class="nav-badge nav-badge-warn" style="display:none;">0</span>
           </button>
+          <button id="btn-ta-ar" class="nav-item" type="button" data-nav-key="ta_ar" title="Hợp đồng Lữ hành 2027, lịch cọc &amp; công nợ đại lý tour"><span class="nav-icon" aria-hidden="true">🤝</span><span class="nav-label">Đại lý &amp; công nợ</span></button>
           <button id="btn-controls" class="nav-item" type="button" data-nav-key="finance_controls"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-label">Đối soát và kho</span></button>
           <button id="btn-ops24" class="nav-item" type="button" data-nav-key="ops24"><span class="nav-icon" aria-hidden="true">▦</span><span class="nav-label">Điều hành trong ngày</span></button>
           <button id="btn-folio" class="nav-item" type="button" data-nav-key="folio"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-label">Bảng kê phòng và đoàn</span></button>
@@ -768,6 +769,7 @@
       <div class="modal-body">
         <div class="group-report-toolbar">
           <input id="group-report-search" class="search-input" type="search" placeholder="Tìm mã đoàn, tên khách, tên tour, số phòng..." style="flex:1; min-width:200px;" />
+          <button id="btn-open-ta-groups" class="btn btn-primary btn-sm" type="button" title="Lập báo giá, giữ chỗ &amp; xác nhận đoàn theo Hợp đồng Lữ hành 2027">🤝 Đặt đoàn theo HĐ Đại lý (v2.5)</button>
           <span id="group-report-summary" class="group-report-summary-pill">0 đoàn</span>
         </div>
         <div id="group-report-body" class="group-report-list"></div>
@@ -1813,6 +1815,7 @@
     <nav aria-label="Phân hệ tài chính"></nav><p role="status"></p><section></section>
   </dialog>
   <dialog id="ops24-dialog" aria-labelledby="ops24-title"><header><h2 id="ops24-title">Điều hành trong ngày</h2><button type="button" data-exit>Đóng</button></header><nav></nav><p role="status"></p><main></main></dialog>
+  <dialog id="ta-dialog" aria-labelledby="ta-title"><header><h2 id="ta-title">Hợp đồng &amp; Công nợ Đại lý Tour (v2.5)</h2><button type="button" data-ta-close>Đóng</button></header><nav aria-label="Phân hệ Đại lý Tour"></nav><p role="status"></p><main></main></dialog>
   <dialog id="install-guide" aria-labelledby="install-title">
     <h2 id="install-title">Cài Dongvan Hotel</h2>
     <p>Windows hoặc Android: mở menu Chrome hoặc Edge và chọn cài ứng dụng.</p>
@@ -1823,6 +1826,7 @@
   </dialog>
   <script src="install-app.js"></script>
   <script src="ops24.js"></script>
+  <script src="ta-contracts.js"></script>
   <script src="control-audit.js"></script>
   <script src="pms-core.js"></script>
   <script src="folio.js"></script>
@@ -1837,5 +1841,6 @@
   <script src="folio-ui.js"></script>
   <script src="controls-ui.js"></script>
   <script src="ops24-ui.js"></script>
+  <script src="ta-contracts-ui.js"></script>
 </body>
 </html>

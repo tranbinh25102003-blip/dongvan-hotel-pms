@@ -6,7 +6,7 @@
      so existing home-screen icons ALWAYS load the newest deployed version.
    ========================================================================== */
 
-const CACHE_NAME = "dongvan-hotel-shell-v27";
+const CACHE_NAME = "dongvan-hotel-shell-v28";
 const isHotelCache = key => /^dongvan-hotel-shell-v[0-9]+$/.test(key);
 const PRECACHE_URLS = [
   "./",
@@ -20,6 +20,8 @@ const PRECACHE_URLS = [
   "./install-app.js",
   "./ops24.js",
   "./ops24-ui.js",
+  "./ta-contracts.js",
+  "./ta-contracts-ui.js",
   "./controls-ui.js",
   "./supabase-config.js",
   "./pms-supabase.js",
@@ -52,9 +54,9 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys()
+    self.clients.claim()
+      .then(() => caches.keys())
       .then((keys) => Promise.all(keys.filter((k) => isHotelCache(k) && k !== CACHE_NAME).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim())
   );
 });
 

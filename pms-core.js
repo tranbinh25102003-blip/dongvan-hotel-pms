@@ -3024,6 +3024,7 @@
         Object.freeze({ key: "cash_shifts", label: "Giao ca lễ tân", id: "btn-open-shifts", badgeId: "shifts-badge-pill", icon: "handover", permission: "finance:shift_read", implemented: true }),
         Object.freeze({ key: "cashbook", label: "Sổ quỹ & đối soát", id: "btn-open-cashbook", icon: "book", permission: "finance:cashbook_read", implemented: true }),
         Object.freeze({ key: "payables", label: "Hóa đơn NCC & công nợ trả", id: "btn-open-payables", badgeId: "ap-badge-pill", icon: "file_text", permission: "finance:payables_read", implemented: true }),
+        Object.freeze({ key: "ta_ar", label: "Đại lý & công nợ", id: "btn-ta-ar", icon: "users", permission: "reports:management", implemented: true }),
         Object.freeze({key:"finance_controls",label:"Đối soát và kho",id:"btn-controls",icon:"wallet",permission:"reports:management",implemented:true}),
         Object.freeze({key:"folio",label:"Bảng kê phòng và đoàn",id:"btn-folio",icon:"receipt",permission:"finance:ar_read",implemented:true}),
         Object.freeze({key:"day_close",label:"Chốt sổ quỹ ngày",id:"btn-day-close",icon:"wallet",permission:"reports:management",implemented:true}),

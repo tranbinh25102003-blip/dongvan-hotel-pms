@@ -5389,3 +5389,22 @@ tr.er-clickable:hover td { background: #eef6f1; }
 
 .installed-pms [data-install-pms] {display:none!important}
 #install-guide {max-width:min(28rem,90vw);border:1px solid #aca695;border-radius:10px;padding:20px}
+
+#ta-dialog{width:min(74rem,96vw);max-height:92dvh;overflow:auto;border:1px solid #abc1b8;border-radius:12px;padding:1rem;background:#fff;color:#1c1b18}
+#ta-dialog::backdrop{background:#183b316e}
+#ta-dialog header,#ta-dialog nav{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.65rem}
+#ta-dialog header{justify-content:space-between;border-bottom:1px solid #dbe4e0;padding-bottom:.5rem}
+#ta-dialog .ta-card{border:1px solid #d5e0dc;border-radius:10px;padding:.85rem;margin:.75rem 0;background:#f8fbfa}
+#ta-dialog .ta-form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr));gap:.55rem .8rem;margin:.5rem 0}
+#ta-dialog label{display:grid;gap:.2rem;font-size:.86rem;min-width:0}
+#ta-dialog input,#ta-dialog select,#ta-dialog textarea{max-width:100%;padding:.4rem .5rem;border:1px solid #b4c4bf;border-radius:6px;font:inherit}
+#ta-dialog .ta-filter-bar,#ta-dialog .ta-actions{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin:.5rem 0}
+#ta-dialog .ta-kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,11rem),1fr));gap:.5rem;margin:.6rem 0}
+#ta-dialog .ta-kpi{border:1px solid #d5e0dc;border-radius:8px;padding:.55rem .7rem;background:#fff;display:grid;gap:.2rem}
+#ta-dialog .ta-kpi small{color:#52615c;font-size:.78rem}
+#ta-dialog .ta-kpi strong{font-size:1rem;font-variant-numeric:tabular-nums}
+#ta-dialog .ta-warn{background:#fef3c7;color:#92400e;border:1px solid #f59e0b;border-radius:6px;padding:.45rem .65rem;font-size:.86rem}
+#ta-dialog .ops-scroll{overflow-x:auto;margin:.65rem 0}
+#ta-dialog table{width:100%;border-collapse:collapse;font-size:.86rem}
+#ta-dialog th,#ta-dialog td{padding:.42rem .5rem;text-align:left;border-bottom:1px solid #d2ddd9;vertical-align:top}
+#ta-dialog th{background:#eef4f2;white-space:nowrap}
