@@ -79,6 +79,8 @@
             <span class="nav-label">Hóa đơn NCC &amp; công nợ trả</span>
             <span id="ap-badge-pill" class="nav-badge nav-badge-warn" style="display:none;">0</span>
           </button>
+          <button id="btn-folio" class="nav-item" type="button" data-nav-key="folio"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-label">Bảng kê phòng và đoàn</span></button>
+          <button id="btn-day-close" class="nav-item" type="button" data-nav-key="day_close"><span class="nav-icon" aria-hidden="true">✓</span><span class="nav-label">Chốt sổ quỹ ngày</span></button>
           <button id="btn-open-costs" class="nav-item" type="button" data-nav-key="operating_costs" title="Chi phí vận hành &amp; giá vốn theo tháng">
             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3"/><path d="M16 12h5v4h-5a2 2 0 0 1 0-4z"/></svg></span>
             <span class="nav-label">Chi phí &amp; giá vốn</span>
@@ -1798,7 +1800,13 @@
     <div id="er-drilldown" class="er-drilldown" hidden></div>
     <div id="er-body"></div>
   </dialog>
+  <dialog id="folio-dialog" aria-labelledby="folio-title">
+    <header><h2 id="folio-title"></h2><button type="button" data-dismiss>Đóng</button></header>
+    <div class="folio-filters"><select id="folio-select" aria-label="Đơn hoặc đoàn"></select><label>Đến ngày <input type="date"></label></div>
+    <p role="status"></p><section></section><footer></footer>
+  </dialog>
   <script src="pms-core.js"></script>
+  <script src="folio.js"></script>
   <script src="supabase-config.js"></script>
   <script src="pms-supabase.js"></script>
   <script src="pms-client.js"></script>
@@ -1807,5 +1815,6 @@
   <script src="mobile.js"></script>
   <script src="enterprise-report.js"></script>
   <script src="enterprise-ui.js"></script>
+  <script src="folio-ui.js"></script>
 </body>
 </html>

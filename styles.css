@@ -5348,3 +5348,18 @@ tr.er-clickable:hover td { background: #eef6f1; }
   .er-tools label { width: 100%; }
   .er-kpi-grid { grid-template-columns: 1fr 1fr; }
 }
+
+#folio-dialog {width:min(64rem,96vw);max-height:90dvh;overflow:auto;border:1px solid #b4c4bf;border-radius:12px;padding:1rem;color:var(--text,#252d2a);background:var(--panel,#fff)}
+#folio-dialog::backdrop {background:#14292373}
+#folio-dialog header,#folio-dialog footer,.folio-filters {display:flex;gap:.65rem;flex-wrap:wrap;align-items:center}
+#folio-dialog header {justify-content:space-between}
+#folio-dialog section {overflow-x:auto}
+#folio-dialog table {border-collapse:collapse;width:100%;margin:.75rem 0}
+#folio-dialog th,#folio-dialog td {padding:.5rem;text-align:left;border-bottom:1px solid #b4c4bf}
+#folio-dialog select {max-width:100%}
+@media print {
+  body.print-folio > :not(#folio-dialog) {display:none!important}
+  body.print-folio #folio-dialog {display:block!important;position:static;width:100%;max-height:none;overflow:visible;border:0;margin:0}
+  #folio-dialog footer,#folio-dialog [data-dismiss]{display:none!important}
+  #folio-dialog section{overflow:visible}
+}

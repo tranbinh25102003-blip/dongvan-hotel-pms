@@ -2455,6 +2455,25 @@
       return { ok: true, periodState: gl.periods[stateKey], enterpriseGlState: saved };
     }
 
+    async function dayClose(day, expected = null) {
+      if (!can("reports:management")) {
+        return { ok: false, status: 403, code: "FORBIDDEN", error: "Chỉ Quản lý mới có quyền chốt sổ quỹ cuối ngày." };
+      }
+      if (mode !== "server") {
+        return { ok: false, code: "LOCAL_NOT_SUPPORTED", error: "Chốt ngày cần kết nối máy chủ SQLite hoặc Supabase có migration v2.1." };
+      }
+      try {
+        const res = await fetchJson("/api/finance/day-close", { method: "POST", body: { day, expected }, timeoutMs: 12000 });
+        if (res.status === 401) {
+          handleAuthExpired(res.data && res.data.error);
+          return { ok: false, status: 401, code: "AUTH_REQUIRED", error: "Phiên đăng nhập đã hết hạn." };
+        }
+        return (res && res.data) || { ok: false, error: "Không đọc được biên bản chốt ngày." };
+      } catch {
+        return { ok: false, offline: true, code: "NETWORK_OFFLINE", error: "Mất kết nối tới máy chủ." };
+      }
+    }
+
     function runHealthCheck() {
       if (mode === "server") {
         const consistency = Core.auditBookingConsistency(stateCache.bookings);
@@ -2488,6 +2507,7 @@
       checkAppVersion,
       getVersionInfo,
       getAuthState,
+      dayClose,
       getEnterpriseGlState: () => (can("reports:management") ? stateCache.enterpriseGlState : null),
       refreshEnterpriseGlState,
       saveEnterpriseGlSetup,

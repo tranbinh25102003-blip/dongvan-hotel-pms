@@ -973,6 +973,9 @@
       if (window.PMSFinanceApp) window.PMSFinanceApp.openPayables();
       return;
     }
+    if (key === "folio" || key === "day_close") {
+      window.PMSFolioUI.open(key === "folio" ? "folio" : "close"); return;
+    }
     if (key === "enterprise_report") {
       if (mCan("reports:management")) window.PMSEnterpriseUI.open();
       return;

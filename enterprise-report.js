@@ -9,6 +9,7 @@
   "use strict";
   const C = root.PMSCore || (typeof require === "function" && require("./pms-core.js"));
 
+  const F = root.PMSFolio || (typeof require === "function" && require("./folio.js"));
   const groups = {
     cash: "Tiền và tương đương tiền",
     ar: "Phải thu ngắn hạn",
@@ -565,26 +566,63 @@
     const unresolvedLegacy = [];
     const reconciledExternalLinks = [];
 
-    const existingKeys = new Set(
-      st.entries.filter((e) => e.entityId === entityId && e.sourceEventId).map((e) => `${e.sourceType}|${e.sourceEventId}|${e.eventType}`)
-    );
-    const pushIfNew = (draft) => {
-      const k = `${draft.sourceType}|${draft.sourceEventId}|${draft.eventType}`;
-      if (existingKeys.has(k)) return;
+    const asOf = opts.asOfDate || C.getVietnamTodayISO();
+    const folios = F.statements(bookings,fin);
+    const history = new Map();
+    const targetKeys = new Set();
+    const sourceKey = e => e.sourceType + "|" + e.sourceEventId;
+    for (const e of st.entries) {
+      if (e.entityId !== entityId || e.propertyId !== propertyId || !e.sourceEventId) continue;
+      const key = sourceKey(e);
+      if (!history.has(key)) history.set(key,[]);
+      history.get(key).push(e);
+    }
+    function pushIfNew(draft) {
+      const key = sourceKey(draft);
+      if (targetKeys.has(key)) return;
+      targetKeys.add(key);
+      if (draft.postingDate>asOf) return;
       if (sourceMode === "external_master") {
-        reconciledExternalLinks.push({ sourceType: draft.sourceType, sourceEventId: draft.sourceEventId, amount: draft.lines.reduce((s, l) => s + (l.debit || 0), 0), date: draft.postingDate });
+        reconciledExternalLinks.push({sourceType:draft.sourceType,sourceEventId:draft.sourceEventId,amount:draft.lines.reduce((s,l)=>s+(l.debit||0),0),date:draft.postingDate});
         return;
       }
-      existingKeys.add(k);
-      entries.push(validateJournalEntry({ ...draft, entityId, propertyId, approvedBy: actor }, st));
-    };
-
+      const prior = history.get(key) || [];
+      if (prior.length) {
+        const delta = new Map();
+        function accumulate(lines,sign,partner) {
+          for (const l of lines) {
+            const party = l.partner || partner || "";
+            const k = JSON.stringify([l.accountCode,party]);
+            delta.set(k,(delta.get(k)||0)+sign*((l.debit||0)-(l.credit||0)));
+          }
+        }
+        // Explicit reversals and re-dating across closed months require accounting review.
+        if (prior.some(e=>e.status==="reversed" || e.reversesEntryId || e.periodKey!==draft.postingDate.slice(0,7))) {
+          unresolvedLegacy.push({id:key,reason:"Chứng từ đã đảo hoặc đổi kỳ, cần kế toán kiểm tra."});
+          return;
+        }
+        accumulate(draft.lines,1,draft.partnerName);
+        for(const e of prior) accumulate(e.lines,-1,e.partnerName);
+        const lines = [];
+        for(const [k,n] of delta) {
+          const [accountCode,partner]=JSON.parse(k);
+          if(n) lines.push({accountCode,partner,debit:Math.max(n,0),credit:Math.max(-n,0)});
+        }
+        if (!lines.length) return;
+        draft={...draft,lines,eventType:"adjust_"+prior.length,voucherNo:"DC-"+draft.voucherNo+"-"+prior.length,note:"Điều chỉnh theo chứng từ nguồn · "+draft.note};
+      }
+      if (isPeriodLocked(st,entityId,draft.postingDate.slice(0,7))) {
+        unresolvedLegacy.push({id:key,reason:"Kỳ đã khóa, cần xử lý theo quy trình điều chỉnh."});
+        return;
+      }
+      entries.push(validateJournalEntry({...draft,entityId,propertyId,approvedBy:actor},st));
+    }
+    const arFor = role => role==="ota" ? map.arOta : map.arCustomer;
     // 1. Booking room/dorm revenue (prorated per month in period), active services, discounts, retained cancel deposits
     for (const bk of bookings) {
       if (!bk || !bk.id) continue;
       const isCancelled = C ? C.isBookingCancelled(bk) : bk.status === "cancelled";
-      const isOta = ["booking", "agoda", "airbnb", "expedia", "traveloka"].includes(String(bk.channelKey || "").toLowerCase());
-      const arAcct = isOta ? map.arOta : map.arCustomer;
+      const arAcct = arFor(F.payer(bk,"room"));
 
       if (isCancelled) {
         const pol = bk.cancelDepositPolicy;
@@ -599,7 +637,7 @@
               sourceEventId: bk.id,
               eventType: "retain_deposit",
               department: bk.roomId === "DORM" ? "dorm" : "rooms",
-              partnerName: bk.guestName || "",
+              partnerName: F.party(bk,F.payer(bk,"room")).name,
               bookingId: bk.id,
               groupCode: bk.bookingCode || "",
               note: `Ghi nhận giữ cọc hủy phòng P.${bk.roomId} (${bk.guestName || ""})`,
@@ -628,7 +666,7 @@
             sourceEventId: `${bk.id}:${mKey}`,
             eventType: "accrue_room_revenue",
             department: bk.roomId === "DORM" ? "dorm" : "rooms",
-            partnerName: bk.guestName || "",
+            partnerName: F.party(bk,F.payer(bk,"room")).name,
             bookingId: bk.id,
             groupCode: bk.bookingCode || "",
             note: `Doanh thu lưu trú P.${bk.roomId} (${mKey})`,
@@ -643,6 +681,8 @@
       // Active line-level services in period
       for (const sv of (Array.isArray(bk.services) ? bk.services : [])) {
         if (!sv || sv.status === "cancelled") continue;
+        const role = F.payer(bk,"service:"+sv.id);
+        const arAcct = arFor(role);
         const amt = toSafeInt(sv.amount);
         const dt = sv.serviceDate || sv.dateISO || bk.checkin;
         if (amt <= 0 || !isValidDate(dt) || dt < p.from || dt > p.to) continue;
@@ -654,7 +694,7 @@
           sourceEventId: `${bk.id}:${sv.id}`,
           eventType: "accrue_service",
           department: "fnb",
-          partnerName: bk.guestName || "",
+          partnerName: F.party(bk,role).name,
           bookingId: bk.id,
           groupCode: bk.bookingCode || "",
           note: `Dịch vụ ${sv.name || ""} — P.${bk.roomId}`,
@@ -668,6 +708,8 @@
       // Active adjustments (negative = discount -> Dr 5211 / Cr AR; positive = surcharge -> Dr AR / Cr 5113)
       for (const adj of (Array.isArray(bk.adjustments) ? bk.adjustments : [])) {
         if (!adj || adj.status === "cancelled") continue;
+        const role = F.payer(bk,"adjustment:"+adj.id);
+        const arAcct = arFor(role);
         const amt = toSafeInt(adj.amount);
         const dt = adj.effectiveDate || bk.checkin;
         if (amt === 0 || !isValidDate(dt) || dt < p.from || dt > p.to) continue;
@@ -682,7 +724,7 @@
           sourceEventId: `${bk.id}:${adj.id}`,
           eventType: amt < 0 ? "discount" : "surcharge",
           department: "rooms",
-          partnerName: bk.guestName || "",
+          partnerName: F.party(bk,role).name,
           bookingId: bk.id,
           groupCode: bk.bookingCode || "",
           note: `Điều chỉnh ${adj.reason || ""} — P.${bk.roomId}`,
@@ -743,9 +785,10 @@
       const cashAcct = tx.fundId === "bank_main" ? map.bankMain : map.cashFrontdesk;
 
       if (tx.txType === "customer_payment" || (tx.txType === "legacy_payment" && tx.legacyStatus === "reconciled")) {
-        const bk = tx.bookingId ? bkById.get(tx.bookingId) : null;
-        const isPreStayDeposit = Boolean(bk && bk.checkin && dt < bk.checkin);
-        const crAcct = isPreStayDeposit ? map.customerDeposit : map.arCustomer;
+        const receipt = folios.receipts.get(tx.id);
+        if (!receipt) { unresolvedLegacy.push({id:tx.id,reason:"Chưa gắn người trả."}); continue; }
+        const isPreStayDeposit = receipt.deposit !== 0;
+        const crAcct = isPreStayDeposit ? map.customerDeposit : arFor(receipt.who.role);
         pushIfNew({
           voucherNo: tx.voucherCode || `GL-PT-${tx.id.slice(-5).toUpperCase()}`,
           postingDate: dt,
@@ -754,7 +797,7 @@
           sourceEventId: tx.id,
           eventType: isPreStayDeposit ? "collect_deposit" : "collect_ar",
           department: "rooms",
-          partnerName: (bk && bk.guestName) || tx.guestName || "",
+          partnerName: receipt.who.name,
           bookingId: tx.bookingId || "",
           groupCode: tx.groupCode || "",
           flow: "operating",
@@ -765,7 +808,9 @@
           ]
         });
       } else if (tx.txType === "customer_refund") {
-        const drAcct = tx.refundCategory === "cancel_refund" ? map.customerDeposit : map.arCustomer;
+        const receipt = folios.receipts.get(tx.id);
+        if (!receipt) { unresolvedLegacy.push({id:tx.id,reason:"Hoàn tiền chưa gắn người trả."}); continue; }
+        const drAcct = receipt.deposit !== 0 ? map.customerDeposit : arFor(receipt.who.role);
         pushIfNew({
           voucherNo: tx.voucherCode || `GL-HT-${tx.id.slice(-5).toUpperCase()}`,
           postingDate: dt,
@@ -774,7 +819,7 @@
           sourceEventId: tx.id,
           eventType: "refund_customer",
           department: "rooms",
-          partnerName: tx.guestName || "",
+          partnerName: receipt.who.name,
           bookingId: tx.bookingId || "",
           groupCode: tx.groupCode || "",
           flow: "operating",
@@ -841,6 +886,63 @@
       }
     }
 
+    for (const sheet of folios.sheets.values()) {
+      // Recognize a room share at the same checkout/month-end date as its GL revenue.
+      const events = new Map();
+      for (const r of sheet.rows) {
+        if (!r.charge && !r.deposit) continue;
+        const monthEnd = r.type==="room" ? period(r.date.slice(0,7),"month").to : r.date;
+        const date = r.type==="room" && r.b.checkout<monthEnd ? r.b.checkout : monthEnd;
+        if (date>p.to || date>asOf) continue;
+        if (!events.has(date)) events.set(date,[]);
+        events.get(date).push(r);
+      }
+      const state = new Map();
+      for (const date of [...events.keys()].sort()) {
+        const deltas=new Map();
+        for (const r of events.get(date)) {
+          const bal=state.get(r.who.id) || {charges:0,deposits:0,applied:0};
+          bal.charges+=r.charge; bal.deposits+=r.deposit;
+          const applied=Math.min(Math.max(0,bal.charges),Math.max(0,bal.deposits));
+          deltas.set(r.who.id,{who:r.who,amount:(deltas.get(r.who.id)?.amount || 0)+applied-bal.applied});
+          bal.applied=applied;state.set(r.who.id,bal);
+        }
+        if (date<p.from) continue;
+        const lines=[];
+        for(const {who,amount} of deltas.values()) {
+          if(!amount) continue;
+          lines.push({accountCode:map.customerDeposit,partner:who.name,debit:Math.max(amount,0),credit:Math.max(-amount,0)},
+            {accountCode:arFor(who.role),partner:who.name,credit:Math.max(amount,0),debit:Math.max(-amount,0)});
+        }
+        if(lines.length) pushIfNew({sourceType:"pms_deposit_apply",sourceEventId:sheet.entity.entityKey+":"+date,eventType:"apply_deposit",
+          postingDate:date,businessDate:date,bookingId:sheet.entity.bookingId,groupCode:sheet.entity.groupCode,
+          voucherNo:"CC-"+sheet.entity.bookingId+"-"+date,note:"Cấn cọc theo người trả",lines});
+      }
+    }
+    // Reclassify voided source vouchers only when the void itself is present in the ledger.
+    const voidTx = new Set(txs.filter(t=>t?.status==="voided").map(t=>t.id));
+    const voidInvoice = new Set(invoices.filter(t=>t?.status==="voided").map(t=>t.id));
+    for(const [key,prior] of history) {
+      const e=prior[0];
+      if(targetKeys.has(key) || e.postingDate<p.from || e.postingDate>p.to) continue;
+      const isVoided=e.sourceType==="pms_supplier_invoice" ? voidInvoice.has(e.sourceEventId) :
+        ["pms_supplier_payment","pms_customer_payment","pms_customer_refund","pms_fund_transfer","pms_balance_adjustment"].includes(e.sourceType) && voidTx.has(e.sourceEventId);
+      if(isVoided) pushIfNew({...e,id:undefined,createdAt:undefined,lines:[]});
+    }
+    // Only clear missing charges when the corresponding source booking still exists.
+    for (const [key, prior] of history) {
+      const e=prior[0];
+      if (targetKeys.has(key) || e.postingDate<p.from || e.postingDate>p.to || !bkById.has(e.bookingId)) continue;
+      if (!["pms_booking_revenue","pms_booking_service","pms_booking_adjustment","pms_deposit_apply","pms_cancel_retain"].includes(e.sourceType)) continue;
+      const b=bkById.get(e.bookingId);
+      const row = e.sourceType==="pms_booking_service" ? (b.services||[]).find(x=>b.id+":"+x.id===e.sourceEventId) :
+        e.sourceType==="pms_booking_adjustment" ? (b.adjustments||[]).find(x=>b.id+":"+x.id===e.sourceEventId) : null;
+      if(row && row.status!=="cancelled" && !C.isBookingCancelled(b) && (row.serviceDate || row.dateISO || row.effectiveDate || b.checkin).slice(0,7)!==e.periodKey) {
+        unresolvedLegacy.push({id:key,reason:"Ngày chứng từ đã chuyển kỳ, cần kế toán kiểm tra."});
+        continue;
+      }
+      pushIfNew({...e,id:undefined,createdAt:undefined,lines:[]});
+    }
     return { entries, unresolvedLegacy, reconciledExternalLinks, sourceMode };
   }
 
@@ -1185,11 +1287,13 @@
       }
 
       for (const f of (cash.activeFunds || [])) {
-        if (f.reconcileStatus !== "reconciled") {
+        if (f.reconciliationStatus === "unreconciled") {
           unreconciledFunds.push(f.name || f.id);
           flagList.push({ severity: "warn", code: "FUND_UNRECONCILED", message: `Quỹ "${f.name || f.id}" chưa có mốc đối chiếu sao kê/kiểm đếm.` });
-        } else if (toSafeInt(f.lastDiscrepancy) !== 0) {
-          flagList.push({ severity: "warn", code: "FUND_COUNT_DIFF", message: `Quỹ "${f.name || f.id}" có chênh lệch kiểm kê ${f.lastDiscrepancy} đ.` });
+        } else if (f.latestCheck?.asOfDate < p.to) {
+          flagList.push({severity:"warn",code:"FUND_COUNT_OLDER",message:`Quỹ "${f.label || f.id}" kiểm gần nhất ngày ${f.latestCheck.asOfDate}, trước ngày báo cáo.`});
+        } else if (toSafeInt(f.liveDiscrepancy) !== 0) {
+          flagList.push({ severity: "warn", code: "FUND_COUNT_DIFF", message: `Quỹ "${f.name || f.id}" có chênh lệch kiểm kê ${f.liveDiscrepancy} đ.` });
         }
       }
       for (const sh of (pmsSnapshot.financeState.cashShifts || [])) {
@@ -1444,7 +1548,7 @@
       apAging: Object.values(apBuckets),
       arAgingMap: arBuckets,
       apAgingMap: apBuckets,
-      unreconciledFunds: (cashRep.activeFunds || []).filter((f) => f.reconcileStatus !== "reconciled"),
+      unreconciledFunds: (cashRep.activeFunds || []).filter((f) => f.reconciliationStatus === "unreconciled"),
       budgetVsActual: {
         budgetRevenue,
         actualRevenue,

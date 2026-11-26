@@ -6,7 +6,7 @@
      so existing home-screen icons ALWAYS load the newest deployed version.
    ========================================================================== */
 
-const CACHE_NAME = "dongvan-hotel-shell-v24";
+const CACHE_NAME = "dongvan-hotel-shell-v25";
 const isHotelCache = key => /^dongvan-hotel-shell-v[0-9]+$/.test(key);
 const PRECACHE_URLS = [
   "./",
@@ -14,6 +14,8 @@ const PRECACHE_URLS = [
   "./styles.css",
   "./mobile.css",
   "./pms-core.js",
+  "./folio.js",
+  "./folio-ui.js",
   "./supabase-config.js",
   "./pms-supabase.js",
   "./pms-client.js",

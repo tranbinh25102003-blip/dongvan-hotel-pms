@@ -968,6 +968,9 @@
       disposition: depositDisposition,
       retainedDepositAmount,
       cancelDepositPolicy,
+      folioRouting: Object.fromEntries(Object.entries(obj.folioRouting ?? existingRecord?.folioRouting ?? {})
+        .filter(([key, value]) => /^(room|services|adjustments|(receipt|service|adjustment):[a-zA-Z0-9_.:-]{1,96})$/.test(key)
+          && ["guest","tour","ota"].includes(value))),
       roomAmount,
       services,
       adjustments,
@@ -2006,6 +2009,7 @@
       if (a !== b) changes.push({ field: label, before: a || "(trống)", after: b || "(trống)" });
     };
 
+    pushIfDiff("Phân bổ người trả", JSON.stringify(before.folioRouting || {}), JSON.stringify(after.folioRouting || {}));
     const oldRoom = getRoomById(before.roomId);
     const newRoom = getRoomById(after.roomId);
     pushIfDiff("Phòng", oldRoom ? oldRoom.name : before.roomId, newRoom ? newRoom.name : after.roomId);
@@ -2595,7 +2599,7 @@
     const invoiceLinesByItem = new Map();
 
     for (const inv of invoices) {
-      if (!inv || !inv.id) continue;
+      if (!inv || inv.status === "voided" || !inv.id) continue;
       for (const legId of (inv.linkedLegacyEntryIds || [])) {
         if (legId) {
           linkedLegacyMap.set(legId, {
@@ -3012,6 +3016,8 @@
         Object.freeze({ key: "cash_shifts", label: "Giao ca lễ tân", id: "btn-open-shifts", badgeId: "shifts-badge-pill", icon: "handover", permission: "finance:shift_read", implemented: true }),
         Object.freeze({ key: "cashbook", label: "Sổ quỹ & đối soát", id: "btn-open-cashbook", icon: "book", permission: "finance:cashbook_read", implemented: true }),
         Object.freeze({ key: "payables", label: "Hóa đơn NCC & công nợ trả", id: "btn-open-payables", badgeId: "ap-badge-pill", icon: "file_text", permission: "finance:payables_read", implemented: true }),
+        Object.freeze({key:"folio",label:"Bảng kê phòng và đoàn",id:"btn-folio",icon:"receipt",permission:"finance:ar_read",implemented:true}),
+        Object.freeze({key:"day_close",label:"Chốt sổ quỹ ngày",id:"btn-day-close",icon:"wallet",permission:"reports:management",implemented:true}),
         Object.freeze({ key: "enterprise_report", label: "Báo cáo tài chính", id: "btn-enterprise-report", icon: "chart", permission: "reports:management", implemented: true }),
         Object.freeze({ key: "operating_costs", label: "Chi phí & giá vốn", id: "btn-open-costs", icon: "wallet", permission: "costs:read", implemented: true })
       ])
@@ -4677,6 +4683,7 @@
     return {
       id,
       voucherNo,
+      ...(obj.status === "voided" ? {status:"voided"} : {}),
       supplierName,
       invoiceDate,
       accountingMonth,
@@ -4742,6 +4749,7 @@
     return {
       id,
       voucherCode,
+      ...(obj.status === "voided" ? {status:"voided"} : {}),
       txType,
       entityType,
       bookingId: sanitizeText(obj.bookingId, 80),
@@ -5034,7 +5042,7 @@
     const matchedTxAll = [];
     const seenTxIds = new Set();
     for (const tx of fState.transactions) {
-      if (!tx || seenTxIds.has(tx.id)) continue;
+      if (!tx || tx.status === "voided" || seenTxIds.has(tx.id)) continue;
       if (tx.txType !== "customer_payment" && tx.txType !== "customer_refund" && tx.txType !== "legacy_payment") continue;
       const hitByGroup = entity.entityType === "group" && entity.groupCode && tx.groupCode === entity.groupCode;
       const hitByBooking = tx.bookingId && entity.memberIds.has(tx.bookingId);
@@ -5311,7 +5319,7 @@
 
     const fState = financeState && Array.isArray(financeState.transactions) ? financeState : createDefaultFinanceState();
     const legacyTransactions = fState.transactions.filter(
-      (tx) => tx && tx.txType === "legacy_payment" && tx.legacyStatus === "needs_reconciliation"
+      (tx) => tx && tx.status !== "voided" && tx.txType === "legacy_payment" && tx.legacyStatus === "needs_reconciliation"
     );
 
     return {
@@ -5398,7 +5406,7 @@
     const ledgerLines = [];
 
     for (const tx of allTxSorted) {
-      if (!tx) continue;
+      if (!tx || tx.status === "voided") continue;
       if (tx.txType === "legacy_payment") {
         if (tx.legacyStatus === "reconciled_in_opening") {
           // Resolved as already included inside opening balance: NEVER add to fund balance again!
@@ -5571,7 +5579,7 @@
     let monthlyRefunds = 0;
 
     for (const tx of fState.transactions) {
-      if (!tx || !tx.receivedDate) continue;
+      if (!tx || tx.status === "voided" || !tx.receivedDate) continue;
       if (tx.receivedDate < monthStart || tx.receivedDate > monthEnd) continue;
       if (tx.txType === "customer_payment" || (tx.txType === "legacy_payment" && tx.legacyStatus === "reconciled")) {
         const amt = parseVND(tx.amount);
@@ -5748,7 +5756,7 @@
     // Group supplier_payment transactions by invoiceId
     const paymentsByInvoice = new Map();
     for (const tx of transactions) {
-      if (!tx || tx.txType !== "supplier_payment" || !tx.invoiceId) continue;
+      if (!tx || tx.status === "voided" || tx.txType !== "supplier_payment" || !tx.invoiceId) continue;
       let arr = paymentsByInvoice.get(tx.invoiceId);
       if (!arr) {
         arr = [];
@@ -5761,7 +5769,7 @@
     const computedAll = [];
 
     for (const inv of invoices) {
-      if (!inv || !inv.id) continue;
+      if (!inv || inv.status === "voided" || !inv.id) continue;
       supplierSet.add(inv.supplierName);
       // Historical as-of date filter: invoice exists if invoiceDate <= asOfDate (when asOfDate provided)
       if (asOfDate && inv.invoiceDate && inv.invoiceDate > asOfDate) continue;
@@ -6000,6 +6008,7 @@
   }
 
   function getShiftCashImpact(tx, fundId = "cash_frontdesk") {
+    if (tx?.status === "voided") return null;
     if (!tx || typeof tx !== "object") return null;
     if (!fundId || tx.fundId === "unassigned_legacy") return null;
     if (tx.txType === "legacy_payment") {

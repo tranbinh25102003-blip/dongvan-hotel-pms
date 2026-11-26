@@ -2530,6 +2530,8 @@
       if (!ER || typeof ER.buildPmsAutoPostEntries !== "function") {
         return { ok: false, code: "MODULE_MISSING", error: "Thiếu mô-đun enterprise-report.js." };
       }
+      const freshPms = await pullLatestFromCloud({type:"manual_refresh",force:true});
+      if (!freshPms?.ok || financeLoadState !== "loaded") return freshPms?.ok ? {ok:false,error:"Chưa tải được sổ tài chính."} : freshPms;
       // Pull freshest state before computing auto-post batch
       const latestGlRes = await callGlRpc("pms_gl_get_state", {}, "GL_READ");
       if (!latestGlRes || !latestGlRes.ok) return latestGlRes;
@@ -2542,9 +2544,15 @@
         { bookings: stateCache.bookings, financeState: stateCache.financeState, operatingCosts: stateCache.operatingCosts },
         gl,
         p,
-        { entityId, actorName: (session && session.staffName) || "Quản lý", sourceMode: payload.sourceMode || gl.sourceMode }
+        {
+          entityId,
+          actorName: (session && session.staffName) || "Quản lý",
+          sourceMode: payload.sourceMode || gl.sourceMode,
+          ...(payload.asOfDate ? { asOfDate: payload.asOfDate } : {})
+        }
       );
-      const rpcRes = await callGlRpc("pms_gl_sync_pms", {
+      const rpcRes = await callGlRpc("pms_gl_sync_checked", {
+        p_expected_store:freshPms.storeVersion,p_expected_gl:latestGlRes.enterpriseGlState,
         p_payload: {
           entityId,
           periodLabel: p.label,
@@ -2607,6 +2615,7 @@
       checkAppVersion,
       getVersionInfo,
       getAuthState,
+      dayClose: (day,expected=null) => callRpc("pms_day_close",{p_day:day,p_expected:expected}),
       getEnterpriseGlState: () => (can("reports:management") ? stateCache.enterpriseGlState : null),
       refreshEnterpriseGlState: () => callGlRpc("pms_gl_get_state", {}, "GL_READ"),
       saveEnterpriseGlSetup: (payload = {}) => callGlRpc("pms_gl_save_setup", { p_payload: payload }, "GL_SETUP_SAVE"),
